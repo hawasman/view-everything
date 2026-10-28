@@ -68,7 +68,7 @@ fn parse_time(text: &str) -> Option<i64> {
     let secs: i64 = secs.parse().ok()?;
     let digits: String = frac.chars().take(9).collect();
     let nanos: i64 = if digits.is_empty() { 0 } else { digits.parse::<i64>().ok()? * 10i64.pow(9 - digits.len() as u32) };
-    Some(secs.checked_mul(1_000_000_000)?.checked_add(if secs < 0 { -nanos } else { nanos })?)
+    secs.checked_mul(1_000_000_000)?.checked_add(if secs < 0 { -nanos } else { nanos })
 }
 
 /// `'...'` for a POSIX shell, which is what the server runs the command line through.

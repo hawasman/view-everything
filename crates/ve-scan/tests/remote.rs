@@ -56,7 +56,7 @@ fn captured_find_output_is_indexed_with_hard_links_counted_once() {
     assert!(index.is_hardlinked(big));
     let totals = Filter::compute(&index, None).totals(&index, root);
     assert_eq!(totals.logical, 5 + 5 + 1 + 10_000);
-    assert_eq!(totals.on_disk, 4096 + 0 + 4096 + 24 * 512);
+    assert_eq!(totals.on_disk, 4096 + 4096 + 24 * 512);
     assert_eq!(index.path(big).to_string_lossy(), "ssh:me@box:/data/docs/big.bin");
 }
 

@@ -489,7 +489,7 @@ impl SettingsPage {
                     h_flex()
                         .gap(px(8.))
                         .items_center()
-                        .child(div().flex_1().text_xs().text_color(muted).child("Keys and ssh-agent only; no passwords are stored."))
+                        .child(div().flex_1().text_xs().text_color(muted).child("Keys and ssh-agent only"))
                         .child(pill("remote-cancel", "Cancel").build(cx, |_, window, cx| window.close_dialog(cx)))
                         .child(pill("remote-add", "Add Remote").primary().build(cx, add)),
                 )

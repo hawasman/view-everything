@@ -614,6 +614,26 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
+    fn a_remote_is_searchable_and_its_manual_interval_never_goes_stale() {
+        let mut index = index_with_volumes(&[Some(100_000 - 60)]);
+        let remote = Remote::new("me@box", "/srv").unwrap();
+        let id = index.add_remote(&remote);
+        let root = index.volume(id).unwrap().root;
+        let file = ve_core::EntryMeta { logical: 10, on_disk: 4096, ..Default::default() };
+        let hit = index.insert(root, "quarterly-report.pdf", file);
+        let categories = CategoryMap::builtin();
+        let query = Query::parse("report", &QueryContext::new(categories.clone(), Local::now())).unwrap();
+        let view = View::compute(&index, "report", Some(&query), &categories);
+        assert_eq!(view.flat, vec![hit]);
+        assert_eq!(index.path(hit).to_string_lossy(), "ssh:me@box:/srv/quarterly-report.pdf");
+        // Never synced, Manual: launch Catch-up leaves it alone; with an interval it is due.
+        let manual: Intervals = [(PathBuf::from(remote.identity()), ve_core::MANUAL_REFRESH)].into_iter().collect();
+        assert!(!stale_volumes(&index, &manual, 100_000).contains(&id));
+        let hourly: Intervals = [(PathBuf::from(remote.identity()), Duration::from_secs(3600))].into_iter().collect();
+        assert!(stale_volumes(&index, &hourly, 100_000).contains(&id));
+    }
+
+    #[::core::prelude::v1::test]
     fn the_overall_last_synced_reads_as_age_of_the_oldest() {
         let now = 1_000_000;
         assert_eq!(last_synced_label(None, now), None);
