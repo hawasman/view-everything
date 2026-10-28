@@ -283,6 +283,10 @@ fn reconcile_volumes(shared: &Shared, wanted: &[VolumeInfo]) -> Vec<VolumeId> {
 }
 
 fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
+    // Measuring (examples/gen_index.rs): the synthetic Index's Volume does not exist on disk.
+    if std::env::var_os("VE_BENCH_MOUNT").is_some() {
+        return;
+    }
     let (mounts, catching_up) = {
         let index = shared.index.read();
         let mounts: Vec<(VolumeId, PathBuf)> = volumes
