@@ -3,7 +3,7 @@
 //! both the first scan and every later Catch-up.
 
 use crate::Progress;
-use parking_lot::RwLock;
+use crate::SharedIndex;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, Metadata};
@@ -25,7 +25,7 @@ pub(crate) fn root_meta(mount: &Path) -> io::Result<EntryMeta> {
     Ok(entry_meta(&metadata, || mount.to_path_buf()))
 }
 
-pub(crate) fn sync(index: &RwLock<Index>, volume: VolumeId, progress: &Progress) -> io::Result<()> {
+pub(crate) fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::Result<()> {
     let (root, mount) = {
         let index = index.read();
         let volume = index
@@ -55,7 +55,7 @@ pub(crate) fn sync(index: &RwLock<Index>, volume: VolumeId, progress: &Progress)
 }
 
 struct Walk<'a> {
-    index: &'a RwLock<Index>,
+    index: &'a SharedIndex,
     progress: &'a Progress,
     /// Entries on another device belong to another Volume and are skipped.
     device: u64,

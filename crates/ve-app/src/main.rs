@@ -3,8 +3,10 @@
 
 mod app;
 mod engine;
+mod filters;
 mod format;
 mod settings;
+mod theme;
 mod trash;
 mod treemap;
 mod view;
@@ -49,6 +51,7 @@ fn main() -> eframe::Result {
         "view-everything",
         options,
         Box::new(move |cc| {
+            theme::apply(&cc.egui_ctx, settings.theme.into());
             Ok(Box::new(app::App::new(
                 &cc.egui_ctx,
                 settings,

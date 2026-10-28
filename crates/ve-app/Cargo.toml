@@ -14,7 +14,9 @@ chrono = "0.4.45"
 dirs = "7.0.0"
 eframe = "0.37.0"
 egui = "0.37"
-egui_extras = "0.37.0"
+egui_extras = { version = "0.37.0", features = ["datepicker"] }
+# The date type egui_extras' date picker edits.
+jiff = "0.2.35"
 opener = { version = "0.9.0", features = ["reveal"] }
 parking_lot = "0.13.0"
 rayon = "1.12.0"

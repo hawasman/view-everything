@@ -18,6 +18,28 @@ pub struct Settings {
     /// How often a walked Volume is re-walked while the app runs, in minutes.
     #[serde(default = "default_refresh_minutes")]
     pub refresh_minutes: u64,
+    /// Light, Dark, or following the system.
+    #[serde(default)]
+    pub theme: ThemeChoice,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeChoice {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl From<ThemeChoice> for egui::ThemePreference {
+    fn from(choice: ThemeChoice) -> Self {
+        match choice {
+            ThemeChoice::System => egui::ThemePreference::System,
+            ThemeChoice::Light => egui::ThemePreference::Light,
+            ThemeChoice::Dark => egui::ThemePreference::Dark,
+        }
+    }
 }
 
 fn default_refresh_minutes() -> u64 {
@@ -30,6 +52,7 @@ impl Default for Settings {
             include: Vec::new(),
             exclude: Vec::new(),
             refresh_minutes: default_refresh_minutes(),
+            theme: ThemeChoice::System,
         }
     }
 }

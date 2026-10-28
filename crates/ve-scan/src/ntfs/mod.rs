@@ -9,12 +9,12 @@ mod sync;
 pub(crate) use sync::sync_windows;
 
 use crate::Progress;
+use crate::SharedIndex;
 use mft::{ROOT_RECORD, Record};
-use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Seek};
 use std::sync::atomic::Ordering;
-use ve_core::{EntryId, EntryMeta, Index, VolumeId};
+use ve_core::{EntryId, EntryMeta, VolumeId};
 
 /// Entries inserted per write-lock acquisition, so readers get in between.
 const BATCH: usize = 4096;
@@ -34,7 +34,7 @@ impl From<&Record> for EntryMeta {
 
 /// Replaces the contents of `volume` with the tree found in the MFT read from `reader`.
 pub fn load<R: Read + Seek>(
-    index: &RwLock<Index>,
+    index: &SharedIndex,
     volume: VolumeId,
     mut reader: R,
     progress: &Progress,

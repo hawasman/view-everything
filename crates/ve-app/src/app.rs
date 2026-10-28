@@ -1,12 +1,14 @@
 //! The window: Query bar, folder tree / flat list, Category breakdown, Treemap and status bar.
 
 use crate::engine::{Engine, Phase};
+use crate::filters::Filters;
 use crate::format;
-use crate::settings::Settings;
+use crate::settings::{Settings, ThemeChoice};
+use crate::theme;
 use crate::trash;
 use crate::treemap::{self, Tile};
 use crate::view::View;
-use egui::{Align, Color32, Id, Key, Layout, RichText, Sense, Ui};
+use egui::{Align, Id, Key, Layout, RichText, Sense, Ui};
 use egui_extras::{Column, TableBuilder};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -16,9 +18,15 @@ use std::time::{Duration, Instant};
 use ve_core::{Category, CategoryMap, EntryId, Index};
 use ve_scan::VolumeInfo;
 
-const ROW_HEIGHT: f32 = 20.0;
+const ROW_HEIGHT: f32 = 22.0;
+const HEADER_HEIGHT: f32 = 32.0;
 const INDENT: f32 = 16.0;
 const NOTICE_TIME: Duration = Duration::from_secs(8);
+/// Widths at which every column of the tree and of the flat list is shown at its initial size
+/// (the Name / Folder minimum plus the fixed columns and the gaps between them). Narrower, the
+/// table scrolls sideways.
+const TREE_MIN_WIDTH: f32 = 240.0 + 170.0 + 90.0 + 60.0 + 90.0 + 130.0 + 5.0 * 8.0;
+const FLAT_MIN_WIDTH: f32 = 240.0 + 160.0 + 170.0 + 90.0 + 60.0 + 90.0 + 130.0 + 6.0 * 8.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -115,12 +123,16 @@ pub struct App {
     rows_key: Option<(u64, u64, Sort)>,
     scroll_to: Option<EntryId>,
     zoom: Option<EntryId>,
+    /// The newest finished Treemap tiles; may trail the current View by one layout.
     tiles: Vec<Tile>,
-    /// The View id, zoom root and pixel size the Treemap tiles were laid out for.
-    tiles_key: Option<(u64, EntryId, [u32; 2])>,
+    layouter: treemap::Layouter,
     treemap_menu: Option<EntryId>,
     open_categories: HashSet<Category>,
     dialog: Option<Dialog>,
+    /// The Filters window's form while it is open.
+    filters: Option<Filters>,
+    /// Fields other than Name the current Query sets, shown on the Filters button.
+    filter_count: usize,
     notice: Option<(String, Instant)>,
     trash_size: Option<u64>,
     jobs: Receiver<Job>,
@@ -142,6 +154,8 @@ impl App {
             .collect();
         let refresh = Duration::from_secs(settings.refresh_minutes.max(1) * 60);
         let engine = Engine::start(ctx.clone(), indexed, refresh, categories.clone());
+        let layouter =
+            treemap::Layouter::start(ctx.clone(), engine.shared.clone(), categories.clone());
         let (job_sender, jobs) = mpsc::channel();
         let app = App {
             engine,
@@ -163,10 +177,12 @@ impl App {
             scroll_to: None,
             zoom: None,
             tiles: Vec::new(),
-            tiles_key: None,
+            layouter,
             treemap_menu: None,
             open_categories: HashSet::new(),
             dialog: None,
+            filters: None,
+            filter_count: 0,
             notice: startup_problems
                 .into_iter()
                 .reduce(|a, b| format!("{a}; {b}"))
@@ -218,15 +234,26 @@ impl eframe::App for App {
                     None => {
                         ui.centered_and_justified(|ui| ui.spinner());
                     }
-                    Some(view) => match self.tab {
-                        Tab::Tree => self.tree_table(ui, &index, view, &mut actions),
-                        Tab::Flat => self.flat_table(ui, &index, view, &mut actions),
-                    },
+                    // Too narrow for every column: the table scrolls sideways instead of clipping.
+                    Some(view) => {
+                        egui::ScrollArea::horizontal().id_salt("table-x").show(ui, |ui| {
+                            let min = match self.tab {
+                                Tab::Tree => TREE_MIN_WIDTH,
+                                Tab::Flat => FLAT_MIN_WIDTH,
+                            };
+                            ui.set_width(ui.available_width().max(min));
+                            match self.tab {
+                                Tab::Tree => self.tree_table(ui, &index, view, &mut actions),
+                                Tab::Flat => self.flat_table(ui, &index, view, &mut actions),
+                            }
+                        });
+                    }
                 }
             });
             self.keyboard(ui, &mut actions);
             self.apply(&ctx, &index, actions);
         }
+        self.filters_window(&ctx);
         self.dialogs(&ctx);
         if self.engine.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(250));
@@ -329,13 +356,43 @@ impl App {
                 if ui.button("Volumes…").clicked() {
                     self.open_volumes_dialog();
                 }
-                ui.label("?").on_hover_text(QUERY_HELP);
-                let edit = egui::TextEdit::singleline(&mut self.query)
-                    .hint_text("Search — e.g.  node_modules   ext:mp4;mkv   size:>1gb   dm:2025   type:video   !*.tmp")
-                    .desired_width(f32::INFINITY);
-                if ui.add(edit).changed() {
-                    self.engine.set_query(self.query.clone());
+                let label = match self.filter_count {
+                    0 => "Filters…".to_owned(),
+                    n => format!("Filters · {n}"),
+                };
+                if ui
+                    .add(egui::Button::new(label).selected(self.filters.is_some()))
+                    .on_hover_text("Build the Query from fields")
+                    .clicked()
+                {
+                    self.filters = match self.filters {
+                        Some(_) => None,
+                        None => Some(Filters::read(&self.query)),
+                    };
                 }
+                ui.label("?").on_hover_text(QUERY_HELP);
+                // The theme switch and the clear button are laid out first, from the right, so
+                // the search field takes the remaining width.
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    self.theme_switch(ui);
+                    if !self.query.is_empty()
+                        && ui
+                            .add(egui::Button::new("✕").frame(false))
+                            .on_hover_text("Clear the Query and every filter")
+                            .clicked()
+                    {
+                        self.query.clear();
+                        self.query_edited();
+                    }
+                    // A fixed id keeps focus while the clear button comes and goes beside it.
+                    let edit = egui::TextEdit::singleline(&mut self.query)
+                        .id_salt("query")
+                        .hint_text("Search — e.g.  node_modules   ext:mp4;mkv   size:>1gb   dm:2025   type:video   !*.tmp")
+                        .desired_width(f32::INFINITY);
+                    if ui.add(edit).changed() {
+                        self.query_edited();
+                    }
+                });
             });
             if let Some(error) = self.engine.shared.query_error.lock().clone() {
                 ui.colored_label(ui.visuals().error_fg_color, error);
@@ -344,69 +401,137 @@ impl App {
         });
     }
 
+    /// After the Query text changed anywhere but the Filters window: recount it, rebuild an
+    /// open form from it, and send it to the engine.
+    fn query_edited(&mut self) {
+        let form = Filters::read(&self.query);
+        self.filter_count = form.active();
+        if self.filters.is_some() {
+            self.filters = Some(form);
+        }
+        self.engine.set_query(self.query.clone());
+    }
+
+    /// The Filters window: edits apply as they are made, and the window stays open beside the
+    /// results.
+    fn filters_window(&mut self, ctx: &egui::Context) {
+        let Some(form) = &mut self.filters else {
+            return;
+        };
+        let mut open = true;
+        let mut changed = false;
+        egui::Window::new("Filters")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            // Below the Query bar on the right, so the search text stays in view.
+            .pivot(egui::Align2::RIGHT_TOP)
+            .default_pos(ctx.content_rect().right_top() + egui::vec2(-16.0, 56.0))
+            .show(ctx, |ui| {
+                changed = form.ui(ui);
+                ui.add_space(12.0);
+                if ui.button("Clear").on_hover_text("Untick and empty every field").clicked() {
+                    *form = Filters::read("");
+                    changed = true;
+                }
+            });
+        if changed {
+            self.query = form.write();
+            self.filter_count = form.active();
+            self.engine.set_query(self.query.clone());
+        }
+        if !open {
+            self.filters = None;
+        }
+    }
+
+    /// A sun or moon button for the mode on screen; its menu picks Light, Dark or System.
+    fn theme_switch(&mut self, ui: &mut Ui) {
+        let icon = if ui.visuals().dark_mode { "🌙" } else { "☀" };
+        let menu = egui::containers::menu::MenuButton::new(icon);
+        let response = menu.ui(ui, |ui| {
+            for (choice, label) in [
+                (ThemeChoice::Light, "☀  Light"),
+                (ThemeChoice::Dark, "🌙  Dark"),
+                (ThemeChoice::System, "💻  System"),
+            ] {
+                if ui.selectable_label(self.settings.theme == choice, label).clicked() {
+                    self.settings.theme = choice;
+                    ui.ctx().set_theme(choice);
+                    if let Err(e) = self.settings.save() {
+                        self.notify(format!("Could not save settings: {e}"));
+                    }
+                }
+            }
+        });
+        response.0.on_hover_text("Light or dark");
+    }
+
     fn status_bar(&mut self, ui: &mut Ui, index: &Index, view: Option<&View>) {
         egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let status = self.engine.shared.status.lock().clone();
-                let progress = &self.engine.shared.progress;
-                match &status.phase {
-                    Phase::LoadingIndex => {
-                        ui.spinner();
-                        ui.label("Loading the saved Index…");
+            // The Trash controls are laid out first so the status text truncates before them.
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if trash::CAN_EMPTY
+                    && ui.add_enabled(self.trash_size != Some(0), egui::Button::new("Empty Trash")).clicked()
+                {
+                    self.dialog = Some(Dialog::ConfirmEmptyTrash { size: self.trash_size });
+                }
+                let label = match self.trash_size {
+                    Some(size) => format!("{} in Trash", format::size(size)),
+                    None => "Trash".to_owned(),
+                };
+                let link = ui.link(label).on_hover_text(
+                    "Trashed files still take up space until the Trash is emptied. Click to open the Trash.",
+                );
+                if link.clicked()
+                    && let Err(e) = trash::open_trash()
+                {
+                    self.notify(format!("Could not open the Trash: {e}"));
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    let status = self.engine.shared.status.lock().clone();
+                    let progress = &self.engine.shared.progress;
+                    match &status.phase {
+                        Phase::LoadingIndex => {
+                            ui.add(egui::Spinner::new().size(14.0));
+                            ui.label("Loading the saved Index…");
+                        }
+                        Phase::Syncing { volumes, catching_up, started } => {
+                            ui.add(egui::Spinner::new().size(14.0));
+                            let what = if *catching_up { "Catching up" } else { "Scanning" };
+                            let names: Vec<String> = volumes.iter().map(|v| v.display().to_string()).collect();
+                            ui.label(format!(
+                                "{what} {} — {} entries read, {}s",
+                                names.join(", "),
+                                format::count(progress.entries()),
+                                started.elapsed().as_secs()
+                            ));
+                        }
+                        Phase::Idle => {
+                            ui.label(format!("{} entries indexed", format::count(index.live_count() as u64)));
+                        }
                     }
-                    Phase::Syncing { volumes, catching_up, started } => {
-                        ui.spinner();
-                        let what = if *catching_up { "Catching up" } else { "Scanning" };
-                        let names: Vec<String> = volumes.iter().map(|v| v.display().to_string()).collect();
+                    if progress.unreadable() > 0 {
+                        ui.label(format!("· {} folders unreadable", format::count(progress.unreadable())))
+                            .on_hover_text("Folders the current user may not open; their contents are not counted.");
+                    }
+                    if let Some(view) = view.filter(|v| !v.query.trim().is_empty()) {
                         ui.label(format!(
-                            "{what} {} — {} entries read, {}s",
-                            names.join(", "),
-                            format::count(progress.entries()),
-                            started.elapsed().as_secs()
+                            "· {} matched in {} ms",
+                            format::count(view.flat.len() as u64),
+                            view.took.as_millis()
                         ));
                     }
-                    Phase::Idle => {
-                        ui.label(format!("{} entries indexed", format::count(index.live_count() as u64)));
+                    if let Some(problem) = status.problem {
+                        ui.colored_label(ui.visuals().warn_fg_color, problem);
                     }
-                }
-                if progress.unreadable() > 0 {
-                    ui.label(format!("· {} folders unreadable", format::count(progress.unreadable())))
-                        .on_hover_text("Folders the current user may not open; their contents are not counted.");
-                }
-                if let Some(view) = view.filter(|v| !v.query.trim().is_empty()) {
-                    ui.label(format!(
-                        "· {} matched in {} ms",
-                        format::count(view.flat.len() as u64),
-                        view.took.as_millis()
-                    ));
-                }
-                if let Some(problem) = status.problem {
-                    ui.colored_label(ui.visuals().warn_fg_color, problem);
-                }
-                if let Some((text, at)) = &self.notice {
-                    if at.elapsed() < NOTICE_TIME {
-                        ui.label(RichText::new(text).strong());
-                    } else {
-                        self.notice = None;
-                    }
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if trash::CAN_EMPTY
-                        && ui.add_enabled(self.trash_size != Some(0), egui::Button::new("Empty Trash")).clicked()
-                    {
-                        self.dialog = Some(Dialog::ConfirmEmptyTrash { size: self.trash_size });
-                    }
-                    let label = match self.trash_size {
-                        Some(size) => format!("{} in Trash", format::size(size)),
-                        None => "Trash".to_owned(),
-                    };
-                    let link = ui.link(label).on_hover_text(
-                        "Trashed files still take up space until the Trash is emptied. Click to open the Trash.",
-                    );
-                    if link.clicked()
-                        && let Err(e) = trash::open_trash()
-                    {
-                        self.notify(format!("Could not open the Trash: {e}"));
+                    if let Some((text, at)) = &self.notice {
+                        if at.elapsed() < NOTICE_TIME {
+                            ui.label(RichText::new(text).strong());
+                        } else {
+                            self.notice = None;
+                        }
                     }
                 });
             });
@@ -429,7 +554,9 @@ impl App {
                     for row in &view.categories {
                         let open = self.open_categories.contains(&row.category);
                         ui.horizontal(|ui| {
-                            if ui.small_button(if open { "▾" } else { "▸" }).clicked() {
+                            let chevron =
+                                RichText::new(if open { "▾" } else { "▸" }).color(theme::palette(ui).muted);
+                            if ui.add(egui::Button::new(chevron).frame(false).small()).clicked() {
                                 if open {
                                     self.open_categories.remove(&row.category);
                                 } else {
@@ -454,7 +581,7 @@ impl App {
                                 )));
                             }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(format::size(row.totals.on_disk))
+                                ui.monospace(format::size(row.totals.on_disk))
                                     .on_hover_text(format!(
                                         "{} files",
                                         format::count(row.totals.files)
@@ -471,7 +598,7 @@ impl App {
                                         actions.push(Action::AddToQuery(format!("ext:{ext}")));
                                     }
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        ui.label(format::size(totals.on_disk));
+                                        ui.monospace(format::size(totals.on_disk));
                                     });
                                 });
                             }
@@ -490,11 +617,13 @@ impl App {
     ) {
         egui::Panel::bottom("treemap")
             .resizable(true)
-            .default_size(300.0)
+            .default_size(360.0)
             .min_size(120.0)
             .show(ui, |ui| {
                 let Some(root) = self.treemap_root(index, view) else {
                     ui.label("No Volume indexed yet.");
+                    // Claim the whole panel, or it remembers this one line as its height.
+                    ui.allocate_space(ui.available_size());
                     return;
                 };
                 ui.horizontal(|ui| {
@@ -519,12 +648,11 @@ impl App {
                 });
                 let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click());
                 let rect = response.rect;
-                let key = (view.id, root, [rect.width() as u32, rect.height() as u32]);
-                if self.tiles_key != Some(key) {
-                    self.tiles = treemap::layout(index, &view.filter, &self.categories, root, rect);
-                    self.tiles_key = Some(key);
+                self.layouter.request(view, root, rect);
+                if let Some(tiles) = self.layouter.finished() {
+                    self.tiles = tiles;
                 }
-                treemap::paint(&painter, &self.tiles, self.selection.first().copied());
+                treemap::paint(&painter, theme::palette(ui), &self.tiles, self.selection.first().copied());
 
                 let hovered = response
                     .hover_pos()
@@ -642,21 +770,24 @@ impl App {
         }
     }
 
-    fn sort_header(&mut self, ui: &mut Ui, key: SortKey, label: &str) {
-        let marker = match self.sort {
-            Sort {
-                key: k,
-                descending: true,
-            } if k == key => " ⏷",
-            Sort {
-                key: k,
-                descending: false,
-            } if k == key => " ⏶",
-            _ => "",
+    fn sort_header(&mut self, ui: &mut Ui, key: SortKey, label: &str, numeric: bool) {
+        let active = self.sort.key == key;
+        let marker = match (active, self.sort.descending) {
+            (true, true) => " ⏷",
+            (true, false) => " ⏶",
+            (false, _) => "",
         };
-        if ui
-            .add(egui::Button::new(RichText::new(format!("{label}{marker}")).strong()).frame(false))
-            .clicked()
+        let p = theme::palette(ui);
+        let color = if active { p.text } else { p.muted };
+        let button = egui::Button::new(RichText::new(format!("{label}{marker}")).small().color(color))
+            .frame(false)
+            .small();
+        let response = if numeric {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.add(button)).inner
+        } else {
+            ui.add(button)
+        };
+        if response.clicked()
         {
             self.sort = if self.sort.key == key {
                 Sort {
@@ -687,7 +818,7 @@ impl App {
             .and_then(|id| self.rows.iter().position(|r| r.id == id));
         let mut table = TableBuilder::new(ui)
             .id_salt("tree")
-            .striped(true)
+            .striped(false)
             .sense(Sense::click())
             .cell_layout(Layout::left_to_right(Align::Center))
             .column(Column::remainder().at_least(240.0).clip(true))
@@ -701,15 +832,13 @@ impl App {
         }
         let rows = std::mem::take(&mut self.rows);
         table
-            .header(ROW_HEIGHT + 2.0, |mut header| {
-                header.col(|ui| self.sort_header(ui, SortKey::Name, "Name"));
-                header.col(|ui| self.sort_header(ui, SortKey::OnDisk, "On disk"));
-                header.col(|ui| self.sort_header(ui, SortKey::Logical, "Size"));
-                header.col(|ui| {
-                    ui.strong("%");
-                });
-                header.col(|ui| self.sort_header(ui, SortKey::Files, "Files"));
-                header.col(|ui| self.sort_header(ui, SortKey::Modified, "Modified"));
+            .header(HEADER_HEIGHT, |mut header| {
+                header.col(|ui| self.sort_header(ui, SortKey::Name, "Name", false));
+                header.col(|ui| self.sort_header(ui, SortKey::OnDisk, "On disk", true));
+                header.col(|ui| self.sort_header(ui, SortKey::Logical, "Size", true));
+                header.col(|ui| column_header(ui, "%", true));
+                header.col(|ui| self.sort_header(ui, SortKey::Files, "Files", true));
+                header.col(|ui| self.sort_header(ui, SortKey::Modified, "Modified", true));
             })
             .body(|body| {
                 body.rows(ROW_HEIGHT, rows.len(), |mut table_row| {
@@ -726,7 +855,12 @@ impl App {
                             index.children(id).iter().any(|&c| view.filter.is_shown(c));
                         if has_children {
                             let open = self.expanded.contains(&id);
-                            if ui.small_button(if open { "▾" } else { "▸" }).clicked() {
+                            let chevron =
+                                RichText::new(if open { "▾" } else { "▸" }).color(theme::palette(ui).muted);
+                            if ui
+                                .add_sized([18.0, ROW_HEIGHT], egui::Button::new(chevron).frame(false).small())
+                                .clicked()
+                            {
                                 actions.push(Action::Toggle(id));
                             }
                         } else {
@@ -734,26 +868,19 @@ impl App {
                         }
                         let icon = if index.is_dir(id) { "🗀 " } else { "  " };
                         let mut name = RichText::new(format!("{icon}{}", index.name(id)));
-                        if view.filter.is_matched(id) && !view.query.trim().is_empty() {
-                            name = name.strong();
+                        // With a Query, folders shown only for what they contain stay grey.
+                        if !view.query.trim().is_empty() && !view.filter.is_matched(id) {
+                            name = name.color(theme::palette(ui).muted);
                         }
                         ui.add(egui::Label::new(name).truncate().selectable(false));
                     });
                     table_row.col(|ui| size_bar(ui, totals.on_disk, share));
+                    table_row.col(|ui| figure(ui, format::size(totals.logical)));
+                    table_row.col(|ui| figure(ui, format!("{:.1}%", share * 100.0)));
                     table_row.col(|ui| {
-                        ui.label(format::size(totals.logical));
+                        figure(ui, if index.is_dir(id) { format::count(totals.files) } else { String::new() })
                     });
-                    table_row.col(|ui| {
-                        ui.label(format!("{:.1}%", share * 100.0));
-                    });
-                    table_row.col(|ui| {
-                        if index.is_dir(id) {
-                            ui.label(format::count(totals.files));
-                        }
-                    });
-                    table_row.col(|ui| {
-                        ui.label(format::time(index.modified(id)));
-                    });
+                    table_row.col(|ui| figure(ui, format::time(index.modified(id))));
                     let response = table_row.response();
                     self.row_interaction(&response, index, id, true, actions);
                 });
@@ -770,7 +897,7 @@ impl App {
     ) {
         TableBuilder::new(ui)
             .id_salt("flat")
-            .striped(true)
+            .striped(false)
             .sense(Sense::click())
             .cell_layout(Layout::left_to_right(Align::Center))
             .column(Column::initial(240.0).at_least(120.0).clip(true))
@@ -780,13 +907,17 @@ impl App {
             .column(Column::initial(60.0).at_least(40.0))
             .column(Column::initial(90.0).at_least(50.0))
             .column(Column::initial(130.0).at_least(80.0))
-            .header(ROW_HEIGHT + 2.0, |mut header| {
-                for title in [
-                    "Name", "Folder", "On disk", "Size", "%", "Files", "Modified",
+            .header(HEADER_HEIGHT, |mut header| {
+                for (title, numeric) in [
+                    ("Name", false),
+                    ("Folder", false),
+                    ("On disk", true),
+                    ("Size", true),
+                    ("%", true),
+                    ("Files", true),
+                    ("Modified", true),
                 ] {
-                    header.col(|ui| {
-                        ui.strong(title);
-                    });
+                    header.col(|ui| column_header(ui, title, numeric));
                 }
             })
             .body(|body| {
@@ -818,20 +949,12 @@ impl App {
                         );
                     });
                     table_row.col(|ui| size_bar(ui, totals.on_disk, share));
+                    table_row.col(|ui| figure(ui, format::size(totals.logical)));
+                    table_row.col(|ui| figure(ui, format!("{:.1}%", share * 100.0)));
                     table_row.col(|ui| {
-                        ui.label(format::size(totals.logical));
+                        figure(ui, if index.is_dir(id) { format::count(totals.files) } else { String::new() })
                     });
-                    table_row.col(|ui| {
-                        ui.label(format!("{:.1}%", share * 100.0));
-                    });
-                    table_row.col(|ui| {
-                        if index.is_dir(id) {
-                            ui.label(format::count(totals.files));
-                        }
-                    });
-                    table_row.col(|ui| {
-                        ui.label(format::time(index.modified(id)));
-                    });
+                    table_row.col(|ui| figure(ui, format::time(index.modified(id))));
                     let response = table_row.response();
                     self.row_interaction(&response, index, id, false, actions);
                 });
@@ -998,7 +1121,7 @@ impl App {
                             self.query.push(' ');
                         }
                         self.query.push_str(&term);
-                        self.engine.set_query(self.query.clone());
+                        self.query_edited();
                     }
                 }
             }
@@ -1058,7 +1181,8 @@ impl App {
                     ui.label(format!("This permanently deletes {amount} in the Trash. It cannot be undone."));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        let danger = egui::Button::new(RichText::new("Empty Trash").color(Color32::WHITE))
+                        let label = theme::palette(ui).ground;
+                        let danger = egui::Button::new(RichText::new("Empty Trash").color(label))
                             .fill(ui.visuals().error_fg_color);
                         if ui.add(danger).clicked() {
                             confirmed = Some(Confirmed::EmptyTrash);
@@ -1093,7 +1217,8 @@ impl App {
                         });
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        let danger = egui::Button::new(RichText::new("Delete as administrator").color(Color32::WHITE))
+                        let label = theme::palette(ui).ground;
+                        let danger = egui::Button::new(RichText::new("Delete as administrator").color(label))
                             .fill(ui.visuals().error_fg_color);
                         if ui.add(danger).clicked() {
                             confirmed = Some(Confirmed::DeleteAsAdmin(paths));
@@ -1254,24 +1379,53 @@ fn folder_of(index: &Index, id: EntryId) -> Option<EntryId> {
     }
 }
 
-/// An On-disk Size cell: a bar showing the share of the parent folder, with the size on top.
+/// A figure in its column: Geist Mono, right-aligned; a missing value is a grey dash.
+fn figure(ui: &mut Ui, text: String) {
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        if text.is_empty() {
+            ui.label(RichText::new("—").color(theme::palette(ui).muted));
+        } else {
+            ui.monospace(text);
+        }
+    });
+}
+
+/// A column header that does not sort: 12px grey sentence case, flush with its figures.
+fn column_header(ui: &mut Ui, label: &str, numeric: bool) {
+    let text = RichText::new(label).small().color(theme::palette(ui).muted);
+    if numeric {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(text));
+    } else {
+        ui.label(text);
+    }
+}
+
+/// An On-disk Size cell: the size, right-aligned, after a bar showing the share of the parent
+/// folder in the one data hue.
 fn size_bar(ui: &mut Ui, bytes: u64, share: f64) {
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ROW_HEIGHT - 4.0),
+        egui::vec2(ui.available_width(), ROW_HEIGHT),
         Sense::hover(),
     );
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
-    let mut bar = rect;
-    bar.set_width(rect.width() * share.clamp(0.0, 1.0) as f32);
-    painter.rect_filled(bar, 2.0, ui.visuals().selection.bg_fill.gamma_multiply(0.8));
-    painter.text(
-        rect.left_center() + egui::vec2(4.0, 0.0),
-        egui::Align2::LEFT_CENTER,
+    let text = painter.text(
+        rect.right_center(),
+        egui::Align2::RIGHT_CENTER,
         format::size(bytes),
-        egui::TextStyle::Body.resolve(ui.style()),
-        ui.visuals().strong_text_color(),
+        egui::TextStyle::Monospace.resolve(ui.style()),
+        ui.visuals().text_color(),
     );
+    let track = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.center().y - 3.0),
+        egui::pos2(text.left() - 10.0, rect.center().y + 3.0),
+    );
+    if track.width() > 8.0 {
+        let p = theme::palette(ui);
+        painter.rect_filled(track, 3.0, p.raised);
+        let mut bar = track;
+        bar.set_width(track.width() * share.clamp(0.0, 1.0) as f32);
+        painter.rect_filled(bar, 3.0, p.data);
+    }
 }
 
 const QUERY_HELP: &str = "\

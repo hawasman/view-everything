@@ -1,7 +1,13 @@
 //! The Treemap panel: Filtered Sizes as nested rectangles coloured by Category.
 
+use crate::engine::Shared;
+use crate::theme;
+use crate::view::View;
 use egui::{Color32, Pos2, Rect, Stroke, StrokeKind, Vec2};
 use std::collections::BinaryHeap;
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 use ve_core::{Category, CategoryMap, EntryId, Filter, Index};
 
 /// Stop laying out once this many rectangles exist; deeper detail is invisible anyway.
@@ -13,6 +19,8 @@ pub struct Tile {
     pub rect: Rect,
     pub id: EntryId,
     pub is_dir: bool,
+    /// A file's Category colour; folders take the palette's folder colour when painted, so
+    /// laid-out tiles survive a switch between light and dark.
     pub color: Color32,
 }
 
@@ -29,11 +37,75 @@ pub fn category_color(category: Category) -> Color32 {
     }
 }
 
-const FOLDER_BLOCK: Color32 = Color32::from_rgb(0x70, 0x70, 0x78);
+/// What a set of tiles is laid out for: the View id, the zoom root and the pixel rectangle.
+type LayoutKey = (u64, EntryId, [i32; 4]);
+
+struct Request {
+    view: Arc<View>,
+    root: EntryId,
+    rect: Rect,
+}
+
+/// Lays out tiles on a background thread, so a new View or a zoom never stalls a frame. Only
+/// the newest request is served; the GUI keeps painting the previous tiles until it arrives.
+pub struct Layouter {
+    requests: Sender<Request>,
+    results: Receiver<Vec<Tile>>,
+    requested: Option<LayoutKey>,
+}
+
+impl Layouter {
+    pub fn start(ctx: egui::Context, shared: Arc<Shared>, categories: CategoryMap) -> Layouter {
+        let (requests, inbox) = mpsc::channel::<Request>();
+        let (outbox, results) = mpsc::channel();
+        thread::Builder::new()
+            .name("ve-treemap".into())
+            .spawn(move || {
+                while let Ok(first) = inbox.recv() {
+                    let request = inbox.try_iter().last().unwrap_or(first);
+                    let tiles = {
+                        let index = shared.index.read();
+                        let filter = &request.view.filter;
+                        layout(&index, filter, &categories, request.root, request.rect)
+                    };
+                    if outbox.send(tiles).is_err() {
+                        return;
+                    }
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawn treemap thread");
+        Layouter {
+            requests,
+            results,
+            requested: None,
+        }
+    }
+
+    /// Asks for tiles of `root` in `rect` under `view`, unless already asked.
+    pub fn request(&mut self, view: &Arc<View>, root: EntryId, rect: Rect) {
+        let edges = [rect.min.x, rect.min.y, rect.max.x, rect.max.y].map(|v| v.round() as i32);
+        let key = (view.id, root, edges);
+        if self.requested == Some(key) {
+            return;
+        }
+        self.requested = Some(key);
+        let _ = self.requests.send(Request {
+            view: view.clone(),
+            root,
+            rect,
+        });
+    }
+
+    /// The newest tiles finished since the last call.
+    pub fn finished(&self) -> Option<Vec<Tile>> {
+        self.results.try_iter().last()
+    }
+}
 
 /// Tiles for `root` laid out in `rect`. Folders are subdivided largest first, so when the tile
 /// budget runs out the detail missing is in the smallest folders.
-pub fn layout(
+fn layout(
     index: &Index,
     filter: &Filter,
     categories: &CategoryMap,
@@ -59,7 +131,7 @@ pub fn layout(
             }
             let is_dir = index.is_dir(id);
             let color = if is_dir {
-                FOLDER_BLOCK
+                Color32::TRANSPARENT
             } else {
                 category_color(categories.of_name(index.name(id)))
             };
@@ -149,37 +221,27 @@ fn worst_ratio(areas: &[f64], side: f64) -> f64 {
     (side2 * max / sum2).max(sum2 / (side2 * min))
 }
 
-pub fn paint(painter: &egui::Painter, tiles: &[Tile], highlight: Option<EntryId>) {
-    let outline = Stroke::new(1.0, Color32::from_black_alpha(140));
+pub fn paint(painter: &egui::Painter, p: &theme::Palette, tiles: &[Tile], highlight: Option<EntryId>) {
+    // Files are split by 1px seams in the surface colour; each folder by a 1px grey edge, so
+    // nesting reads even where the tile budget left a folder as one block.
+    let seam = Stroke::new(1.0, p.seam);
+    let folder_edge = Stroke::new(1.0, p.folder_edge);
     for tile in tiles {
-        if tile.is_dir {
-            painter.rect_filled(tile.rect, 0.0, tile.color.gamma_multiply(0.35));
-            painter.rect_stroke(
-                tile.rect,
-                0.0,
-                Stroke::new(1.0, Color32::from_black_alpha(200)),
-                StrokeKind::Inside,
-            );
-        } else {
-            painter.rect_filled(tile.rect, 0.0, tile.color);
-            if tile.rect.width() > 3.0 && tile.rect.height() > 3.0 {
-                painter.rect_stroke(tile.rect, 0.0, outline, StrokeKind::Inside);
-            }
+        let fill = if tile.is_dir { p.folder } else { tile.color };
+        painter.rect_filled(tile.rect, 0.0, fill);
+        if tile.rect.width() > 3.0 && tile.rect.height() > 3.0 {
+            let edge = if tile.is_dir { folder_edge } else { seam };
+            painter.rect_stroke(tile.rect, 0.0, edge, StrokeKind::Inside);
         }
     }
     if let Some(selected) = highlight
         && let Some(tile) = tiles.iter().find(|t| t.id == selected)
     {
+        painter.rect_stroke(tile.rect, 0.0, Stroke::new(2.0, p.text), StrokeKind::Inside);
         painter.rect_stroke(
-            tile.rect,
+            tile.rect.shrink(2.0),
             0.0,
-            Stroke::new(2.5, Color32::WHITE),
-            StrokeKind::Inside,
-        );
-        painter.rect_stroke(
-            tile.rect.shrink(2.5),
-            0.0,
-            Stroke::new(1.0, Color32::BLACK),
+            Stroke::new(1.0, p.highlight_inner),
             StrokeKind::Inside,
         );
     }

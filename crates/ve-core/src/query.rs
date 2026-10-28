@@ -442,6 +442,9 @@ struct Word {
     text: String,
     /// Byte offset in `text` where the first quoted part began.
     quoted_from: Option<usize>,
+    /// The word's byte range in the Query text, including `!` and quotes.
+    start: usize,
+    end: usize,
 }
 
 impl Word {
@@ -462,14 +465,24 @@ fn tokenize(text: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut current: Option<Word> = None;
     let mut in_quotes = false;
-    for c in text.chars() {
+    let start = |at: usize| move || Word {
+        start: at,
+        ..Word::default()
+    };
+    for (at, c) in text.char_indices() {
+        let end = at + c.len_utf8();
         match c {
             '"' => {
                 in_quotes = !in_quotes;
-                let word = current.get_or_insert_default();
+                let word = current.get_or_insert_with(start(at));
                 word.quoted_from.get_or_insert(word.text.len());
+                word.end = end;
             }
-            c if in_quotes => current.get_or_insert_default().text.push(c),
+            c if in_quotes => {
+                let word = current.get_or_insert_with(start(at));
+                word.text.push(c);
+                word.end = end;
+            }
             c if c.is_whitespace() => tokens.extend(current.take().map(Token::Word)),
             '|' => {
                 tokens.extend(current.take().map(Token::Word));
@@ -479,11 +492,73 @@ fn tokenize(text: &str) -> Vec<Token> {
                 .as_ref()
                 .is_none_or(|w| w.text.is_empty() && !w.negated) =>
             {
-                current.get_or_insert_default().negated = true;
+                let word = current.get_or_insert_with(start(at));
+                word.negated = true;
+                word.end = end;
             }
-            c => current.get_or_insert_default().text.push(c),
+            c => {
+                let word = current.get_or_insert_with(start(at));
+                word.text.push(c);
+                word.end = end;
+            }
         }
     }
     tokens.extend(current.map(Token::Word));
     tokens
+}
+
+/// One clause of a Query's text as written: the words that `|` joins.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClauseSource<'a> {
+    /// The clause exactly as typed, from the start of its first word to the end of its last.
+    pub source: &'a str,
+    pub words: Vec<WordSource>,
+}
+
+/// One word of a [`ClauseSource`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WordSource {
+    pub negated: bool,
+    /// The known modifier the word starts with: `ext`, `type`, `size`, `dm` or `regex`.
+    pub modifier: Option<&'static str>,
+    /// The text after the modifier's colon, or the whole word; quotes removed.
+    pub value: String,
+}
+
+/// Splits Query text into its clauses the way [`Query::parse`] groups them, keeping each
+/// clause's source so a tool that edits some clauses can pass the others through untouched.
+pub fn clauses(text: &str) -> Vec<ClauseSource<'_>> {
+    let mut clauses: Vec<(usize, usize, Vec<WordSource>)> = Vec::new();
+    let mut join_next = false;
+    for token in tokenize(text) {
+        match token {
+            Token::Or => join_next = !clauses.is_empty(),
+            Token::Word(word) => {
+                let (modifier, value) = match word.modifier() {
+                    Some((name, value)) => (Some(name), value.to_owned()),
+                    None => (None, word.text.clone()),
+                };
+                let source = WordSource {
+                    negated: word.negated,
+                    modifier,
+                    value,
+                };
+                match clauses.last_mut() {
+                    Some((_, end, words)) if join_next => {
+                        *end = word.end;
+                        words.push(source);
+                    }
+                    _ => clauses.push((word.start, word.end, vec![source])),
+                }
+                join_next = false;
+            }
+        }
+    }
+    clauses
+        .into_iter()
+        .map(|(start, end, words)| ClauseSource {
+            source: &text[start..end],
+            words,
+        })
+        .collect()
 }

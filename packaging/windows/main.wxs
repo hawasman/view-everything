@@ -21,6 +21,11 @@
         <File Id="ViewEverythingExe" Name="view-everything.exe"
               Source="target\release\view-everything.exe" KeyPath="yes" />
       </Component>
+      <!-- Geist and Geist Mono are compiled into the executable; the OFL travels with them. -->
+      <Component Id="FontLicense" Guid="B49779C9-FC4C-44C4-99B8-36A03CF92DE4" Win64="yes">
+        <File Id="GeistOfl" Name="OFL-Geist.txt"
+              Source="crates\ve-app\assets\fonts\OFL.txt" KeyPath="yes" />
+      </Component>
     </DirectoryRef>
 
     <DirectoryRef Id="ProgramMenuFolder">
@@ -36,6 +41,7 @@
 
     <Feature Id="Complete" Title="View Everything" Level="1">
       <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="FontLicense" />
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>
 

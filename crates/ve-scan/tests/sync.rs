@@ -1,9 +1,9 @@
-use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use ve_core::{EntryId, Filter, Index, VolumeId};
 use ve_scan::Progress;
+use ve_scan::SharedIndex;
 
 /// Every Entry under a Volume root, keyed by its path relative to the root.
 fn snapshot(index: &Index, volume: VolumeId) -> BTreeMap<String, (bool, u64, u64, i64)> {
@@ -23,8 +23,8 @@ fn snapshot(index: &Index, volume: VolumeId) -> BTreeMap<String, (bool, u64, u64
     out
 }
 
-fn scan(root: &Path) -> (RwLock<Index>, VolumeId) {
-    let index = RwLock::new(Index::new());
+fn scan(root: &Path) -> (SharedIndex, VolumeId) {
+    let index = SharedIndex::new(Index::new());
     let volume = ve_scan::add_volume(&index, root, "test").unwrap();
     ve_scan::sync(&index, volume, &Progress::default()).unwrap();
     (index, volume)
@@ -156,7 +156,7 @@ fn catch_up_works_on_an_index_saved_and_loaded_from_disk() {
     index.read().save(&file).unwrap();
 
     change_everything(dir.path());
-    let loaded = RwLock::new(Index::load(&file).unwrap());
+    let loaded = SharedIndex::new(Index::load(&file).unwrap());
     ve_scan::sync(&loaded, volume, &Progress::default()).unwrap();
 
     let (fresh, fresh_volume) = scan(dir.path());
@@ -178,7 +178,7 @@ fn unreadable_folders_are_kept_and_counted() {
         return;
     }
 
-    let index = RwLock::new(Index::new());
+    let index = SharedIndex::new(Index::new());
     let volume = ve_scan::add_volume(&index, dir.path(), "test").unwrap();
     let progress = Progress::default();
     ve_scan::sync(&index, volume, &progress).unwrap();

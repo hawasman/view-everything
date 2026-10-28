@@ -13,11 +13,17 @@ mod walk;
 pub use platform::windows::{is_elevated, relaunch_elevated};
 pub use volumes::{VolumeInfo, discover_volumes};
 
-use parking_lot::RwLock;
+use parking_lot::RecursiveRwLock;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use ve_core::{Index, SyncState, VolumeId};
+
+/// The Index as shared between scanners, the View computation and the GUI.
+///
+/// Recursive, so a new reader is admitted while a writer waits: the GUI's per-frame read must
+/// not queue behind a scanner that is itself waiting for a long View computation to finish.
+pub type SharedIndex = RecursiveRwLock<Index>;
 
 /// Counters a running sync updates, for display.
 #[derive(Debug, Default)]
@@ -39,7 +45,7 @@ impl Progress {
 }
 
 /// Adds the Volume mounted at `mount` to the Index with only its root, ready for [`sync`].
-pub fn add_volume(index: &RwLock<Index>, mount: &Path, fs_type: &str) -> io::Result<VolumeId> {
+pub fn add_volume(index: &SharedIndex, mount: &Path, fs_type: &str) -> io::Result<VolumeId> {
     let meta = walk::root_meta(mount)?;
     Ok(index
         .write()
@@ -51,7 +57,7 @@ pub fn add_volume(index: &RwLock<Index>, mount: &Path, fs_type: &str) -> io::Res
 /// On Windows, an NTFS Volume is read from its Master File Table and kept current through the
 /// change journal when the process is elevated; otherwise, and on every other platform, the
 /// folder tree is walked and differences applied.
-pub fn sync(index: &RwLock<Index>, volume: VolumeId, progress: &Progress) -> io::Result<()> {
+pub fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::Result<()> {
     #[cfg(windows)]
     if ntfs::sync_windows(index, volume, progress)? {
         return Ok(());

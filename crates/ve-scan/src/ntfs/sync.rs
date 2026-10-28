@@ -2,9 +2,9 @@
 
 use super::{load, mft};
 use crate::Progress;
+use crate::SharedIndex;
 use crate::platform::windows::is_elevated;
 use mft::{ROOT_RECORD, Record};
-use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -280,7 +280,7 @@ fn apply(
 }
 
 fn catch_up(
-    index: &RwLock<Index>,
+    index: &SharedIndex,
     handle: &File,
     root: EntryId,
     journal: &Journal,
@@ -318,7 +318,7 @@ fn catch_up(
 
 /// Brings an NTFS Volume up to date. `Ok(false)` leaves the Volume to the portable walk.
 pub(crate) fn sync_windows(
-    index: &RwLock<Index>,
+    index: &SharedIndex,
     volume: VolumeId,
     progress: &Progress,
 ) -> io::Result<bool> {

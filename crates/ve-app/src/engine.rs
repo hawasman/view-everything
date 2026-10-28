@@ -3,7 +3,7 @@
 use crate::settings;
 use crate::view::View;
 use chrono::Local;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use ve_core::{CategoryMap, Index, Query, QueryContext, SyncState, VolumeId};
-use ve_scan::{Progress, VolumeInfo};
+use ve_scan::{Progress, SharedIndex, VolumeInfo};
 
 /// How often a Volume kept current by the NTFS change journal is polled while the app runs.
 const JOURNAL_POLL: Duration = Duration::from_secs(5);
@@ -23,7 +23,7 @@ const POLL_SAVE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// State shared between the UI and the background threads.
 pub struct Shared {
-    pub index: RwLock<Index>,
+    pub index: SharedIndex,
     pub progress: Progress,
     pub status: Mutex<Status>,
     /// The latest View; replaced whole when recomputed.
@@ -78,7 +78,7 @@ impl Engine {
         categories: CategoryMap,
     ) -> Engine {
         let shared = Arc::new(Shared {
-            index: RwLock::new(Index::new()),
+            index: SharedIndex::new(Index::new()),
             progress: Progress::default(),
             status: Mutex::new(Status {
                 phase: Phase::LoadingIndex,

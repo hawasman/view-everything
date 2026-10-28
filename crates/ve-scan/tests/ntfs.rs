@@ -1,11 +1,11 @@
 //! Loads a real NTFS image (made by `tests/fixtures/make-ntfs-fixture.sh`) through the parser.
 
 use flate2::read::GzDecoder;
-use parking_lot::RwLock;
 use std::io::{Cursor, Read};
 use std::path::Path;
 use ve_core::{EntryMeta, Index, SyncState};
 use ve_scan::Progress;
+use ve_scan::SharedIndex;
 
 fn loaded() -> Index {
     let mut image = Vec::new();
@@ -18,7 +18,7 @@ fn loaded() -> Index {
     };
     let mut index = Index::new();
     let volume = index.add_volume(Path::new("X:\\"), "NTFS", root, SyncState::Walk);
-    let index = RwLock::new(index);
+    let index = SharedIndex::new(index);
     let progress = Progress::default();
     ve_scan::ntfs::load(&index, volume, Cursor::new(image), &progress).unwrap();
     assert!(progress.entries() > 3);

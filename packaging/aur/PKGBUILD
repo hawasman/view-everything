@@ -7,7 +7,7 @@ pkgver=0.1.0.r1.ge47ffb5
 pkgrel=1
 pkgdesc='Find files by name and find what is consuming disk space'
 arch=('x86_64')
-license=('MIT' 'Apache-2.0')
+license=('MIT' 'Apache-2.0' 'OFL-1.1')
 depends=('gcc-libs' 'glibc' 'libglvnd' 'libxkbcommon' 'libx11' 'libxcursor'
          'libxi' 'libxrandr' 'wayland')
 makedepends=('cargo' 'git')
@@ -44,4 +44,6 @@ package() {
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/view-everything.svg"
   install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
   install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+  # Geist and Geist Mono are compiled into the binary.
+  install -Dm644 crates/ve-app/assets/fonts/OFL.txt "$pkgdir/usr/share/licenses/$pkgname/OFL-Geist.txt"
 }
