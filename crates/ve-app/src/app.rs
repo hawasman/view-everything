@@ -1,6 +1,7 @@
 //! The window: sidebar, Query bar, Explorer flat list and status bar.
 
 use crate::engine::{Engine, Phase, Repaint};
+use crate::categories::CategoryPanel;
 use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
 use crate::format;
@@ -8,6 +9,7 @@ use crate::settings::{Settings, ThemeChoice};
 use crate::settings_page::{Changed, SettingsPage, apply_theme};
 use crate::tree::TreeList;
 use crate::trash::{self, Trash};
+use crate::treemap::Treemap;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
@@ -57,6 +59,8 @@ pub struct Shell {
     show_filters: bool,
     settings_page: Entity<SettingsPage>,
     trash: Trash,
+    treemap: Entity<Treemap>,
+    categories: Entity<CategoryPanel>,
     volumes: Vec<VolumeInfo>,
     startup_problems: Vec<String>,
 }
@@ -81,7 +85,7 @@ impl Shell {
         let repaint: Repaint = Arc::new(move || {
             let _ = wake.try_send(());
         });
-        let engine = Engine::start(repaint.clone(), indexed, refresh, categories);
+        let engine = Engine::start(repaint.clone(), indexed, refresh, categories.clone());
 
         let trash = Trash::new(engine.shared.clone(), repaint);
 
@@ -111,6 +115,8 @@ impl Shell {
         .detach();
         let list = FlatList::new(engine.shared.clone());
         let table = cx.new(|cx| TableState::new(list, window, cx).col_resizable(true));
+        let treemap = cx.new(|cx| Treemap::new(engine.shared.clone(), categories.clone(), cx));
+        let category_panel = cx.new(|cx| CategoryPanel::new(engine.shared.clone(), query.clone(), cx));
 
         let tree = cx.new(|cx| {
             TableState::new(TreeList::new(engine.shared.clone()), window, cx).col_resizable(true)
@@ -150,6 +156,8 @@ impl Shell {
             show_filters: false,
             settings_page,
             trash,
+            treemap,
+            categories: category_panel,
             volumes,
             startup_problems,
         }
@@ -348,7 +356,14 @@ impl Shell {
                     .child(Tab::new().label("Tree"))
                     .child(Tab::new().label("Flat list")),
             )
-            .child(div().flex_1().min_h_0().child(list))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(div().flex_1().min_w_0().h_full().overflow_hidden().child(list))
+                    .child(div().w(px(280.)).h_full().child(self.categories.clone())),
+            )
+            .child(div().h(px(340.)).child(self.treemap.clone()))
     }
 
     fn dashboard(&self) -> impl IntoElement {

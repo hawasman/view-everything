@@ -7,14 +7,16 @@
 mod app;
 #[cfg(feature = "bench")]
 mod bench;
+mod categories;
 mod engine;
 mod explorer;
 mod filters;
 mod format;
 mod settings;
 mod settings_page;
-mod tree;
 mod trash;
+mod tree;
+mod treemap;
 mod view;
 
 use gpui_kit::*;
