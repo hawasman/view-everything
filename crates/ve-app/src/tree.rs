@@ -2,9 +2,11 @@
 
 use crate::engine::Shared;
 use crate::format;
+use crate::selection::Selection;
 use crate::view::{self, View};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -13,6 +15,9 @@ use ve_core::{EntryId, Index};
 /// Rows kept in `TreeList::cells` before it starts over.
 const CACHED_ROWS: usize = 512;
 const INDENT: f32 = 16.;
+/// Width of the columns after Name, which takes what is left of the list's width.
+const FIXED_WIDTH: f32 = 110. + 110. + 70. + 90. + 140. + 16.;
+const MIN_NAME_WIDTH: f32 = 160.;
 
 const COLUMNS: [(&str, f32, bool); 6] = [
     ("Name", 360., false),
@@ -56,6 +61,9 @@ pub struct TreeList {
     sort: Sort,
     /// Rows drawn recently; see `FlatList::rows`. Dropped when the rows change.
     cells: HashMap<usize, Cells>,
+    pub selection: Selection,
+    /// Width the table has to fit in; 0 until first measured.
+    available: f32,
 }
 
 impl TreeList {
@@ -70,7 +78,23 @@ impl TreeList {
                 descending: true,
             },
             cells: HashMap::new(),
+            selection: Selection::default(),
+            available: 0.,
         }
+    }
+
+    pub fn entry_at(&self, row: usize) -> Option<EntryId> {
+        self.rows.get(row).map(|r| r.id)
+    }
+
+    /// Fits the table into `width`: Name shrinks first, the size columns stay. True when the
+    /// columns changed.
+    pub fn set_available(&mut self, width: f32) -> bool {
+        if (width - self.available).abs() < 1. {
+            return false;
+        }
+        self.available = width;
+        true
     }
 
     /// Shows `view`; false when it already was the one shown.
@@ -80,6 +104,12 @@ impl TreeList {
         }
         self.view = view;
         self.rebuild();
+        // The Entries the new View no longer shows fall out of the selection.
+        if let Some(view) = self.view.clone() {
+            self.selection.retain(|id| view.filter.is_shown(id));
+        } else {
+            self.selection.clear();
+        }
         true
     }
 
@@ -139,7 +169,10 @@ impl TableDelegate for TreeList {
     }
 
     fn column(&self, ix: usize, _: &App) -> Column {
-        let (name, width, numeric) = COLUMNS[ix];
+        let (name, mut width, numeric) = COLUMNS[ix];
+        if ix == 0 && self.available > 0. {
+            width = (self.available - FIXED_WIDTH).max(MIN_NAME_WIDTH);
+        }
         let mut column = Column::new(name, name).width(width);
         if numeric {
             column = column.text_right();
@@ -183,7 +216,7 @@ impl TableDelegate for TreeList {
         &mut self,
         row: usize,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
         if self.cells.len() > CACHED_ROWS {
             self.cells.clear();
@@ -230,7 +263,17 @@ impl TableDelegate for TreeList {
                 self.cells.insert(row, cells);
             }
         }
-        div().id(("row", row))
+        let selected = self.entry_at(row).is_some_and(|id| self.selection.contains(id));
+        let accent = cx.theme().accent;
+        div()
+            .id(("row", row))
+            .when(selected, |d| d.bg(accent))
+            .on_click(cx.listener(move |table, e: &ClickEvent, _, cx| {
+                let list = table.delegate_mut();
+                let ids: Vec<EntryId> = list.rows.iter().map(|r| r.id).collect();
+                list.selection.click(row, e.modifiers(), |r| ids.get(r).copied());
+                cx.notify();
+            }))
     }
 
     fn render_td(
@@ -285,7 +328,7 @@ impl TableDelegate for TreeList {
         let name = h_flex()
             .gap_1()
             .child(Icon::new(icon).size_4().text_color(theme.muted_foreground))
-            .child(c.name.clone());
+            .child(div().min_w_0().truncate().child(c.name.clone()));
         cell.pl(px(c.depth as f32 * INDENT))
             .child(chevron)
             .child(if c.muted {

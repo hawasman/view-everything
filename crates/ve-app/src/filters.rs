@@ -580,6 +580,13 @@ impl FiltersPanel {
                 ),
             ),
         ];
+        // The picker can only print a closed range; an open-ended one is shown as its placeholder.
+        let modified = &self.form.modified;
+        let placeholder: SharedString = match modified.on.then_some(modified.value).unwrap_or_default() {
+            (Some(from), None) => format!("since {from}").into(),
+            (None, Some(to)) => format!("until {to}").into(),
+            _ => "any date".into(),
+        };
         v_flex()
             .gap_2()
             .child(
@@ -600,7 +607,7 @@ impl FiltersPanel {
                 div().w(px(320.)).child(
                     DatePicker::new(&self.dates)
                         .cleanable(true)
-                        .placeholder("any date"),
+                        .placeholder(placeholder),
                 ),
             )
     }

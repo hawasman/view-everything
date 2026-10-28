@@ -330,6 +330,12 @@ impl Trash {
         }
     }
 
+    /// Why none of `ids` can go to the Trash right now, if so.
+    pub fn blocker_of(&self, ids: &[EntryId], volumes: &[VolumeInfo]) -> Option<String> {
+        let index = self.shared.index.read();
+        ids.iter().find_map(|&id| blocker(&index, volumes, id))
+    }
+
     /// Asks before moving `ids` to the Trash. Says why instead when they can't go.
     pub fn ask_trash(
         &self,

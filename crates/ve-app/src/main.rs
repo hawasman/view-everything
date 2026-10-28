@@ -13,6 +13,7 @@ mod explorer;
 mod filters;
 mod format;
 mod settings;
+mod selection;
 mod settings_page;
 mod trash;
 mod tree;

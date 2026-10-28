@@ -1,4 +1,5 @@
-//! The window: sidebar, Query bar, Explorer flat list and status bar.
+//! The window: sidebar, the pages (Explorer with its Query bar, lists, panels and Treemap,
+//! Settings) and the status bar.
 
 use crate::engine::{Engine, Phase, Repaint};
 use crate::categories::CategoryPanel;
@@ -21,6 +22,8 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Sizable 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::borrow::Cow;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 use ve_core::CategoryMap;
@@ -63,6 +66,8 @@ pub struct Shell {
     categories: Entity<CategoryPanel>,
     volumes: Vec<VolumeInfo>,
     startup_problems: Vec<String>,
+    /// The Explorer lists' width in pixels, as of the last paint.
+    list_width: Rc<Cell<f32>>,
 }
 
 impl Shell {
@@ -90,9 +95,14 @@ impl Shell {
         let trash = Trash::new(engine.shared.clone(), repaint);
 
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
-        cx.subscribe(&settings_page, |this, _, changed: &Changed, _| {
+        cx.subscribe(&settings_page, |this, _, changed: &Changed, cx| {
             this.engine.set_volumes(changed.indexed.clone());
             this.engine.set_refresh(changed.refresh);
+            // Saved fine, so the settings file read at startup has been replaced.
+            if !this.settings_page.read(cx).has_problem() {
+                this.startup_problems.retain(|p| !p.starts_with("Settings ignored"));
+            }
+            cx.notify();
         })
         .detach();
 
@@ -114,15 +124,46 @@ impl Shell {
         })
         .detach();
         let list = FlatList::new(engine.shared.clone());
-        let table = cx.new(|cx| TableState::new(list, window, cx).col_resizable(true));
+        let table = cx.new(|cx| {
+            TableState::new(list, window, cx)
+                .col_resizable(true)
+                .select_on_modifier_click(false)
+        });
         let treemap = cx.new(|cx| Treemap::new(engine.shared.clone(), categories.clone(), cx));
-        let category_panel = cx.new(|cx| CategoryPanel::new(engine.shared.clone(), query.clone(), cx));
+        let category_panel = cx.new(|_| CategoryPanel::new(engine.shared.clone(), query.clone()));
 
         let tree = cx.new(|cx| {
-            TableState::new(TreeList::new(engine.shared.clone()), window, cx).col_resizable(true)
+            TableState::new(TreeList::new(engine.shared.clone()), window, cx)
+                .col_resizable(true)
+                .select_on_modifier_click(false)
         });
 
-        cx.subscribe(&table, |_, _, _: &TableEvent, cx| cx.notify()).detach();
+        // Keyboard moves select a single row; clicks go through the lists' own handlers.
+        cx.subscribe(&table, |_, table, event: &TableEvent, cx| {
+            if let TableEvent::SelectRow(row) = event {
+                table.update(cx, |t, _| {
+                    if let Some(id) = t.delegate().entry_at(*row) {
+                        t.delegate_mut().selection.only(*row, id);
+                    }
+                });
+            }
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe(&tree, |_, tree, event: &TableEvent, cx| {
+            if let TableEvent::SelectRow(row) = event {
+                tree.update(cx, |t, _| {
+                    if let Some(id) = t.delegate().entry_at(*row) {
+                        t.delegate_mut().selection.only(*row, id);
+                    }
+                });
+            }
+            cx.notify();
+        })
+        .detach();
+        // A modifier-click changes the selection without the tables knowing.
+        cx.observe(&table, |_, _, cx| cx.notify()).detach();
+        cx.observe(&tree, |_, _, cx| cx.notify()).detach();
 
         #[cfg(feature = "bench")]
         if std::env::var_os("VE_BENCH").is_some() {
@@ -160,6 +201,7 @@ impl Shell {
             categories: category_panel,
             volumes,
             startup_problems,
+            list_width: Rc::default(),
         }
     }
 
@@ -174,10 +216,12 @@ impl Shell {
             }
         });
         self.tree.update(cx, |table, cx| {
-            if table.delegate_mut().set_view(latest) {
+            if table.delegate_mut().set_view(latest.clone()) {
                 table.refresh(cx);
+                table.clear_selection(cx);
             }
         });
+        self.categories.update(cx, |panel, cx| panel.set_view(latest, cx));
         cx.notify();
     }
 
@@ -236,8 +280,9 @@ impl Shell {
         }
         let warn = cx.theme().warning;
         let problems = status
-            .problem
+            .problems
             .into_iter()
+            .map(|(_, message)| message)
             .chain(shared.query_error.lock().clone())
             .chain(self.startup_problems.iter().cloned());
         for problem in problems {
@@ -277,16 +322,35 @@ impl Shell {
         controls
     }
 
-    /// The Entry under the flat list's selected row.
-    fn selected_entry(&self, cx: &App) -> Option<ve_core::EntryId> {
-        let row = self.table.read(cx).selected_row()?;
-        self.table.read(cx).delegate().view.as_ref()?.flat.get(row).copied()
+    /// The Entries selected in whichever list the Explorer shows.
+    fn selected_entries(&self, cx: &App) -> Vec<ve_core::EntryId> {
+        if self.show_tree {
+            self.tree.read(cx).delegate().selection.ids()
+        } else {
+            self.table.read(cx).delegate().selection.ids()
+        }
     }
 
     fn ask_trash_selected(&self, window: &mut Window, cx: &mut App) {
-        if let Some(id) = self.selected_entry(cx) {
-            self.trash.ask_trash(&[id], &self.volumes, window, cx);
+        let ids = self.selected_entries(cx);
+        if !ids.is_empty() {
+            self.trash.ask_trash(&ids, &self.volumes, window, cx);
         }
+    }
+
+    /// Lets the lists' name columns take the width left beside the Categories panel.
+    fn fit_lists(&self, cx: &mut Context<Self>) {
+        let width = self.list_width.get();
+        self.table.update(cx, |t, cx| {
+            if t.delegate_mut().set_available(width) {
+                t.refresh(cx);
+            }
+        });
+        self.tree.update(cx, |t, cx| {
+            if t.delegate_mut().set_available(width) {
+                t.refresh(cx);
+            }
+        });
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -310,11 +374,18 @@ impl Shell {
     }
 
     fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.fit_lists(cx);
         let list = if self.show_tree {
             DataTable::new(&self.tree).into_any_element()
         } else {
             DataTable::new(&self.table).into_any_element()
         };
+        let selected = self.selected_entries(cx);
+        let blocked = self.trash.blocker_of(&selected, &self.volumes);
+        let width = self.list_width.clone();
+        let measure = canvas(move |b, _, _| width.set(f32::from(b.size.width)), |_, _, _, _| {})
+            .absolute()
+            .size_full();
         let active = self.filters.read(cx).active();
         let label = if active > 0 { format!("Filters · {active}") } else { "Filters".into() };
         let toggle = Button::new("filters").label(label).on_click(cx.listener(|this, _, _, cx| {
@@ -326,7 +397,12 @@ impl Shell {
             .gap_2()
             .p_3()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "delete" && this.table.focus_handle(cx).is_focused(window) {
+                let focus = if this.show_tree {
+                    this.tree.focus_handle(cx)
+                } else {
+                    this.table.focus_handle(cx)
+                };
+                if event.keystroke.key == "delete" && focus.is_focused(window) {
                     this.ask_trash_selected(window, cx);
                 }
             }))
@@ -340,7 +416,8 @@ impl Shell {
                             .icon(IconName::Delete)
                             .label("Move to Trash")
                             .danger()
-                            .disabled(self.selected_entry(cx).is_none())
+                            .disabled(selected.is_empty() || blocked.is_some())
+                            .when_some(blocked, |b, why| b.tooltip(why))
                             .on_click(cx.listener(|this, _, window, cx| this.ask_trash_selected(window, cx))),
                     ),
             )
@@ -360,7 +437,16 @@ impl Shell {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(div().flex_1().min_w_0().h_full().overflow_hidden().child(list))
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_hidden()
+                            .child(measure)
+                            .child(list),
+                    )
                     .child(div().w(px(280.)).h_full().child(self.categories.clone())),
             )
             .child(div().h(px(340.)).child(self.treemap.clone()))

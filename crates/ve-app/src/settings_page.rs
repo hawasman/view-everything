@@ -81,6 +81,10 @@ impl SettingsPage {
         }
     }
 
+    pub fn has_problem(&self) -> bool {
+        self.problem.is_some()
+    }
+
     /// Saves the settings and tells the window what to apply.
     fn commit(&mut self, cx: &mut Context<Self>) {
         self.problem = self
