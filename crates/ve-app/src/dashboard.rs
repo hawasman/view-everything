@@ -112,9 +112,8 @@ impl DashboardPage {
         }
         #[cfg(feature = "bench")]
         if std::env::var_os("VE_DASH_BENCH").is_some() {
-            bench::start(latest.clone(), window);
+            bench::start(latest.clone(), window, cx);
         }
-        let _ = &window;
         let mut page = Self {
             shared,
             trash,
@@ -886,58 +885,52 @@ impl DashboardPage {
     }
 }
 
-/// `VE_DASH_BENCH=1`: times the window's frames from launch until the Dashboard's first summary
-/// is in and a little after, prints them with the computation time, then quits.
+/// `VE_DASH_BENCH=1`: while the Dashboard's first summary of a loaded Index is computed, a 5 ms
+/// timer on the UI thread records how late it fires (the longest time the UI thread was blocked),
+/// prints that with the computation time, then quits.
 #[cfg(feature = "bench")]
 mod bench {
     use super::*;
 
-    const AFTER: usize = 120;
+    const TICK: Duration = Duration::from_millis(5);
+    /// How long to keep sampling once the summary is in.
+    const AFTER: Duration = Duration::from_secs(2);
 
-    struct Run {
-        latest: Arc<Mutex<Option<Arc<Summary>>>>,
-        started: Instant,
-        last: Instant,
-        frames: Vec<Duration>,
-        computed_at: Option<usize>,
-    }
-
-    pub fn start(latest: Arc<Mutex<Option<Arc<Summary>>>>, window: &mut Window) {
-        let now = Instant::now();
-        let run = Run { latest, started: now, last: now, frames: Vec::new(), computed_at: None };
-        window.on_next_frame(move |window, cx| step(run, window, cx));
-    }
-
-    fn step(mut run: Run, window: &mut Window, cx: &mut App) {
-        let now = Instant::now();
-        run.frames.push(now - run.last);
-        run.last = now;
-        if run.computed_at.is_none() {
-            if let Some(summary) = run.latest.lock().clone() {
-                run.computed_at = Some(run.frames.len());
-                println!(
-                    "dashboard summary of {} Entries: computed in {} ms, on screen {} ms after launch",
-                    summary.entries,
-                    summary.took.as_millis(),
-                    run.started.elapsed().as_millis()
-                );
+    pub fn start(latest: Arc<Mutex<Option<Arc<Summary>>>>, window: &mut Window, cx: &mut Context<DashboardPage>) {
+        let started = Instant::now();
+        cx.spawn_in(window, async move |_, cx| {
+            let mut late: Vec<Duration> = Vec::new();
+            let mut done_at: Option<Instant> = None;
+            loop {
+                let before = Instant::now();
+                cx.background_executor().timer(TICK).await;
+                late.push(before.elapsed().saturating_sub(TICK));
+                // The first summary may be of the still-empty Index.
+                let summary = latest.lock().clone().filter(|s| s.entries > 0);
+                if let (Some(summary), None) = (&summary, done_at) {
+                    done_at = Some(Instant::now());
+                    println!(
+                        "dashboard summary of {} Entries: computed in {} ms, {} ms after launch",
+                        summary.entries,
+                        summary.took.as_millis(),
+                        started.elapsed().as_millis()
+                    );
+                }
+                if done_at.is_some_and(|t| t.elapsed() >= AFTER) {
+                    late.sort();
+                    let ms = |q: f64| late[((late.len() as f64 * q) as usize).min(late.len() - 1)].as_secs_f64() * 1e3;
+                    println!(
+                        "UI-thread timer lateness over {} ticks: p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms",
+                        late.len(),
+                        ms(0.5),
+                        ms(0.99),
+                        late.last().unwrap().as_secs_f64() * 1e3
+                    );
+                    let _ = cx.update(|_, cx| cx.quit());
+                    return;
+                }
             }
-        }
-        if run.computed_at.is_some_and(|at| run.frames.len() >= at + AFTER) {
-            let mut sorted = run.frames.clone();
-            sorted.sort();
-            let ms = |q: f64| sorted[((sorted.len() as f64 * q) as usize).min(sorted.len() - 1)].as_secs_f64() * 1e3;
-            println!(
-                "{} frames during compute and after: frame ms p50 {:.1} p99 {:.1} max {:.1}",
-                sorted.len(),
-                ms(0.5),
-                ms(0.99),
-                sorted.last().unwrap().as_secs_f64() * 1e3
-            );
-            cx.quit();
-            return;
-        }
-        window.refresh();
-        window.on_next_frame(move |w, cx| step(run, w, cx));
+        })
+        .detach();
     }
 }
