@@ -583,7 +583,8 @@ fn subtree_on_disk(index: &Index, id: EntryId) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Not `super::*`: the glob would bring gpui's own `test` attribute into scope.
+    use super::{Index, VolumeInfo, blocker, subtree_on_disk, top_level};
     use std::path::Path;
     use ve_core::{EntryMeta, SyncState};
 
@@ -592,7 +593,7 @@ mod tests {
         let dir = EntryMeta { is_dir: true, ..Default::default() };
         let file = EntryMeta { on_disk: 4096, ..Default::default() };
         let mut index = Index::new();
-        let vol = index.add_volume(Path::new("/mnt/ro"), "ext4", dir, SyncState::default());
+        let vol = index.add_volume(Path::new("/mnt/ro"), "ext4", dir, SyncState::Walk);
         let root = index.volume(vol).unwrap().root;
         let folder = index.insert(root, "a", dir);
         let inner = index.insert(folder, "f", file);
