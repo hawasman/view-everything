@@ -40,11 +40,51 @@ pub struct EntryMeta {
     pub hardlinked: bool,
 }
 
+/// An SSH Remote: a folder on another machine, indexed over `ssh` without mounting it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Remote {
+    /// `user@host` or an `~/.ssh/config` alias, as given to `ssh`.
+    pub host: String,
+    /// Absolute folder on the server.
+    pub path: String,
+}
+
+impl Remote {
+    /// A Remote from what the user typed. The host must be safe to hand to `ssh` as an
+    /// argument and the path absolute (the server's shell would not expand `~` in quotes).
+    pub fn new(host: &str, path: &str) -> Result<Remote, String> {
+        let (host, path) = (host.trim(), path.trim());
+        if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) {
+            return Err("Host must be user@host or a name from ~/.ssh/config".into());
+        }
+        if !path.starts_with('/') {
+            return Err("Path must be an absolute folder, such as /srv/backup".into());
+        }
+        let path = if path.len() > 1 { path.trim_end_matches('/') } else { path };
+        Ok(Remote { host: host.into(), path: if path.is_empty() { "/".into() } else { path.into() } })
+    }
+
+    /// What makes this Remote the same Location wherever it is listed: `ssh:user@host:/path`.
+    pub fn identity(&self) -> String {
+        format!("ssh:{}:{}", self.host, self.path)
+    }
+
+    /// `user@host:/path`, for display.
+    pub fn label(&self) -> String {
+        format!("{}:{}", self.host, self.path)
+    }
+}
+
+/// Refresh interval meaning Manual: too long to ever come due.
+pub const MANUAL_REFRESH: Duration = Duration::from_secs(u32::MAX as u64);
+
 /// How a Volume's Index is kept current.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncState {
     /// Re-walk the folder tree and apply differences.
     Walk,
+    /// A Remote: re-run `find` over ssh and apply differences.
+    Ssh(Remote),
     /// Read the NTFS change journal from `next_usn`.
     Ntfs { journal_id: u64, next_usn: i64 },
 }
@@ -77,12 +117,21 @@ pub struct Volume {
 }
 
 impl Volume {
+    /// A read-only Remote rather than a mounted Volume.
+    pub fn is_remote(&self) -> bool {
+        matches!(self.sync, SyncState::Ssh(_))
+    }
+
     /// Whether Catch-up should run at `now` (seconds since the Unix epoch): the Last Synced is
     /// older than `interval`, missing, or in the future (the clock moved back). NTFS Volumes
-    /// always catch up because reading the change journal is cheap (ADR-0003).
+    /// always catch up because reading the change journal is cheap (ADR-0003). A Remote with a
+    /// Manual interval never does.
     pub fn needs_catch_up(&self, now: i64, interval: Duration) -> bool {
         if matches!(self.sync, SyncState::Ntfs { .. }) {
             return true;
+        }
+        if self.is_remote() && interval >= MANUAL_REFRESH {
+            return false;
         }
         match self.last_synced {
             Some(at) => at > now || now - at >= i64::try_from(interval.as_secs()).unwrap_or(i64::MAX),
@@ -98,8 +147,8 @@ const NO_PARENT: u32 = u32::MAX;
 const NO_SLOT: u32 = u32::MAX;
 
 const MAGIC: &[u8; 8] = b"VEINDEX\0";
-/// v2 adds Last Synced and capacity per Volume; v3 adds the Volume's identity.
-const FORMAT_VERSION: u32 = 3;
+/// v2 adds Last Synced and capacity per Volume; v3 adds the Volume's identity; v4 adds Remotes.
+const FORMAT_VERSION: u32 = 4;
 
 /// The persistent record of every Entry on every Indexed Volume.
 ///
@@ -176,6 +225,14 @@ impl Index {
         let id = VolumeId(self.volumes.len() as u32);
         self.volumes.push(Some(volume));
         id
+    }
+
+    /// Adds a Remote as a Location with only its root, ready for a sync. It is always online;
+    /// its root Entry is named by its identity, so paths read `ssh:user@host:/path/...`.
+    pub fn add_remote(&mut self, remote: &Remote) -> VolumeId {
+        let identity = remote.identity();
+        let meta = EntryMeta { is_dir: true, ..EntryMeta::default() };
+        self.add_volume(Path::new(&identity), "ssh", &identity, meta, SyncState::Ssh(remote.clone()))
     }
 
     pub fn remove_volume(&mut self, id: VolumeId) {

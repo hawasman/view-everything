@@ -26,6 +26,10 @@ pub fn reconcile(
             .map(|(id, v)| (id, v.identity.clone()))
             .collect();
         for (id, identity) in known {
+            // Remotes are not mounted; `reconcile_remotes` looks after them.
+            if index.volume(id).is_some_and(|v| v.is_remote()) {
+                continue;
+            }
             let find = |list: &[VolumeInfo]| list.iter().find(|m| m.identity == identity).cloned();
             match (find(mounted), find(wanted)) {
                 (_, Some(here)) => {
