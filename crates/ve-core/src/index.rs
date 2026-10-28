@@ -300,6 +300,13 @@ impl Index {
         }
     }
 
+    /// Replaces the capacity recorded for `id`. Like [`Index::mark_synced`], not an Entry change.
+    pub fn set_capacity(&mut self, id: VolumeId, capacity: Option<Capacity>) {
+        if let Some(Some(volume)) = self.volumes.get_mut(id.0 as usize) {
+            volume.capacity = capacity;
+        }
+    }
+
     /// The Last Synced of the least recently synced Volume. The outer `None` means there are no
     /// Volumes; the inner `None` means some Volume has never finished a sync.
     pub fn oldest_synced(&self) -> Option<Option<i64>> {

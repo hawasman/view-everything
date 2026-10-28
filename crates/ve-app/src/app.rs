@@ -400,7 +400,11 @@ impl Shell {
                 self.settings_page.update(cx, |page, cx| page.apply(|s| s.forget(identity, mount), cx));
                 self.engine.forget(identity.clone());
             }
-            Act::Refresh => self.engine.refresh(),
+            Act::Refresh(identities) => {
+                for identity in identities {
+                    self.engine.refresh_location(identity.clone());
+                }
+            }
             Act::MoveToTrash(id) => self.trash.ask_trash(&[*id], &self.volumes, window, cx),
             Act::SaveQuery(text) => {
                 self.settings_page.update(cx, |page, cx| page.apply(|s| s.recent_query = text.clone(), cx));

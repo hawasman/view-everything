@@ -124,6 +124,31 @@ fn failures_are_reported_and_leave_the_index_alone() {
 }
 
 #[test]
+fn df_over_the_same_ssh_gives_the_remote_a_capacity_and_a_failing_df_clears_it() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    fs::create_dir_all(&tree).unwrap();
+    fs::write(tree.join("a.txt"), "a").unwrap();
+    let ssh = script(dir.path(), "ssh", LOCAL);
+    let no_df = script(dir.path(), "ssh-no-df", &format!("case \"$*\" in *\"df -kP\"*) echo 'sh: df: not found' >&2; exit 127;; esac\n{LOCAL}"));
+    let index = SharedIndex::new(Index::new());
+    let id = add(&index, tree.to_str().unwrap());
+    assert!(index.read().volume(id).unwrap().capacity.is_none());
+    remote::sync_with(ssh.to_str().unwrap(), &index, id, &Progress::default()).unwrap();
+    let c = index.read().volume(id).unwrap().capacity.expect("df ran");
+    // The same filesystem a local statvfs measures.
+    let local = ve_scan::capacity(&tree).unwrap();
+    assert_eq!(c.total, local.total);
+    assert!(c.free <= c.total);
+    // df failing leaves the listing in place and the lane without capacity.
+    remote::sync_with(no_df.to_str().unwrap(), &index, id, &Progress::default()).unwrap();
+    let index = index.read();
+    assert!(index.volume(id).unwrap().capacity.is_none());
+    assert_eq!(index.live_count(), 2);
+}
+
+#[test]
 fn a_remote_survives_a_save_and_is_not_swept_up_as_an_offline_volume() {
     let index = SharedIndex::new(Index::new());
     let remote = Remote::new("me@box", "/srv/backup/").unwrap();
@@ -203,8 +228,9 @@ fn busybox_ssh(dir: &Path, server: &str) -> PathBuf {
         dir,
         "ssh",
         &format!(
-            "for a; do [ \"$a\" = -s ] && exec {server}; done\necho find >> {log}\necho 'find: unrecognized: -printf' >&2; exit 1",
-            log = log.display()
+            "for a; do [ \"$a\" = -s ] && exec {server}; done\ncase \"$*\" in *\"df -kP\"*) {LOCAL_CMD};; esac\necho find >> {log}\necho 'find: unrecognized: -printf' >&2; exit 1",
+            log = log.display(),
+            LOCAL_CMD = LOCAL
         ),
     )
 }
@@ -258,6 +284,13 @@ fn a_server_without_gnu_find_is_indexed_over_sftp_and_remembered() {
         assert_eq!(progress.entries(), 1 + 4 + 2 + 1 + 2540 + 40);
     }
     assert_eq!(fs::read_to_string(dir.path().join("find.log")).unwrap().lines().count(), 1);
+    // The host has no GNU find but runs df: its capacity is known all the same.
+    {
+        let index = index.read();
+        let c = index.volume(id).unwrap().capacity.expect("df worked over the same ssh");
+        assert!(c.total > 0 && c.free <= c.total);
+    }
+    assert!(remote::is_sftp_only(&Remote::new("sftp@box", tree.to_str().unwrap()).unwrap()));
 
     // A refresh goes straight to SFTP (find is not tried again) and prunes what is gone.
     fs::remove_file(tree.join("gone.txt")).unwrap();

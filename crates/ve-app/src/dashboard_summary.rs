@@ -267,6 +267,29 @@ impl Lane {
     }
 }
 
+/// The filesystem a Volume identity belongs to. A btrfs subvolume or bind mount is the
+/// filesystem's UUID plus a path (`uuid:UUID:/@home`) and shares the filesystem's capacity; every
+/// other identity is a filesystem of its own.
+pub fn filesystem_of(identity: &str) -> &str {
+    match identity.strip_prefix("uuid:") {
+        Some(rest) => &identity[..identity.len() - rest.len() + rest.find(':').unwrap_or(rest.len())],
+        None => identity,
+    }
+}
+
+/// Positions of `identities` grouped by filesystem, groups in order of first appearance.
+pub fn group_by_filesystem(identities: &[&str]) -> Vec<Vec<usize>> {
+    let mut groups: Vec<(&str, Vec<usize>)> = Vec::new();
+    for (i, identity) in identities.iter().enumerate() {
+        let fs = filesystem_of(identity);
+        match groups.iter_mut().find(|(key, _)| *key == fs) {
+            Some((_, members)) => members.push(i),
+            None => groups.push((fs, vec![i])),
+        }
+    }
+    groups.into_iter().map(|(_, members)| members).collect()
+}
+
 /// "just now", "6 min ago", "3 h ago", "1 day ago", "6 days ago".
 pub fn ago(now: i64, at: i64) -> String {
     let secs = (now - at).max(0);
@@ -405,6 +428,32 @@ mod tests {
         assert_eq!(lane.free, 0);
         // Never synced: just the Categories.
         assert_eq!(Lane::new(cats, None).total(), 400);
+    }
+
+    #[test]
+    fn subvolumes_of_one_filesystem_group_and_count_its_capacity_once() {
+        let uuid = "d1894d9b-4d46-4135-b42b-f4e2f9062839";
+        let ids = [
+            format!("uuid:{uuid}"),
+            "uuid:aaaa-bbbb".to_owned(),
+            format!("uuid:{uuid}:/@home"),
+            format!("uuid:{uuid}:/@log"),
+            "share:nas:/media".to_owned(),
+            "ssh:me@box:/srv".to_owned(),
+        ];
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        assert_eq!(filesystem_of(ids[2]), format!("uuid:{uuid}"));
+        assert_eq!(filesystem_of("dev:/dev/sda1@/mnt/x"), "dev:/dev/sda1@/mnt/x");
+        assert_eq!(group_by_filesystem(&ids), vec![vec![0, 2, 3], vec![1], vec![4], vec![5]]);
+
+        // Three subvolumes of one 1000-byte filesystem, 700 used: 100 + 200 + 50 indexed.
+        let capacity = Capacity { total: 1000, free: 300 };
+        let mut sum = [0u64; 8];
+        for indexed in [100u64, 200, 50] {
+            sum[Category::Video as usize] += indexed;
+        }
+        let lane = Lane::new(sum, Some(capacity));
+        assert_eq!((lane.unindexed, lane.free, lane.total()), (350, 300, 1000));
     }
 
     #[test]

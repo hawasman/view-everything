@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
-use ve_core::{EntryId, EntryMeta, Remote, SyncState, VolumeId};
+use ve_core::{Capacity, EntryId, EntryMeta, Remote, SyncState, VolumeId};
 
 /// One record per Entry, NUL-terminated so a name may hold anything but NUL; the name is last
 /// so that a tab inside it stays inside it. Fields: inode, link count, size in bytes, 512-byte
@@ -131,18 +131,60 @@ pub fn sync_with(program: &str, index: &SharedIndex, volume: VolumeId, progress:
             _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a Remote")),
         }
     };
-    if !SFTP_ONLY.lock().contains(&remote) {
-        match sync_find(program, index, root, &remote, progress) {
+    list(program, index, root, &remote, progress)?;
+    // Capacity is a bonus: a host without a working `df` just has none, and the sync stands.
+    let capacity = df_with(program, &remote).ok();
+    index.write().set_capacity(volume, capacity);
+    Ok(())
+}
+
+/// Whether the Remote's server is known to lack GNU `find -printf` (it is indexed over SFTP).
+pub fn is_sftp_only(remote: &Remote) -> bool {
+    SFTP_ONLY.lock().contains(remote)
+}
+
+fn list(program: &str, index: &SharedIndex, root: EntryId, remote: &Remote, progress: &Progress) -> io::Result<()> {
+    if !is_sftp_only(remote) {
+        match sync_find(program, index, root, remote, progress) {
             Err(e) if e.kind() == io::ErrorKind::Unsupported => {}
             done => return done,
         }
     }
-    sync_sftp(program, index, root, &remote, progress)?;
+    sync_sftp(program, index, root, remote, progress)?;
     let mut only = SFTP_ONLY.lock();
-    if !only.contains(&remote) {
-        only.push(remote);
+    if !only.contains(remote) {
+        only.push(remote.clone());
     }
     Ok(())
+}
+
+/// The capacity of the filesystem holding the Remote's root, from `df -kP` run over `program`
+/// (ssh) with the options the listing uses; so it works on SFTP-only hosts that can run `df`.
+pub fn df_with(program: &str, remote: &Remote) -> io::Result<Capacity> {
+    let mut child = spawn(program, remote, false, &format!("df -kP {}", shell_quote(&remote.path)), Stdio::null())?;
+    let stderr = drain_stderr(&mut child);
+    let mut out = String::new();
+    // df prints a few lines; a server printing more than 64 KiB is not answering df.
+    child.stdout.take().expect("piped").take(64 * 1024).read_to_string(&mut out)?;
+    let status = child.wait()?;
+    let stderr = stderr.join().unwrap_or_default();
+    if !status.success() {
+        return Err(io::Error::other(format!("df on {} failed: {}", remote.host, stderr.trim().lines().last().unwrap_or(""))));
+    }
+    parse_df(&out).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "df printed no capacity"))
+}
+
+/// Parses `df -kP` output (GNU, BusyBox and BSD agree on the POSIX format): a header, then
+/// `Filesystem 1024-blocks Used Available Capacity Mounted-on`. The filesystem and mount names
+/// may hold spaces, so the figures are found around the `NN%` column. A server that prints
+/// `-` for sizes (some FUSE mounts) has no capacity.
+pub fn parse_df(text: &str) -> Option<Capacity> {
+    let line = text.lines().rev().find(|l| !l.trim().is_empty())?;
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let percent = fields.iter().skip(3).position(|f| f.ends_with('%') || *f == "-")? + 3;
+    let kib = |f: &str| f.parse::<u64>().ok()?.checked_mul(1024);
+    let (total, free) = (kib(fields[percent - 3])?, kib(fields[percent - 1])?);
+    (total > 0).then_some(Capacity { total, free: free.min(total) })
 }
 
 /// Starts `program` (ssh) with the options every run shares; `command` runs on the server, or
@@ -382,6 +424,27 @@ mod tests {
         assert!(Record::parse(b"1\t1\tx\t0\t0\tf\ta").is_none());
         assert_eq!(parse_time("-1.5"), Some(-1_500_000_000));
         assert_eq!(parse_time("-0.5"), Some(-500_000_000));
+    }
+
+    #[test]
+    fn df_output_parses_from_gnu_busybox_and_bsd() {
+        let gnu = "Filesystem     1024-blocks      Used Available Capacity Mounted on\n/dev/nvme0n1p2   495911220 382096892 104909188      79% /\n";
+        let want = Some(Capacity { total: 495_911_220 * 1024, free: 104_909_188 * 1024 });
+        assert_eq!(parse_df(gnu), want);
+        // BusyBox: the same columns, the filesystem name may be long or contain spaces.
+        let busybox = "Filesystem           1024-blocks    Used Available Capacity Mounted on\n/dev/root               495911220 382096892 104909188  79% /\n";
+        assert_eq!(parse_df(busybox), want);
+        let spaced = "Filesystem 1024-blocks Used Available Capacity Mounted on\nmy disk 10 4 6 40% /mnt/with 5% sign\n";
+        assert_eq!(parse_df(spaced), Some(Capacity { total: 10 * 1024, free: 6 * 1024 }));
+        // BSD/macOS with -kP: POSIX columns, 1K blocks.
+        let bsd = "Filesystem  1024-blocks     Used Available Capacity  Mounted on\n/dev/disk3s1s1   494384795 11491048 307610816     4%    /\n";
+        assert_eq!(parse_df(bsd), Some(Capacity { total: 494_384_795 * 1024, free: 307_610_816 * 1024 }));
+        // Long names wrapped by a non-POSIX df put the figures on the next line: still the last line.
+        assert_eq!(parse_df("Filesystem 1024-blocks Used Available Capacity Mounted on\nserver:/very/long\n   100 40 60 40% /n\n").map(|c| c.total), Some(100 * 1024));
+        // No figures, or nothing: no capacity.
+        assert_eq!(parse_df("Filesystem 1024-blocks Used Available Capacity Mounted on\nfuse - - - - /mnt\n"), None);
+        assert_eq!(parse_df("df: /nope: No such file or directory\n"), None);
+        assert_eq!(parse_df(""), None);
     }
 
     #[test]

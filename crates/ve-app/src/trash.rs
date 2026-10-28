@@ -18,8 +18,8 @@ pub fn move_to_trash(paths: &[PathBuf]) -> Result<(), String> {
     trash::delete_all(paths).map_err(|e| e.to_string())
 }
 
-/// Bytes the trash currently holds, or `None` where the platform can't tell.
-pub fn trash_size() -> Option<u64> {
+/// Bytes and items the trash currently holds, or `None` where the platform can't tell.
+pub fn trash_size() -> Option<(u64, u64)> {
     platform::trash_size()
 }
 
@@ -100,21 +100,13 @@ mod platform {
 
     pub const CAN_EMPTY: bool = true;
 
-    pub fn trash_size() -> Option<u64> {
+    pub fn trash_size() -> Option<(u64, u64)> {
         let folders = trash::os_limited::trash_folders().ok()?;
         // The `files` folders' own blocks don't count: an empty Trash holds 0 bytes.
-        Some(
-            folders
-                .iter()
-                .flat_map(|folder| {
-                    std::fs::read_dir(folder.join("files"))
-                        .into_iter()
-                        .flatten()
-                        .flatten()
-                })
-                .map(|entry| on_disk_size(&entry.path()))
-                .sum(),
-        )
+        let items = folders.iter().flat_map(|folder| {
+            std::fs::read_dir(folder.join("files")).into_iter().flatten().flatten()
+        });
+        Some(items.fold((0, 0), |(bytes, count), entry| (bytes + on_disk_size(&entry.path()), count + 1)))
     }
 
     pub fn empty_trash() -> Result<EmptyOutcome, String> {
@@ -216,7 +208,7 @@ mod platform {
 
     pub const CAN_EMPTY: bool = true;
 
-    pub fn trash_size() -> Option<u64> {
+    pub fn trash_size() -> Option<(u64, u64)> {
         let mut info = SHQUERYRBINFO {
             cbSize: size_of::<SHQUERYRBINFO>() as u32,
             i64Size: 0,
@@ -225,7 +217,7 @@ mod platform {
         // SAFETY: a null root path queries every drive's recycle bin; `info` is a valid,
         // correctly sized out-parameter.
         let result = unsafe { SHQueryRecycleBinW(std::ptr::null(), &mut info) };
-        (result == 0).then_some(info.i64Size as u64)
+        (result == 0).then_some((info.i64Size as u64, info.i64NumItems as u64))
     }
 
     /// Windows runs the app elevated when it can, so items it can't delete are reported, not
@@ -259,7 +251,7 @@ mod platform {
     /// macOS offers no supported way to list or empty the Trash from another app.
     pub const CAN_EMPTY: bool = false;
 
-    pub fn trash_size() -> Option<u64> {
+    pub fn trash_size() -> Option<(u64, u64)> {
         None
     }
 
@@ -287,7 +279,7 @@ mod platform {
 pub struct Trash {
     shared: Arc<Shared>,
     repaint: Repaint,
-    size: Arc<Mutex<Option<u64>>>,
+    size: Arc<Mutex<Option<(u64, u64)>>>,
     /// Bumped per measurement so a slow, older one can't overwrite a newer result.
     measures: Arc<AtomicU64>,
 }
@@ -306,7 +298,12 @@ impl Trash {
 
     /// Bytes the Trash holds, as of the last measurement.
     pub fn size(&self) -> Option<u64> {
-        *self.size.lock()
+        self.size.lock().map(|(bytes, _)| bytes)
+    }
+
+    /// Items the Trash holds, as of the last measurement.
+    pub fn items(&self) -> Option<u64> {
+        self.size.lock().map(|(_, items)| items)
     }
 
     fn measure(&self) {

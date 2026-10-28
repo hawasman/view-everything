@@ -3,7 +3,7 @@
 //! the UI thread and cached per Index generation (see `dashboard_summary`).
 
 use crate::app::volume_name;
-use crate::dashboard_summary::{Lane, Summary, ago, every, oldest, summarize};
+use crate::dashboard_summary::{Lane, Summary, ago, every, group_by_filesystem, oldest, summarize};
 use crate::engine::{Phase, Shared};
 use crate::format;
 use crate::settings::Settings;
@@ -38,8 +38,8 @@ pub enum Act {
     Explore(Option<String>),
     /// Forget the Offline Volume with this identity (and its last mount path).
     Forget(String, PathBuf),
-    /// Bring every mounted Location up to date now.
-    Refresh,
+    /// Bring the Location with these Volume identities (one filesystem's) up to date now.
+    Refresh(Vec<String>),
     MoveToTrash(EntryId),
     /// Save the Recently modified Query; `None` restores the default.
     SaveQuery(Option<String>),
@@ -48,29 +48,42 @@ pub enum Act {
 impl EventEmitter<Act> for DashboardPage {}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Remote is for Locations reached over a network protocol (issue 15)
 enum Kind {
     Volume,
     Network,
     Remote,
 }
 
-/// One row of the Locations panel. Built from the Index's Volumes; a Remote is one more row.
+/// One Volume (or Remote) of a Location row.
+struct Member {
+    identity: String,
+    mount: PathBuf,
+    indexed: u64,
+}
+
+/// One row of the Locations panel: a Remote, or a filesystem with the Volumes mounted from it
+/// (btrfs subvolumes and bind mounts share one capacity, so they share one lane).
 struct Location {
+    /// Identity of the first Volume, or the Remote.
     identity: String,
     name: String,
     detail: String,
     kind: Kind,
     online: bool,
-    mount: PathBuf,
+    /// Last Synced of the least recently synced member.
     last_synced: Option<i64>,
     /// "Every 15 min", for a Location kept current by re-reads.
     interval: Option<String>,
+    categories: [u64; 8],
     lane: Lane,
     indexed: u64,
     capacity: Option<Capacity>,
     /// Entries read so far, while it is being synced.
     syncing: Option<u64>,
+    /// What the lane is made of when it is more than one Volume.
+    members: Vec<Member>,
+    /// A Remote's server could not say how big its disk is.
+    no_capacity_note: Option<&'static str>,
 }
 
 pub struct DashboardPage {
@@ -132,7 +145,11 @@ impl DashboardPage {
 
     /// Takes the settings and mounted Volumes the page reads names and intervals from.
     pub fn set_context(&mut self, settings: &Settings, volumes: Vec<VolumeInfo>, cx: &mut Context<Self>) {
-        self.minutes = volumes.iter().map(|v| (v.identity.clone(), settings.refresh_minutes_for(v))).collect();
+        self.minutes = volumes
+            .iter()
+            .map(|v| (v.identity.clone(), settings.refresh_minutes_for(v)))
+            .chain(settings.remotes.iter().map(|r| (r.identity(), settings.remote_refresh_minutes(r))))
+            .collect();
         self.volumes = volumes;
         let query = settings.recent_query_text();
         if query != self.recent_query {
@@ -156,7 +173,7 @@ impl DashboardPage {
         cx.notify();
     }
 
-    /// Every Location in the Index, in Index order.
+    /// Every Location in the Index, in Index order, the Volumes of one filesystem as one.
     fn locations(&self) -> Vec<Location> {
         let status = self.shared.status.lock().clone();
         let syncing: &[PathBuf] = match &status.phase {
@@ -164,32 +181,89 @@ impl DashboardPage {
             _ => &[],
         };
         let index = self.shared.index.read();
-        index
+        let singles: Vec<(Location, String)> = index
             .volumes()
             .map(|(_, v)| {
                 let mounted = self.volumes.iter().find(|m| m.identity == v.identity);
                 let network = mounted.is_some_and(|m| m.network);
-                let name = mounted.map_or_else(|| v.mount.display().to_string(), volume_name);
                 let categories = self.shown.as_ref().and_then(|s| s.volume(&v.identity)).map(|s| s.categories).unwrap_or_default();
-                let lane = Lane::new(categories, v.capacity);
-                Location {
+                let indexed: u64 = categories.iter().sum();
+                let remote = v.remote();
+                let name = match (remote, mounted) {
+                    (Some(r), _) => r.label(),
+                    (None, Some(m)) => volume_name(m),
+                    (None, None) => v.mount.display().to_string(),
+                };
+                let detail = match remote {
+                    Some(r) if ve_scan::remote::is_sftp_only(r) => "SSH · SFTP · read-only".to_owned(),
+                    Some(_) => "SSH · read-only".to_owned(),
+                    None if network => format!("Network share · {}", v.mount.display()),
+                    None => format!("{} · {}", v.fs_type, v.mount.display()),
+                };
+                let no_capacity_note = match remote {
+                    Some(r) if v.last_synced.is_some() && v.capacity.is_none() => {
+                        Some(if ve_scan::remote::is_sftp_only(r) { "SFTP only: no df, no capacity" } else { "df unavailable: no capacity" })
+                    }
+                    _ => None,
+                };
+                let location = Location {
                     identity: v.identity.clone(),
-                    detail: if network {
-                        format!("Network share · {}", v.mount.display())
-                    } else {
-                        format!("{} · {}", v.fs_type, v.mount.display())
-                    },
+                    detail,
                     name,
-                    kind: if network { Kind::Network } else { Kind::Volume },
+                    kind: if remote.is_some() {
+                        Kind::Remote
+                    } else if network {
+                        Kind::Network
+                    } else {
+                        Kind::Volume
+                    },
                     online: v.online,
-                    mount: v.mount.clone(),
                     last_synced: v.last_synced,
                     interval: self.minutes.get(&v.identity).map(|&m| every(m)),
-                    indexed: categories.iter().sum(),
-                    lane,
+                    categories,
+                    lane: Lane::new(categories, v.capacity),
+                    indexed,
                     capacity: v.capacity,
                     syncing: (v.online && syncing.contains(&v.mount)).then(|| self.shared.progress.entries()),
+                    members: vec![Member { identity: v.identity.clone(), mount: v.mount.clone(), indexed }],
+                    no_capacity_note,
+                };
+                (location, mounted.map_or_else(String::new, |m| m.label.clone()))
+            })
+            .collect();
+        let identities: Vec<&str> = singles.iter().map(|(l, _)| l.identity.as_str()).collect();
+        let groups = group_by_filesystem(&identities);
+        let mut singles: Vec<Option<(Location, String)>> = singles.into_iter().map(Some).collect();
+        groups
+            .into_iter()
+            .map(|group| {
+                let mut parts: Vec<(Location, String)> = group.into_iter().filter_map(|i| singles[i].take()).collect();
+                if parts.len() == 1 {
+                    return parts.remove(0).0;
                 }
+                // The shortest mount path (usually `/`) speaks for the filesystem.
+                parts.sort_by_key(|(l, _)| l.members[0].mount.as_os_str().len());
+                let device = parts[0].1.trim_start_matches("/dev/").to_owned();
+                let mut whole = parts.remove(0).0;
+                for (part, _) in parts {
+                    for (c, add) in whole.categories.iter_mut().zip(part.categories) {
+                        *c += add;
+                    }
+                    whole.online |= part.online;
+                    whole.last_synced = whole.last_synced.min(part.last_synced);
+                    whole.syncing = whole.syncing.or(part.syncing);
+                    // Every Volume measures the same filesystem: any one's figures will do.
+                    whole.capacity = whole.capacity.or(part.capacity);
+                    whole.members.extend(part.members);
+                }
+                whole.indexed = whole.categories.iter().sum();
+                whole.lane = Lane::new(whole.categories, whole.capacity);
+                if !device.is_empty() {
+                    whole.name = device;
+                }
+                let fs = index.volume_with_identity(&whole.identity).and_then(|id| index.volume(id)).map(|v| v.fs_type.clone());
+                whole.detail = format!("{} · {} Volumes", fs.unwrap_or_default(), whole.members.len());
+                whole
             })
             .collect()
     }
@@ -568,14 +642,23 @@ impl DashboardPage {
         }
         let strong = |text: String| div().text_color(p.text).child(text);
         let figures = match l.capacity {
-            Some(c) if l.kind != Kind::Remote => h_flex()
+            Some(c) => h_flex()
                 .child(strong(format::size(c.total.saturating_sub(c.free))))
                 .child(format!("\u{a0}used of {}", format::size(c.total)))
                 .into_any_element(),
-            // A Remote reports no capacity: only what is indexed.
-            _ => h_flex().child(strong(format::size(l.indexed))).child("\u{a0}indexed").into_any_element(),
+            // No capacity (a Remote whose server has no df): only what is indexed.
+            None => h_flex().child(strong(format::size(l.indexed))).child("\u{a0}indexed").into_any_element(),
         };
-        let free = l.capacity.map(|c| format!("{} free", format::size(c.free)));
+        let free = l.capacity.map(|c| format!("{} free", format::size(c.free))).or_else(|| l.no_capacity_note.map(str::to_owned));
+        // A lane of several Volumes says which, and how much of it each indexed.
+        let parts = (l.members.len() > 1).then(|| {
+            let mut members: Vec<_> = l.members.iter().collect();
+            members.sort_by_key(|m| m.mount.as_os_str().len());
+            let list = members.iter().map(|m| format!("{} {}", m.mount.display(), format::size(m.indexed))).collect::<Vec<_>>().join(" · ");
+            div().id(("members", ix)).mt(px(2.)).text_size(px(12.)).text_color(p.muted).truncate().child(list.clone()).tooltip(move |window, cx| {
+                Tooltip::new(format!("Volumes on this filesystem, with what each has indexed: {list}")).build(window, cx)
+            })
+        });
 
         let who = v_flex()
             .min_w_0()
@@ -599,7 +682,7 @@ impl DashboardPage {
         sync = if let Some(read) = l.syncing {
             sync.child(div().text_size(px(13.)).text_color(p.accent).child(format!("Catching up — {} Entries read", format::count(read))))
         } else if !l.online {
-            let (identity, mount) = (l.identity.clone(), l.mount.clone());
+            let forget: Vec<_> = l.members.iter().map(|m| (m.identity.clone(), m.mount.clone())).collect();
             sync.child(
                 div()
                     .id(("forget", ix))
@@ -611,7 +694,11 @@ impl DashboardPage {
                         Tooltip::new("Remove this Offline Volume and its Entries from the Index").build(window, cx)
                     })
                     .child("Forget")
-                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(Act::Forget(identity.clone(), mount.clone())))),
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        for (identity, mount) in &forget {
+                            cx.emit(Act::Forget(identity.clone(), mount.clone()));
+                        }
+                    })),
             )
         } else {
             sync.child(div().text_size(px(13.)).text_color(p.muted).child(second.unwrap_or_default()))
@@ -635,7 +722,8 @@ impl DashboardPage {
                         .whitespace_nowrap()
                         .child(figures)
                         .children(free),
-                ),
+                )
+                .children(parts),
             )
             .child(div().w(px(216.)).flex_none().child(sync))
     }
@@ -655,7 +743,10 @@ impl DashboardPage {
         let trash = panel(cx)
             .child(div().font_weight(FontWeight::MEDIUM).child("Trash"))
             .child(div().mt(px(12.)).text_size(px(32.)).line_height(px(38.)).child(size.map_or("…".to_owned(), format::size)))
-            .child(div().text_xs().text_color(p.muted).mb(px(16.)).child("Trashed bytes still occupy their Volume."))
+            .child(div().text_xs().text_color(p.muted).mb(px(16.)).child(match self.trash.items() {
+                Some(n) => format!("{} item{}. Trashed bytes still occupy their Volume.", format::count(n), if n == 1 { "" } else { "s" }),
+                None => "Trashed bytes still occupy their Volume.".to_owned(),
+            }))
             .child(
                 div().child(
                     pill("empty-trash", "Empty Trash")
@@ -686,6 +777,7 @@ impl DashboardPage {
             _ => None,
         };
         let label = old.map_or("Refresh".to_owned(), |l| format!("Refresh {}", l.name));
+        let refresh_ids: Vec<String> = old.map(|l| l.members.iter().map(|m| m.identity.clone()).collect()).unwrap_or_default();
         let synced = panel(cx)
             .flex_1()
             .child(div().font_weight(FontWeight::MEDIUM).child("Index last synced"))
@@ -695,7 +787,7 @@ impl DashboardPage {
                 div().child(
                     pill("refresh", label)
                         .disabled(refresh_why)
-                        .build(cx, cx.listener(|_, _, _, cx| cx.emit(Act::Refresh))),
+                        .build(cx, cx.listener(move |_, _, _, cx| cx.emit(Act::Refresh(refresh_ids.clone())))),
                 ),
             );
         v_flex().flex_grow(3.).flex_basis(relative(0.)).gap(px(16.)).child(trash).child(synced)

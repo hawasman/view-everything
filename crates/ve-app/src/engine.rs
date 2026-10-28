@@ -148,7 +148,8 @@ impl Engine {
         let _ = self.commands.send(Command::SetVolumes(mounted, volumes, remotes));
     }
 
-    /// Brings one Location up to date now, whatever its refresh interval.
+    /// Brings one Location (by identity) up to date now, whatever its refresh interval, and
+    /// leaves the others alone.
     pub fn refresh_location(&self, identity: String) {
         let _ = self.commands.send(Command::RefreshLocation(identity));
     }
@@ -293,8 +294,13 @@ fn run_indexer(
                 pending = reconcile_volumes(shared, &mounted, &wanted, &remotes);
             }
             Ok(Command::RefreshLocation(identity)) => {
-                let index = shared.index.read();
-                pending = index.volume_with_identity(&identity).into_iter().collect();
+                let target = refresh_target(&shared.index.read(), &identity);
+                // Several requests in a row (a filesystem's Volumes) are all kept.
+                if let Some(id) = target
+                    && !pending.contains(&id)
+                {
+                    pending.push(id);
+                }
             }
             Ok(Command::Forget(identity)) => {
                 let mut index = shared.index.write();
@@ -398,6 +404,13 @@ pub fn last_synced_label(oldest: Option<Option<i64>>, now: i64) -> Option<String
     })
 }
 
+/// The Location to sync for a Refresh of `identity`: only that one, and only while it is
+/// reachable (an Offline Volume has no mount to read).
+fn refresh_target(index: &Index, identity: &str) -> Option<VolumeId> {
+    let id = index.volume_with_identity(identity)?;
+    index.volume(id)?.online.then_some(id)
+}
+
 /// Makes the Index agree with what is mounted (see [`ve_scan::reconcile`]) and with the
 /// Remotes the user added. Returns the Locations newly added.
 fn reconcile_volumes(shared: &Shared, mounted: &[VolumeInfo], wanted: &[VolumeInfo], remotes: &[Remote]) -> Vec<VolumeId> {
@@ -463,8 +476,12 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
                     match ve_scan::sync(&shared.index, *id, &shared.progress) {
                         Ok(_) => {
                             shared.resolve(&cause);
-                            // A Remote has no mount to measure.
-                            let capacity = if remote { None } else { ve_scan::capacity(mount) };
+                            // A Remote has no mount to measure: its sync stored what `df` said.
+                            let capacity = if remote {
+                                shared.index.read().volume(*id).and_then(|v| v.capacity)
+                            } else {
+                                ve_scan::capacity(mount)
+                            };
                             shared.index.write().mark_synced(*id, started, capacity);
                         }
                         Err(e) if remote => {
@@ -631,6 +648,18 @@ mod tests {
         assert!(!stale_volumes(&index, &manual, 100_000).contains(&id));
         let hourly: Intervals = [(PathBuf::from(remote.identity()), Duration::from_secs(3600))].into_iter().collect();
         assert!(stale_volumes(&index, &hourly, 100_000).contains(&id));
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_targeted_refresh_names_one_reachable_location() {
+        let mut index = index_with_volumes(&[Some(1), Some(2)]);
+        let ids: Vec<_> = index.volumes().map(|(id, v)| (id, v.identity.clone())).collect();
+        let remote = index.add_remote(&Remote::new("me@box", "/srv").unwrap());
+        assert_eq!(refresh_target(&index, &ids[1].1), Some(ids[1].0));
+        assert_eq!(refresh_target(&index, "ssh:me@box:/srv"), Some(remote));
+        assert_eq!(refresh_target(&index, "nobody"), None);
+        index.set_mount(ids[0].0, None);
+        assert_eq!(refresh_target(&index, &ids[0].1), None);
     }
 
     #[::core::prelude::v1::test]
