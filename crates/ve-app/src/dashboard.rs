@@ -493,7 +493,7 @@ impl DashboardPage {
             legend = legend.child(h_flex().gap(px(6.)).items_center().child(swatch(p.category(category))).child(category.name()));
         }
         legend = legend
-            .child(h_flex().gap(px(6.)).items_center().child(outlined(swatch(p.surface).overflow_hidden().child(div().size_full().bg(pattern_slash(hatch, 1., 4.))))).child("Unindexed Space"))
+            .child(h_flex().gap(px(6.)).items_center().child(outlined(swatch(p.surface).overflow_hidden().child(div().size_full().bg(pattern_slash(hatch, 1., 6.))))).child("Unindexed Space"))
             .child(h_flex().gap(px(6.)).items_center().child(outlined(swatch(p.free))).child("Free"));
 
         let mut lanes = v_flex().bg(p.raised).rounded(px(crate::theme::RADIUS_INNER)).px(px(20.)).py(px(4.));
@@ -550,7 +550,7 @@ impl DashboardPage {
                 seg(l.lane.unindexed)
                     .id(("unindexed", ix))
                     .bg(p.surface)
-                    .child(div().size_full().bg(pattern_slash(hatch, 1., 4.)))
+                    .child(div().size_full().bg(pattern_slash(hatch, 1., 6.)))
                     .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx)),
             );
         }
