@@ -4,8 +4,8 @@
 
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::calendar::Date;
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
@@ -81,7 +81,10 @@ impl Bound {
     fn term(&self) -> Option<String> {
         let amount = self.amount.trim();
         amount.parse::<f64>().ok()?;
-        Some(format!("{amount}{}", self.unit.label().to_ascii_lowercase()))
+        Some(format!(
+            "{amount}{}",
+            self.unit.label().to_ascii_lowercase()
+        ))
     }
 
     fn invalid(&self) -> bool {
@@ -115,12 +118,30 @@ impl Filters {
     /// The form for Query `text`.
     pub fn read(text: &str) -> Filters {
         let mut form = Filters {
-            name: Field { on: true, value: String::new() },
-            ext: Field { on: false, value: String::new() },
-            categories: Field { on: false, value: Vec::new() },
-            size: Field { on: false, value: (Bound::empty(), Bound::empty()) },
-            modified: Field { on: false, value: (None, None) },
-            regex: Field { on: false, value: String::new() },
+            name: Field {
+                on: true,
+                value: String::new(),
+            },
+            ext: Field {
+                on: false,
+                value: String::new(),
+            },
+            categories: Field {
+                on: false,
+                value: Vec::new(),
+            },
+            size: Field {
+                on: false,
+                value: (Bound::empty(), Bound::empty()),
+            },
+            modified: Field {
+                on: false,
+                value: (None, None),
+            },
+            regex: Field {
+                on: false,
+                value: String::new(),
+            },
         };
         for clause in clauses(text) {
             if !form.take(&clause) {
@@ -145,19 +166,31 @@ impl Filters {
         let single = |m: &str| clause.words.len() == 1 && modifier(m);
         let value = &clause.words[0].value;
         if single("ext") && !self.ext.on {
-            self.ext = Field { on: true, value: value.clone() };
+            self.ext = Field {
+                on: true,
+                value: value.clone(),
+            };
         } else if single("regex") && !self.regex.on {
-            self.regex = Field { on: true, value: value.clone() };
+            self.regex = Field {
+                on: true,
+                value: value.clone(),
+            };
         } else if single("size") && !self.size.on {
             let Some(range) = size_range(value) else {
                 return false;
             };
-            self.size = Field { on: true, value: range };
+            self.size = Field {
+                on: true,
+                value: range,
+            };
         } else if single("dm") && !self.modified.on {
             let Some(range) = date_range(value) else {
                 return false;
             };
-            self.modified = Field { on: true, value: range };
+            self.modified = Field {
+                on: true,
+                value: range,
+            };
         } else if modifier("type") && !self.categories.on {
             let parsed: Option<Vec<Category>> = clause
                 .words
@@ -167,7 +200,10 @@ impl Filters {
             let Some(categories) = parsed else {
                 return false;
             };
-            self.categories = Field { on: true, value: categories };
+            self.categories = Field {
+                on: true,
+                value: categories,
+            };
         } else {
             return false;
         }
@@ -229,9 +265,9 @@ impl Filters {
 
     /// Whether Name holds clauses that are more than plain words.
     fn name_has_query_syntax(&self) -> bool {
-        clauses(&self.name.value).iter().any(|c| {
-            c.words.len() > 1 || c.words.iter().any(|w| w.negated || w.modifier.is_some())
-        })
+        clauses(&self.name.value)
+            .iter()
+            .any(|c| c.words.len() > 1 || c.words.iter().any(|w| w.negated || w.modifier.is_some()))
     }
 }
 
@@ -301,15 +337,38 @@ impl FiltersPanel {
             dates: cx.new(|cx| DatePickerState::range(window, cx)),
         };
         panel.watch(&panel.name, |f, v| f.name.value = v, cx);
-        panel.watch(&panel.ext, |f, v| f.ext.value = v, cx);
-        panel.watch(&panel.regex, |f, v| f.regex.value = v, cx);
-        panel.watch(&panel.min, |f, v| f.size.value.0.amount = v, cx);
-        panel.watch(&panel.max, |f, v| f.size.value.1.amount = v, cx);
+        panel.watch(&panel.ext, |f, v| f.ext = Field { on: true, value: v }, cx);
+        panel.watch(
+            &panel.regex,
+            |f, v| f.regex = Field { on: true, value: v },
+            cx,
+        );
+        panel.watch(
+            &panel.min,
+            |f, v| {
+                f.size.value.0.amount = v;
+                f.size.on = true;
+            },
+            cx,
+        );
+        panel.watch(
+            &panel.max,
+            |f, v| {
+                f.size.value.1.amount = v;
+                f.size.on = true;
+            },
+            cx,
+        );
         cx.subscribe(&panel.dates, |this, _, event: &DatePickerEvent, cx| {
             let DatePickerEvent::Change(range) = event;
             let day = |d: Option<chrono::NaiveDateTime>| d.map(|d| d.date());
             let range = (day(range.start()), day(range.end()));
-            this.edit(cx, |f| f.modified.value = range);
+            this.edit(cx, |f| {
+                f.modified = Field {
+                    on: true,
+                    value: range,
+                }
+            });
         })
         .detach();
         panel
@@ -344,7 +403,39 @@ impl FiltersPanel {
     /// Re-reads the form from Query `text`, e.g. when it was typed in the Query bar.
     /// Setting a widget's value does not report a change, so this never writes back.
     pub fn reload(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let form = Filters::read(text);
+        let mut form = Filters::read(text);
+        // Fields the user unticked are not in the text; keep what they had typed.
+        let old = &self.form;
+        if !form.ext.on {
+            form.ext = Field {
+                on: false,
+                ..old.ext.clone()
+            };
+        }
+        if !form.regex.on {
+            form.regex = Field {
+                on: false,
+                ..old.regex.clone()
+            };
+        }
+        if !form.categories.on {
+            form.categories = Field {
+                on: false,
+                ..old.categories.clone()
+            };
+        }
+        if !form.size.on {
+            form.size = Field {
+                on: false,
+                ..old.size.clone()
+            };
+        }
+        if !form.modified.on {
+            form.modified = Field {
+                on: false,
+                ..old.modified.clone()
+            };
+        }
         if form == self.form {
             return;
         }
@@ -369,10 +460,14 @@ impl FiltersPanel {
     }
 
     fn set_dates(&mut self, range: Dates, window: &mut Window, cx: &mut Context<Self>) {
-        self.dates
-            .update(cx, |d, cx| d.set_date(Date::Range(range.0, range.1), window, cx));
+        self.dates.update(cx, |d, cx| {
+            d.set_date(Date::Range(range.0, range.1), window, cx)
+        });
         self.edit(cx, |f| {
-            f.modified = Field { on: true, value: range };
+            f.modified = Field {
+                on: true,
+                value: range,
+            };
         });
     }
 
@@ -402,24 +497,29 @@ impl FiltersPanel {
     }
 
     fn categories(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex().gap_1().flex_wrap().children(Category::ALL.map(|category| {
-            let on = self.form.categories.value.contains(&category);
-            let button = Button::new(("category", category as usize)).label(category.name()).small();
-            let button = if on { button.primary() } else { button.ghost() };
-            button.on_click(cx.listener(move |this, _, _, cx| {
-                this.edit(cx, |f| {
-                    let list = &mut f.categories.value;
-                    if on {
-                        list.retain(|&c| c != category);
-                    } else {
-                        list.push(category);
-                        // Keep the written order stable whatever order they were picked in.
-                        list.sort_by_key(|c| Category::ALL.iter().position(|a| a == c));
-                    }
-                    f.categories.on = true;
-                });
+        h_flex()
+            .gap_1()
+            .flex_wrap()
+            .children(Category::ALL.map(|category| {
+                let on = self.form.categories.value.contains(&category);
+                let button = Button::new(("category", category as usize))
+                    .label(category.name())
+                    .small();
+                let button = if on { button.primary() } else { button.ghost() };
+                button.on_click(cx.listener(move |this, _, _, cx| {
+                    this.edit(cx, |f| {
+                        let list = &mut f.categories.value;
+                        if on {
+                            list.retain(|&c| c != category);
+                        } else {
+                            list.push(category);
+                            // Keep the written order stable whatever order they were picked in.
+                            list.sort_by_key(|c| Category::ALL.iter().position(|a| a == c));
+                        }
+                        f.categories.on = true;
+                    });
+                }))
             }))
-        }))
     }
 
     fn bound(
@@ -438,11 +538,21 @@ impl FiltersPanel {
             .child(label)
             .child(div().w(px(90.)).child(Input::new(input)))
             .children(Unit::ALL.map(|unit| {
-                let button = Button::new((id, unit as usize)).label(unit.label()).xsmall();
-                let button = if bound.unit == unit { button.primary() } else { button.ghost() };
+                let button = Button::new((id, unit as usize))
+                    .label(unit.label())
+                    .xsmall();
+                let button = if bound.unit == unit {
+                    button.primary()
+                } else {
+                    button.ghost()
+                };
                 button.on_click(cx.listener(move |this, _, _, cx| {
                     this.edit(cx, |f| {
-                        let b = if max { &mut f.size.value.1 } else { &mut f.size.value.0 };
+                        let b = if max {
+                            &mut f.size.value.1
+                        } else {
+                            &mut f.size.value.0
+                        };
                         b.unit = unit;
                         f.size.on = true;
                     });
@@ -462,22 +572,36 @@ impl FiltersPanel {
             ("This year", (today.with_ordinal(1), None)),
             (
                 "Older than a year",
-                (None, today.with_year(today.year() - 1).or(Some(today - Duration::days(365)))),
+                (
+                    None,
+                    today
+                        .with_year(today.year() - 1)
+                        .or(Some(today - Duration::days(365))),
+                ),
             ),
         ];
         v_flex()
             .gap_2()
-            .child(h_flex().gap_1().flex_wrap().children(presets.into_iter().enumerate().map(
-                |(i, (label, range))| {
-                    Button::new(("dm-preset", i)).label(label).ghost().small().on_click(
-                        cx.listener(move |this, _, window, cx| this.set_dates(range, window, cx)),
-                    )
-                },
-            )))
             .child(
-                div()
-                    .w(px(320.))
-                    .child(DatePicker::new(&self.dates).cleanable(true).placeholder("any date")),
+                h_flex()
+                    .gap_1()
+                    .flex_wrap()
+                    .children(presets.into_iter().enumerate().map(|(i, (label, range))| {
+                        Button::new(("dm-preset", i))
+                            .label(label)
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.set_dates(range, window, cx)
+                            }))
+                    })),
+            )
+            .child(
+                div().w(px(320.)).child(
+                    DatePicker::new(&self.dates)
+                        .cleanable(true)
+                        .placeholder("any date"),
+                ),
             )
     }
 }
@@ -494,33 +618,61 @@ impl Render for FiltersPanel {
             .border_color(cx.theme().border)
             .rounded_md()
             .child(Self::row(
-                self.toggle("on-name", "Name contains", f.name.on, |f, on| f.name.on = on, cx),
-                v_flex().gap_1().child(wide(&self.name)).when(f.name_has_query_syntax(), |c| {
-                    c.child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child("Some terms are only editable as text."),
-                    )
-                }),
+                self.toggle(
+                    "on-name",
+                    "Name contains",
+                    f.name.on,
+                    |f, on| f.name.on = on,
+                    cx,
+                ),
+                v_flex()
+                    .gap_1()
+                    .child(wide(&self.name))
+                    .when(f.name_has_query_syntax(), |c| {
+                        c.child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child("Some terms are only editable as text."),
+                        )
+                    }),
             ))
             .child(Self::row(
                 self.toggle("on-ext", "Extensions", f.ext.on, |f, on| f.ext.on = on, cx),
                 wide(&self.ext),
             ))
             .child(Self::row(
-                self.toggle("on-type", "Category", f.categories.on, |f, on| f.categories.on = on, cx),
+                self.toggle(
+                    "on-type",
+                    "Category",
+                    f.categories.on,
+                    |f, on| f.categories.on = on,
+                    cx,
+                ),
                 self.categories(cx),
             ))
             .child(Self::row(
                 self.toggle("on-size", "Size", f.size.on, |f, on| f.size.on = on, cx),
                 v_flex()
                     .gap_1()
-                    .child(self.bound("at least", "min-unit", &self.min, &f.size.value.0, false, cx))
+                    .child(self.bound(
+                        "at least",
+                        "min-unit",
+                        &self.min,
+                        &f.size.value.0,
+                        false,
+                        cx,
+                    ))
                     .child(self.bound("at most", "max-unit", &self.max, &f.size.value.1, true, cx)),
             ))
             .child(Self::row(
-                self.toggle("on-dm", "Modified", f.modified.on, |f, on| f.modified.on = on, cx),
+                self.toggle(
+                    "on-dm",
+                    "Modified",
+                    f.modified.on,
+                    |f, on| f.modified.on = on,
+                    cx,
+                ),
                 self.dates(cx),
             ))
             .child(Self::row(
@@ -542,8 +694,17 @@ mod tests {
         let form = Filters::read(text);
         assert_eq!(form.name.value, "holiday");
         assert_eq!(form.ext.value, "mp4;mkv");
-        assert_eq!(form.categories.value, vec![Category::Video, Category::Audio]);
-        assert_eq!(form.size.value.0, Bound { amount: "1.5".into(), unit: Unit::GB });
+        assert_eq!(
+            form.categories.value,
+            vec![Category::Video, Category::Audio]
+        );
+        assert_eq!(
+            form.size.value.0,
+            Bound {
+                amount: "1.5".into(),
+                unit: Unit::GB
+            }
+        );
         assert_eq!(form.active(), 5);
         assert_eq!(
             form.write(),
@@ -563,7 +724,10 @@ mod tests {
         let text = r#"!*.tmp ext:mp4|type:video size:>1gb "a b" ext:jpg ext:png"#;
         let form = Filters::read(text);
         // A negation, a mixed OR, a strict comparison and the second ext: are left as typed.
-        assert_eq!(form.name.value, r#"!*.tmp ext:mp4|type:video size:>1gb "a b" ext:png"#);
+        assert_eq!(
+            form.name.value,
+            r#"!*.tmp ext:mp4|type:video size:>1gb "a b" ext:png"#
+        );
         assert_eq!(form.ext.value, "jpg");
         assert!(form.name_has_query_syntax());
         assert_eq!(
@@ -586,7 +750,10 @@ mod tests {
     #[test]
     fn values_with_spaces_are_quoted_and_read_back() {
         let mut form = Filters::read("");
-        form.regex = Field { on: true, value: "a b".into() };
+        form.regex = Field {
+            on: true,
+            value: "a b".into(),
+        };
         let text = form.write();
         assert_eq!(text, r#"regex:"a b""#);
         assert_eq!(Filters::read(&text).regex.value, "a b");
