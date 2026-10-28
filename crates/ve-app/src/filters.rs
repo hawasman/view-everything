@@ -618,12 +618,13 @@ impl Render for FiltersPanel {
         let f = self.form.clone();
         let muted = cx.theme().muted_foreground;
         let wide = |input: &Entity<InputState>| div().w(px(320.)).child(Input::new(input));
-        v_flex()
+        crate::ui::panel(cx)
+            .id("filters")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
             .gap_3()
-            .p_3()
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded_md()
             .child(Self::row(
                 self.toggle(
                     "on-name",

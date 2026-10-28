@@ -5,7 +5,7 @@ use crate::engine::Shared;
 use crate::selection::Selection;
 use crate::{format, view::View};
 use gpui_kit::component::table::{Column, TableDelegate, TableState};
-use gpui_kit::component::{ActiveTheme as _, h_flex};
+use gpui_kit::component::h_flex;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashMap;
@@ -15,14 +15,14 @@ use ve_core::EntryId;
 const COLUMNS: [(&str, f32, bool); 6] = [
     ("Name", 260., false),
     ("Folder", 380., false),
-    ("On disk", 100., true),
-    ("Size", 100., true),
-    ("Files", 80., true),
-    ("Modified", 140., true),
+    ("On disk", 72., true),
+    ("Size", 72., true),
+    ("Files", 68., true),
+    ("Modified", 136., true),
 ];
 
 /// Width of the columns after Name and Folder, which share what is left of the list's width.
-const FIXED_WIDTH: f32 = 100. + 100. + 80. + 140. + 16.;
+const FIXED_WIDTH: f32 = 72. + 72. + 68. + 136. + 16.;
 const MIN_FLEX_WIDTH: f32 = 80.;
 
 /// Rows kept in `FlatList::rows` before it starts over.
@@ -141,10 +141,10 @@ impl TableDelegate for FlatList {
             }
         }
         let selected = self.entry_at(row).is_some_and(|id| self.selection.contains(id));
-        let accent = cx.theme().tokens.table_active;
+        let accent = crate::theme::palette(cx).active;
         div()
             .id(("row", row))
-            .when(selected, |d| d.bg(accent))
+            .when(selected, |d| d.bg(accent).rounded(px(8.)))
             .on_click(cx.listener(move |table, e: &ClickEvent, _, cx| {
                 let list = table.delegate_mut();
                 let view = list.view.clone();
@@ -152,6 +152,20 @@ impl TableDelegate for FlatList {
                 list.selection.click(row, e.modifiers(), entry_at);
                 cx.notify();
             }))
+    }
+
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let text = crate::theme::palette(cx).text;
+        div()
+            .size_full()
+            .text_size(px(12.))
+            .when(col_ix == 2, |d| d.text_color(text).font_weight(FontWeight::MEDIUM))
+            .child(self.column(col_ix, cx).name.clone())
     }
 
     fn render_last_empty_col(
@@ -172,8 +186,12 @@ impl TableDelegate for FlatList {
         let Some(text) = self.rows.get(&row).map(|cells| cells[col].clone()) else {
             return div().into_any_element();
         };
-        let muted = cx.theme().muted_foreground;
-        let cell = h_flex().size_full().overflow_hidden().whitespace_nowrap();
+        let muted = crate::theme::palette(cx).muted;
+        let cell = h_flex()
+            .size_full()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_size(px(13.));
         match col {
             1 => cell.text_color(muted),
             0 => cell,

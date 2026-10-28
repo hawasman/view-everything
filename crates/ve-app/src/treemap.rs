@@ -2,9 +2,11 @@
 
 use crate::engine::Shared;
 use crate::format;
+use crate::theme::palette;
+use crate::ui::{caption, swatch};
 use crate::view::View;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::Cell;
 use std::collections::BinaryHeap;
@@ -68,22 +70,6 @@ struct Tile {
     category: Category,
     /// A folder whose children are laid out inside it.
     subdivided: bool,
-}
-
-/// A Category's colour, tuned per theme mode.
-pub fn category_color(category: Category, dark: bool) -> Hsla {
-    let (hue, sat) = match category {
-        Category::Video => (12.0, 0.75),
-        Category::Image => (218.0, 0.80),
-        Category::Audio => (270.0, 0.50),
-        Category::Archive => (42.0, 0.90),
-        Category::Code => (155.0, 0.60),
-        Category::Document => (195.0, 0.75),
-        Category::Executable => (335.0, 0.85),
-        Category::Other => (0.0, 0.0),
-    };
-    let light = if dark { 0.52 } else { 0.58 };
-    hsla(hue / 360.0, sat, light, 1.0)
 }
 
 /// What a set of tiles is laid out for: the View id, the zoom root and the pixel size.
@@ -227,7 +213,7 @@ fn layout(
 const SAMPLE: usize = 200;
 
 /// The Category with the most On-disk Size among the first files found under `dir`.
-fn dominant_category(
+pub fn dominant_category(
     index: &Index,
     filter: &Filter,
     categories: &CategoryMap,
@@ -434,6 +420,15 @@ impl Treemap {
             self.tiles = Rc::new(tiles);
             self.tiles_key = Some(key);
             self.hovered = None;
+            // Screenshots (VE_DEMO): rest the pointer on the second tile.
+            #[cfg(feature = "bench")]
+            if std::env::var_os("VE_DEMO").is_some() {
+                self.hovered = self
+                    .tiles
+                    .iter()
+                    .find(|t| !t.subdivided && t.rect.width() > 60. && t.rect.height() > 50.)
+                    .map(|t| (t.id, point(px(t.rect.x0 + 20.), px(t.rect.y0 + 40.))));
+            }
             cx.notify();
         }
     }
@@ -454,104 +449,116 @@ impl Treemap {
         hit(&self.tiles, f32::from(local.x), f32::from(local.y)).map(|t| (t.id, local))
     }
 
+    /// Panel title, then the path of the folder shown: Index / home / mohammed 109 GB.
     fn header(&self, index: &Index, view: &View, root: EntryId, cx: &mut Context<Self>) -> Div {
+        let (muted, text) = (palette(cx).muted, palette(cx).text);
         let mut chain = vec![root];
         while let Some(parent) = index.parent(*chain.last().unwrap()) {
             chain.push(parent);
         }
-        let mut row = h_flex().gap_1().items_center().h_7();
+        let crumb = |label: String, last: bool| {
+            div()
+                .text_color(if last { text } else { muted })
+                .when(last, |d| d.font_weight(FontWeight::MEDIUM))
+                .child(label)
+        };
+        let mut row = h_flex().gap(px(6.)).items_center().text_xs().text_color(muted).mb(px(12.));
+        row = row.child(crumb("Index".into(), false));
+        let last = chain.len() - 1;
         for (i, &id) in chain.iter().rev().enumerate() {
-            if i > 0 {
-                row = row.child(div().text_color(cx.theme().muted_foreground).child("›"));
-            }
-            row = row.child(
-                Button::new(("crumb", id.0 as usize))
-                    .ghost()
-                    .xsmall()
-                    .label(index.name(id).to_owned())
+            row = row.child("/").child(
+                crumb(index.name(id).to_owned(), i == last)
+                    .id(("crumb", id.0 as usize))
+                    .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| this.zoom_to(id, cx))),
             );
         }
-        row.child(
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(format::size(view.filter.totals(index, root).on_disk)),
-        )
-        .child(div().flex_1())
-        .child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child("double-click a folder to zoom in"),
+        let title = h_flex()
+            .justify_between()
+            .items_baseline()
+            .mb(px(14.))
+            .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child("Treemap"))
+            .child(caption("Filtered Size · double-click a folder to zoom", cx));
+        v_flex().child(title).child(
+            row.child(div().ml(px(6.)).child(format::size(view.filter.totals(index, root).on_disk))),
         )
     }
 
-    fn tooltip(&self, index: &Index, view: &View, id: EntryId, at: Point<Pixels>, cx: &App) -> Div {
+    /// Legend of the Categories the tiles show, as `.legend`.
+    fn legend(&self, cx: &App) -> Div {
+        let p = palette(cx);
+        let mut seen = [false; Category::ALL.len()];
+        for tile in self.tiles.iter().filter(|t| !t.subdivided) {
+            seen[tile.category as usize] = true;
+        }
+        let mut row = h_flex().flex_wrap().gap_x(px(14.)).gap_y(px(4.)).mt(px(12.)).text_xs().text_color(p.muted);
+        for category in Category::ALL.into_iter().filter(|c| seen[*c as usize]) {
+            row = row.child(
+                h_flex()
+                    .gap(px(6.))
+                    .items_center()
+                    .child(swatch(p.category(category)))
+                    .child(category.name()),
+            );
+        }
+        row.child(div().ml_auto().child("Tile colour = folder's largest Category"))
+    }
+
+    /// The pointer's tooltip (`.tip`): inverted, three short lines.
+    fn tooltip(&self, index: &Index, view: &View, root: EntryId, id: EntryId, at: Point<Pixels>, cx: &App) -> Div {
         let totals = view.filter.totals(index, id);
-        let detail = if index.is_dir(id) {
-            format!("{} files", format::count(totals.files))
+        let whole = view.filter.totals(index, root).on_disk.max(1);
+        let first = if index.is_dir(id) {
+            format!("{} on disk · {} files", format::size(totals.on_disk), format::count(totals.files))
         } else {
-            self.categories.of_name(index.name(id)).name().to_owned()
+            format!("{} on disk · {}", format::size(totals.on_disk), self.categories.of_name(index.name(id)).name())
         };
-        let theme = cx.theme();
+        let second = format!(
+            "{} size · {:.1}%",
+            format::size(totals.logical),
+            totals.on_disk as f64 * 100.0 / whole as f64
+        );
+        let p = palette(cx);
         // Opens right of and below the pointer, flipping to the other side near an edge.
         let surface = self.bounds.get().size;
         let tip = v_flex().absolute().max_w(px(420.));
-        let tip = if at.x + px(440.) > surface.width {
+        let tip = if at.x + px(280.) > surface.width {
             tip.right(surface.width - at.x + px(14.))
         } else {
             tip.left(at.x + px(14.))
         };
-        let tip = if at.y + px(110.) > surface.height {
+        let tip = if at.y + px(80.) > surface.height {
             tip.bottom(surface.height - at.y + px(14.))
         } else {
             tip.top(at.y + px(14.))
         };
-        tip.px_2()
-            .py_1()
-            .gap_0p5()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .text_color(theme.popover_foreground)
-            .shadow_md()
-            .text_sm()
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(index.path(id).display().to_string()),
-            )
-            .child(format!(
-                "{} on disk · {} logical",
-                format::size(totals.on_disk),
-                format::size(totals.logical)
-            ))
-            .child(div().text_color(theme.muted_foreground).child(detail))
+        tip.px(px(10.))
+            .py(px(6.))
+            .gap(px(2.))
+            .rounded(px(8.))
+            .bg(p.primary)
+            .text_color(p.on_primary)
+            .text_xs()
+            .line_height(px(16.))
+            .child(div().font_weight(FontWeight::MEDIUM).child(index.name(id).to_owned()))
+            .child(first)
+            .child(second)
     }
 }
 
 impl Render for Treemap {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let panel = v_flex().size_full().p_2().gap_1();
+        let p = palette(cx);
+        let (free, ink, text, muted) = (p.free, p.tileink, p.text, p.muted);
+        let cats = Category::ALL.map(|c| p.category(c));
+        let panel = crate::ui::panel(cx).size_full().flex().flex_col();
         let shared = self.shared.clone();
         let index = shared.index.read();
         let root = self.view.as_ref().and_then(|v| self.root(&index, v));
         let (Some(view), Some(root)) = (self.view.clone(), root) else {
-            return panel.child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("No Volume indexed yet."),
-            );
+            return panel.child(div().text_color(muted).child("No Volume indexed yet."));
         };
 
-        let dark = cx.theme().is_dark();
-        let folder = cx.theme().muted;
-        let folder_edge = cx.theme().border;
-        let seam = cx.theme().background.opacity(0.7);
-        let ink = cx.theme().foreground;
-        let paper = cx.theme().background;
         let tiles = self.tiles.clone();
         let selected = self.selected;
         let bounds = self.bounds.clone();
@@ -566,92 +573,117 @@ impl Render for Treemap {
                     )
                 };
                 for tile in tiles.iter() {
-                    let fill = if tile.subdivided {
-                        folder
-                    } else {
-                        category_color(tile.category, dark)
-                    };
-                    // Files are split by 1px seams in the surface colour; each folder by a 1px
-                    // grey edge, so nesting reads even where the tile budget left a folder as
-                    // one block.
-                    let (width, edge) = if tile.rect.width() > 3.0 && tile.rect.height() > 3.0 {
-                        (px(1.), if tile.is_dir { folder_edge } else { seam })
-                    } else {
-                        (px(0.), seam)
-                    };
+                    // Folders that are subdivided show only through the gaps between their
+                    // children, so they take the panel's own colour.
+                    let fill = if tile.subdivided { free } else { cats[tile.category as usize] };
+                    // 1px seams in the panel colour separate tiles; tiny ones have no room.
+                    let big = tile.rect.width() > 3.0 && tile.rect.height() > 3.0;
+                    let radius = if big && !tile.subdivided && tile.rect.width() > 40.0 && tile.rect.height() > 40.0 { 4. } else { 0. };
                     window.paint_quad(quad(
                         at(tile.rect),
-                        0.,
+                        radius,
                         fill,
-                        width,
-                        edge,
+                        px(if big { 1. } else { 0. }),
+                        free,
                         BorderStyle::Solid,
                     ));
                 }
                 if let Some(tile) = selected.and_then(|s| tiles.iter().find(|t| t.id == s)) {
                     let clear = gpui_kit::transparent_black();
-                    window.paint_quad(quad(
-                        at(tile.rect),
-                        0.,
-                        clear,
-                        px(2.),
-                        ink,
-                        BorderStyle::Solid,
-                    ));
-                    window.paint_quad(quad(
-                        at(tile.rect.shrink(2.)),
-                        0.,
-                        clear,
-                        px(1.),
-                        paper,
-                        BorderStyle::Solid,
-                    ));
+                    window.paint_quad(quad(at(tile.rect.shrink(1.)), 4., clear, px(2.), text, BorderStyle::Solid));
                 }
             },
         )
         .size_full();
 
+        // Names and sizes on the tiles that have room for them, largest first.
+        let mut labels = Vec::new();
+        for tile in self.tiles.iter().filter(|t| !t.subdivided && t.rect.width() > 70.0 && t.rect.height() > 40.0) {
+            if labels.len() >= 60 || !index.is_live(tile.id) {
+                continue;
+            }
+            let parent = index
+                .parent(tile.id)
+                .filter(|&p| p != root && !tile.is_dir)
+                .map(|p| format!("{}/", index.name(p)));
+            let on_disk = view.filter.totals(&index, tile.id).on_disk;
+            labels.push(
+                v_flex()
+                    .absolute()
+                    .left(px(tile.rect.x0 + 1.))
+                    .top(px(tile.rect.y0 + 1.))
+                    .w(px(tile.rect.width() - 2.))
+                    .h(px(tile.rect.height() - 2.))
+                    .overflow_hidden()
+                    .px(px(8.))
+                    .py(px(6.))
+                    .text_xs()
+                    .line_height(px(16.))
+                    .text_color(ink)
+                    .children(parent.map(|name| div().flex_none().text_size(px(11.)).opacity(0.8).child(name)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w_full()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .whitespace_nowrap()
+                            .truncate()
+                            .child(index.name(tile.id).to_owned()),
+                    )
+                    .child(div().flex_none().child(format::size(on_disk))),
+            );
+        }
+
         let tooltip = self
             .hovered
             .filter(|&(id, _)| index.is_live(id))
-            .map(|(id, at)| self.tooltip(&index, &view, id, at, cx));
+            .map(|(id, at)| self.tooltip(&index, &view, root, id, at, cx));
         let header = self.header(&index, &view, root, cx);
-        panel.child(header).child(
-            div()
-                .id("treemap-surface")
-                .relative()
-                .flex_1()
-                .min_h_0()
-                .child(surface)
-                .children(tooltip)
-                .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
-                    let next = this.tile_at(e.position);
-                    if next.is_some() || this.hovered.is_some() {
-                        this.hovered = next;
-                        cx.notify();
-                    }
-                }))
-                .on_hover(cx.listener(|this, over: &bool, _, cx| {
-                    if !over && this.hovered.take().is_some() {
-                        cx.notify();
-                    }
-                }))
-                .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
-                    let Some((id, _)) = this.tile_at(e.position()) else {
-                        return;
-                    };
-                    if e.click_count() >= 2 {
-                        let shared = this.shared.clone();
-                        let folder = folder_of(&shared.index.read(), id);
-                        if let Some(folder) = folder {
-                            this.zoom_to(folder, cx);
+        let legend = self.legend(cx);
+        panel
+            .child(header)
+            .child(
+                div()
+                    .id("treemap-surface")
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .rounded(px(12.))
+                    .overflow_hidden()
+                    .bg(free)
+                    .child(surface)
+                    .children(labels)
+                    .children(tooltip)
+                    .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                        let next = this.tile_at(e.position);
+                        if next.is_some() || this.hovered.is_some() {
+                            this.hovered = next;
+                            cx.notify();
                         }
-                    } else {
-                        this.selected = Some(id);
-                        cx.notify();
-                    }
-                })),
-        )
+                    }))
+                    .on_hover(cx.listener(|this, over: &bool, _, cx| {
+                        if !over && this.hovered.take().is_some() {
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
+                        let Some((id, _)) = this.tile_at(e.position()) else {
+                            return;
+                        };
+                        if e.click_count() >= 2 {
+                            let shared = this.shared.clone();
+                            let folder = folder_of(&shared.index.read(), id);
+                            if let Some(folder) = folder {
+                                this.zoom_to(folder, cx);
+                            }
+                        } else {
+                            this.selected = Some(id);
+                            cx.notify();
+                        }
+                    })),
+            )
+            .child(legend)
     }
 }
 

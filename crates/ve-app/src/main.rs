@@ -12,9 +12,11 @@ mod format;
 mod settings;
 mod selection;
 mod settings_page;
+mod theme;
 mod trash;
 mod tree;
 mod treemap;
+mod ui;
 mod view;
 
 use gpui_kit::*;
@@ -60,11 +62,17 @@ fn main() {
         }];
     }
 
+    // Screenshots: show only the Volumes named in VE_VOLUMES (comma-separated mount points).
+    #[cfg(feature = "bench")]
+    if let Ok(list) = std::env::var("VE_VOLUMES") {
+        volumes.retain(|v| list.split(',').any(|m| v.mount == std::path::Path::new(m)));
+    }
+
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(theme::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            app::init_theme(settings.theme, cx);
+            theme::init(settings.theme, cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -74,7 +82,7 @@ fn main() {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
-                    size(px(1280.), px(820.)),
+                    size(px(1440.), px(900.)),
                     cx,
                 ))),
                 window_min_size: Some(size(px(720.), px(480.))),

@@ -2,30 +2,32 @@
 
 use crate::engine::Shared;
 use crate::format;
+use crate::theme::palette;
+use crate::ui::swatch;
 use crate::selection::Selection;
 use crate::view::{self, View};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex};
+use gpui_kit::component::{Icon, IconName, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use ve_core::{EntryId, Index};
+use ve_core::{Category, CategoryMap, EntryId, Index};
 
 /// Rows kept in `TreeList::cells` before it starts over.
 const CACHED_ROWS: usize = 512;
 const INDENT: f32 = 16.;
 /// Width of the columns after Name, which takes what is left of the list's width.
-const FIXED_WIDTH: f32 = 110. + 110. + 70. + 90. + 140. + 16.;
+const FIXED_WIDTH: f32 = 72. + 72. + 108. + 68. + 136. + 16.;
 const MIN_NAME_WIDTH: f32 = 160.;
 
 const COLUMNS: [(&str, f32, bool); 6] = [
     ("Name", 360., false),
-    ("On disk", 110., true),
-    ("Size", 110., true),
-    ("%", 70., true),
-    ("Files", 90., true),
-    ("Modified", 140., true),
+    ("On disk", 72., true),
+    ("Size", 72., true),
+    ("%", 108., true),
+    ("Files", 68., true),
+    ("Modified", 136., true),
 ];
 
 #[derive(Clone, Copy)]
@@ -45,16 +47,20 @@ struct Sort {
 struct Cells {
     depth: usize,
     name: String,
-    is_dir: bool,
     expandable: bool,
     open: bool,
     /// Shown only for what it contains, so drawn muted.
     muted: bool,
+    /// A file's Category, or the Category holding most of a folder; None for a Volume's root.
+    category: Option<Category>,
+    /// Share of the parent, 0..=1.
+    share: f32,
     texts: [String; 5],
 }
 
 pub struct TreeList {
     shared: Arc<Shared>,
+    categories: CategoryMap,
     view: Option<Arc<View>>,
     expanded: HashSet<EntryId>,
     rows: Vec<Row>,
@@ -67,9 +73,10 @@ pub struct TreeList {
 }
 
 impl TreeList {
-    pub fn new(shared: Arc<Shared>) -> Self {
+    pub fn new(shared: Arc<Shared>, categories: CategoryMap) -> Self {
         Self {
             shared,
+            categories,
             view: None,
             expanded: HashSet::new(),
             rows: Vec::new(),
@@ -81,6 +88,11 @@ impl TreeList {
             selection: Selection::default(),
             available: 0.,
         }
+    }
+
+    /// The size measure siblings are ordered by, for the Explorer's summary line.
+    pub fn sort_label(&self) -> &'static str {
+        if self.sort.on_disk { "On-disk Size" } else { "Size" }
     }
 
     pub fn entry_at(&self, row: usize) -> Option<EntryId> {
@@ -111,6 +123,17 @@ impl TreeList {
             self.selection.clear();
         }
         true
+    }
+
+    /// Screenshots (VE_DEMO): opens the first folder and selects the row after it.
+    #[cfg(feature = "bench")]
+    pub fn demo(&mut self) {
+        if let Some(id) = self.entry_at(0) {
+            self.toggle(id);
+            if let Some(next) = self.entry_at(2) {
+                self.selection.only(2, next);
+            }
+        }
     }
 
     fn toggle(&mut self, id: EntryId) {
@@ -204,6 +227,20 @@ impl TableDelegate for TreeList {
         self.rebuild();
     }
 
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let text = crate::theme::palette(cx).text;
+        div()
+            .size_full()
+            .text_size(px(12.))
+            .when(col_ix == if self.sort.on_disk { 1 } else { 2 }, |d| d.text_color(text).font_weight(FontWeight::MEDIUM))
+            .child(self.column(col_ix, cx).name.clone())
+    }
+
     fn render_last_empty_col(
         &mut self,
         _: &mut Window,
@@ -242,10 +279,20 @@ impl TableDelegate for TreeList {
                 Some(Cells {
                     depth,
                     name: index.name(id).to_owned(),
-                    is_dir,
                     expandable: index.children(id).iter().any(|&c| view.filter.is_shown(c)),
                     open: self.expanded.contains(&id),
                     muted: !view.query.trim().is_empty() && !view.filter.is_matched(id),
+                    category: match (is_dir, index.parent(id)) {
+                        (_, None) => None,
+                        (false, _) => Some(self.categories.of_name(index.name(id))),
+                        (true, _) => Some(crate::treemap::dominant_category(
+                            &index,
+                            &view.filter,
+                            &self.categories,
+                            id,
+                        )),
+                    },
+                    share: share as f32,
                     texts: [
                         format::size(totals.on_disk),
                         format::size(totals.logical),
@@ -264,10 +311,10 @@ impl TableDelegate for TreeList {
             }
         }
         let selected = self.entry_at(row).is_some_and(|id| self.selection.contains(id));
-        let accent = cx.theme().tokens.table_active;
+        let accent = crate::theme::palette(cx).active;
         div()
             .id(("row", row))
-            .when(selected, |d| d.bg(accent))
+            .when(selected, |d| d.bg(accent).rounded(px(8.)))
             .on_click(cx.listener(move |table, e: &ClickEvent, _, cx| {
                 let list = table.delegate_mut();
                 let ids: Vec<EntryId> = list.rows.iter().map(|r| r.id).collect();
@@ -286,56 +333,74 @@ impl TableDelegate for TreeList {
         let Some(c) = self.cells.get(&row) else {
             return div().into_any_element();
         };
-        let theme = cx.theme();
-        let cell = h_flex().size_full().overflow_hidden().whitespace_nowrap();
-        if col > 0 {
-            let cell = if col == 1 {
-                cell
-            } else {
-                cell.text_color(theme.muted_foreground)
-            };
+        let p = palette(cx);
+        let muted = p.muted;
+        let root = c.category.is_none();
+        let cell = h_flex()
+            .size_full()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_size(px(13.))
+            .when(root, |d| d.font_weight(FontWeight::MEDIUM));
+        if col == 3 {
             return cell
                 .justify_end()
-                .child(c.texts[col - 1].clone())
+                .gap(px(8.))
+                .child(
+                    div()
+                        .w(px(36.))
+                        .h(px(4.))
+                        .flex_none()
+                        .rounded(px(2.))
+                        .bg(p.free)
+                        .overflow_hidden()
+                        .child(div().h_full().w(relative(c.share.clamp(0.0, 1.0))).bg(p.accent)),
+                )
+                .child(div().w(px(44.)).text_right().child(c.texts[2].clone()))
                 .into_any_element();
+        }
+        if col > 0 {
+            let text = &c.texts[col - 1];
+            let cell = cell.justify_end();
+            // Folders alone have a Files figure; a missing time reads as a dash.
+            let blank = col == 5 && text.is_empty();
+            return if blank {
+                cell.text_color(muted).child("—")
+            } else {
+                cell.child(text.clone())
+            }
+            .into_any_element();
         }
         let id = self.rows[row].id;
         let chevron = if c.expandable {
-            let icon = if c.open {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            };
+            let icon = if c.open { IconName::ChevronDown } else { IconName::ChevronRight };
             div()
                 .id(("toggle", row))
-                .w_4()
+                .w(px(14.))
                 .flex_shrink_0()
                 .cursor_pointer()
-                .child(Icon::new(icon).size_4().text_color(theme.muted_foreground))
+                .child(Icon::new(icon).size(px(14.)).text_color(muted))
                 .on_click(cx.listener(move |table, _, _, cx| {
                     table.delegate_mut().toggle(id);
                     table.refresh(cx);
                     cx.stop_propagation();
                 }))
         } else {
-            div().id(("toggle", row)).w_4().flex_shrink_0()
+            div().id(("toggle", row)).w(px(14.)).flex_shrink_0()
         };
-        let icon = if c.is_dir {
-            IconName::Folder
-        } else {
-            IconName::File
+        let mark = match c.category {
+            None => Icon::new(IconName::Folder).size(px(14.)).text_color(muted).into_any_element(),
+            Some(category) => swatch(p.category(category)).mx(px(3.)).into_any_element(),
         };
         let name = h_flex()
-            .gap_1()
-            .child(Icon::new(icon).size_4().text_color(theme.muted_foreground))
+            .gap(px(6.))
+            .min_w_0()
+            .child(mark)
             .child(div().min_w_0().truncate().child(c.name.clone()));
         cell.pl(px(c.depth as f32 * INDENT))
+            .gap(px(6.))
             .child(chevron)
-            .child(if c.muted {
-                name.text_color(theme.muted_foreground)
-            } else {
-                name
-            })
+            .child(if c.muted { name.text_color(muted) } else { name })
             .into_any_element()
     }
 }
