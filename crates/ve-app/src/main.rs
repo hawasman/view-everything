@@ -1,9 +1,6 @@
 // Release builds on Windows are GUI apps without a console window.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-// The panels and Engine commands the egui build had return in later issues of the GPUI port.
-#![allow(dead_code)]
-
 mod app;
 #[cfg(feature = "bench")]
 mod bench;

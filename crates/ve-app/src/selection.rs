@@ -74,8 +74,9 @@ mod tests {
         assert_eq!(s.ids().len(), 2);
         s.click(2, Modifiers::control(), entry);
         assert_eq!(s.ids(), vec![EntryId(105)]);
+        // Shift extends from the last clicked row (2) to 7.
         s.click(7, Modifiers::shift(), entry);
-        assert_eq!(s.ids().len(), 3);
+        assert_eq!(s.ids().len(), 6);
         s.click(0, Modifiers::default(), entry);
         assert_eq!(s.ids(), vec![EntryId(100)]);
     }

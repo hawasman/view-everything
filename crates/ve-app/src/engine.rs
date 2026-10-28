@@ -65,6 +65,7 @@ pub enum Phase {
 
 enum Command {
     SetVolumes(Vec<VolumeInfo>),
+    #[allow(dead_code)]
     Refresh,
     SetRefresh(Duration),
     Shutdown,
@@ -135,6 +136,8 @@ impl Engine {
         let _ = self.commands.send(Command::SetRefresh(every));
     }
 
+    // Rescan-now has no button yet; the Dashboard brings it.
+    #[allow(dead_code)]
     pub fn refresh(&self) {
         let _ = self.commands.send(Command::Refresh);
     }
@@ -436,5 +439,39 @@ fn run_viewer(shared: &Shared, queries: &Receiver<String>, categories: &Category
         computed = Some((text.clone(), generation));
         last_compute = Instant::now();
         (shared.repaint)();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shared() -> Shared {
+        Shared {
+            index: SharedIndex::new(Index::new()),
+            progress: Progress::default(),
+            status: Mutex::new(Status {
+                phase: Phase::Idle,
+                problems: Vec::new(),
+            }),
+            view: Mutex::new(None),
+            query_error: Mutex::new(None),
+            busy: AtomicBool::new(false),
+            saving: Mutex::new(()),
+            repaint: Arc::new(|| {}),
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_problem_clears_when_its_cause_resolves() {
+        let shared = shared();
+        shared.report("volume /a", "Could not read /a".into());
+        shared.report("volume /b", "Could not read /b".into());
+        // The same cause reported again replaces its message instead of piling up.
+        shared.report("volume /a", "Could not read /a: again".into());
+        assert_eq!(shared.status.lock().problems.len(), 2);
+        shared.resolve("volume /a");
+        let problems = shared.status.lock().problems.clone();
+        assert_eq!(problems, vec![("volume /b".to_owned(), "Could not read /b".to_owned())]);
     }
 }

@@ -582,7 +582,7 @@ impl FiltersPanel {
         ];
         // The picker can only print a closed range; an open-ended one is shown as its placeholder.
         let modified = &self.form.modified;
-        let placeholder: SharedString = match modified.on.then_some(modified.value).unwrap_or_default() {
+        let placeholder: SharedString = match if modified.on { modified.value } else { Default::default() } {
             (Some(from), None) => format!("since {from}").into(),
             (None, Some(to)) => format!("until {to}").into(),
             _ => "any date".into(),

@@ -264,7 +264,7 @@ impl TableDelegate for TreeList {
             }
         }
         let selected = self.entry_at(row).is_some_and(|id| self.selection.contains(id));
-        let accent = cx.theme().accent;
+        let accent = cx.theme().tokens.table_active;
         div()
             .id(("row", row))
             .when(selected, |d| d.bg(accent))

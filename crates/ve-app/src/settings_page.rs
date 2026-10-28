@@ -55,7 +55,9 @@ impl SettingsPage {
         });
         cx.subscribe_in(&refresh, window, |this, input, event: &InputEvent, window, cx| {
             match event {
-                InputEvent::Change => {
+                // Typing "15" must not apply 1 on the way, so the value is taken on Enter or when
+                // the field is left; junk puts the applied value back.
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
                     let minutes = input.read(cx).value().trim().parse::<u64>().ok();
                     if let Some(m) = minutes.filter(|m| REFRESH_RANGE.contains(m))
                         && m != this.settings.refresh_minutes
@@ -63,9 +65,6 @@ impl SettingsPage {
                         this.settings.refresh_minutes = m;
                         this.commit(cx);
                     }
-                }
-                // Leaving the field with junk in it puts the applied value back.
-                InputEvent::Blur => {
                     let text = this.settings.refresh_minutes.to_string();
                     input.update(cx, |input, cx| input.set_value(text, window, cx));
                 }

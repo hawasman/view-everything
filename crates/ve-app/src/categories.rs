@@ -1,6 +1,5 @@
 //! The Category breakdown panel: Filtered Size per Category, expandable to its extensions.
 
-use crate::engine::Shared;
 use crate::format;
 use crate::treemap::category_color;
 use crate::view::View;
@@ -21,7 +20,6 @@ fn tabular_figures() -> FontFeatures {
 const BAR_HEIGHT: Pixels = px(6.);
 
 pub struct CategoryPanel {
-    shared: Arc<Shared>,
     query: Entity<InputState>,
     view: Option<Arc<View>>,
     open: HashSet<Category>,
@@ -29,9 +27,8 @@ pub struct CategoryPanel {
 
 impl CategoryPanel {
     /// `query` is the Query input that clicking a Category or extension adds a term to.
-    pub fn new(shared: Arc<Shared>, query: Entity<InputState>) -> Self {
+    pub fn new(query: Entity<InputState>) -> Self {
         Self {
-            shared,
             query,
             view: None,
             open: HashSet::new(),

@@ -130,7 +130,7 @@ impl Shell {
                 .select_on_modifier_click(false)
         });
         let treemap = cx.new(|cx| Treemap::new(engine.shared.clone(), categories.clone(), cx));
-        let category_panel = cx.new(|_| CategoryPanel::new(engine.shared.clone(), query.clone()));
+        let category_panel = cx.new(|_| CategoryPanel::new(query.clone()));
 
         let tree = cx.new(|cx| {
             TableState::new(TreeList::new(engine.shared.clone()), window, cx)
@@ -436,7 +436,7 @@ impl Shell {
             .child(
                 h_flex()
                     .flex_1()
-                    .min_h_0()
+                    .min_h(px(150.))
                     .child(
                         div()
                             .relative()
@@ -449,7 +449,8 @@ impl Shell {
                     )
                     .child(div().w(px(280.)).h_full().child(self.categories.clone())),
             )
-            .child(div().h(px(340.)).child(self.treemap.clone()))
+            // Open Filters need the room; the Treemap comes back when they close.
+            .when(!self.show_filters, |c| c.child(div().h(px(340.)).child(self.treemap.clone())))
     }
 
     fn dashboard(&self) -> impl IntoElement {
