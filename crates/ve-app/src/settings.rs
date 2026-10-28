@@ -32,6 +32,9 @@ pub struct Settings {
     /// Light, Dark, or following the system.
     #[serde(default)]
     pub theme: ThemeChoice,
+    /// The Query behind the Dashboard's Recently modified table; the default when unset.
+    #[serde(default)]
+    pub recent_query: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,7 +62,16 @@ impl Default for Settings {
             refresh_minutes: default_refresh_minutes(),
             volume_refresh_minutes: BTreeMap::new(),
             theme: ThemeChoice::System,
+            recent_query: None,
         }
+    }
+}
+
+/// Under the home folder, outside hidden folders: no path part starts with a dot.
+pub fn default_recent_query() -> String {
+    match dirs::home_dir() {
+        Some(home) => format!("\"{}/*\" !\"*/.*\"", home.display()),
+        None => "!\"*/.*\"".to_owned(),
     }
 }
 
@@ -77,6 +89,15 @@ impl Settings {
         } else {
             !volume.opt_in() || self.include.iter().any(|k| names(k, volume))
         }
+    }
+
+    /// The Query behind Recently modified: the saved one, or the default.
+    pub fn recent_query_text(&self) -> String {
+        self.recent_query
+            .as_ref()
+            .filter(|q| !q.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(default_recent_query)
     }
 
     /// Records whether the user wants `volume` indexed.
@@ -309,5 +330,28 @@ mod tests {
         s.decline(&usb);
         s.forget(&usb.identity, &usb.mount);
         assert!(s.declined.is_empty());
+    }
+
+    #[test]
+    fn the_recent_query_defaults_to_home_outside_hidden_folders_and_persists() {
+        use ve_core::{Candidate, CategoryMap, Query, QueryContext};
+        let default = Settings::default();
+        let context = QueryContext::new(CategoryMap::builtin(), chrono::Local::now());
+        let query = Query::parse(&default.recent_query_text(), &context).unwrap();
+        let home = dirs::home_dir().expect("a home folder").display().to_string();
+        let holds = |path: &str| {
+            let name = path.rsplit('/').next().unwrap();
+            query.matches(&Candidate { name, path: Some(path), is_dir: false, logical: 0, modified: 0 })
+        };
+        assert!(holds(&format!("{home}/Documents/a.pdf")));
+        assert!(!holds(&format!("{home}/.cache/a.pdf")));
+        assert!(!holds(&format!("{home}/Projects/.git/config")));
+        assert!(!holds("/var/lib/other/a.pdf"));
+        // An edited Query is saved with the settings and read back.
+        let edited = Settings { recent_query: Some("type:video".into()), ..default };
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&edited).unwrap()).unwrap();
+        assert_eq!(back.recent_query_text(), "type:video");
+        // A blank one means the default again.
+        assert_eq!(Settings { recent_query: Some("  ".into()), ..back }.recent_query_text(), default_recent_query());
     }
 }
