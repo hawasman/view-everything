@@ -61,8 +61,6 @@ pub struct Shell {
     volumes: Vec<VolumeInfo>,
     /// Identities of the Volumes already offered for indexing this session.
     offered: HashSet<String>,
-    /// The Volumes the Index holds, as the sidebar lists them.
-    indexed: Vec<VolumeInfo>,
     startup_problems: Vec<String>,
     /// The Explorer lists' width in pixels, as of the last paint.
     list_width: Rc<Cell<f32>>,
@@ -84,7 +82,6 @@ impl Shell {
             .filter(|v| settings.is_indexed(v))
             .cloned()
             .collect();
-        let shown_volumes = indexed.clone();
         let intervals = settings.intervals(&indexed);
         // One pending wake-up is enough: the window then reads everything that changed.
         let (wake, woken) = async_channel::bounded::<()>(1);
@@ -97,7 +94,6 @@ impl Shell {
 
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
         cx.subscribe(&settings_page, |this, _, changed: &Changed, cx| {
-            this.indexed = changed.indexed.clone();
             this.engine.set_volumes(changed.mounted.clone(), changed.indexed.clone());
             this.engine.set_intervals(changed.intervals.clone());
             // Saved fine, so the settings file read at startup has been replaced.
@@ -246,7 +242,6 @@ impl Shell {
             categories: category_panel,
             volumes,
             offered: HashSet::new(),
-            indexed: shown_volumes,
             startup_problems,
             list_width: Rc::default(),
             #[cfg(feature = "bench")]
@@ -258,6 +253,12 @@ impl Shell {
     /// removable Volume never seen before is offered for indexing.
     fn mounts_changed(&mut self, now: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) {
         let before = std::mem::replace(&mut self.volumes, now.clone());
+        // An unmounted Volume's 'Index this?' no longer applies; a replug asks again.
+        let gone: Vec<String> = self.offered.iter().filter(|id| !now.iter().any(|v| &v.identity == *id)).cloned().collect();
+        for id in gone {
+            window.remove_notification1::<Shell>(id.clone(), cx);
+            self.offered.remove(&id);
+        }
         let offers = {
             let index = self.engine.shared.index.read();
             self.settings_page
@@ -536,9 +537,30 @@ impl Shell {
             Phase::Syncing { volumes, .. } => volumes.clone(),
             _ => Vec::new(),
         };
-        let locations = self.indexed.iter().enumerate().map(|(ix, v)| {
-            let name = volume_name(v);
-            let state = if syncing.contains(&v.mount) { accent } else { positive };
+        // Every Location in the Index: Offline Volumes too, with a grey dot.
+        let rows: Vec<(String, Hsla)> = self
+            .engine
+            .shared
+            .index
+            .read()
+            .volumes()
+            .map(|(_, v)| {
+                let name = match self.volumes.iter().find(|m| m.identity == v.identity) {
+                    Some(m) => volume_name(m),
+                    None => v.mount.display().to_string(),
+                };
+                let state = if !v.online {
+                    muted
+                } else if syncing.contains(&v.mount) {
+                    accent
+                } else {
+                    positive
+                };
+                (name, state)
+            })
+            .collect();
+        let count = rows.len();
+        let locations = rows.into_iter().enumerate().map(|(ix, (name, state))| {
             h_flex()
                 .id(("location", ix))
                 .h(px(32.))
@@ -550,7 +572,6 @@ impl Shell {
                 .child(dot(state))
                 .child(div().min_w_0().truncate().child(name))
         });
-        let count = self.indexed.len();
         let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "user".into());
         let initial = user.chars().next().map_or('U', |c| c.to_ascii_uppercase());
         let display_name = format!("{initial}{}", user.chars().skip(1).collect::<String>());
