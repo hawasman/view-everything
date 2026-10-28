@@ -4,6 +4,9 @@ use std::path::PathBuf;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VolumeInfo {
     pub mount: PathBuf,
+    /// The filesystem's own identity (UUID or serial), so a Volume is the same at any mount
+    /// path; device and mount path where the platform has none.
+    pub identity: String,
     /// Filesystem name as the OS reports it, such as `ext4`, `btrfs` or `NTFS`.
     pub fs_type: String,
     /// Human-readable label or device, for display.

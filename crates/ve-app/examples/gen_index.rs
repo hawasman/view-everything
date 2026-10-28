@@ -10,7 +10,7 @@ fn main() {
     let out = args.next().expect("output path");
     let mut index = Index::new();
     let root_meta = EntryMeta { is_dir: true, ..Default::default() };
-    let volume = index.add_volume(Path::new("/ve-bench"), "ext4", root_meta, SyncState::Walk);
+    let volume = index.add_volume(Path::new("/ve-bench"), "ext4", "bench", root_meta, SyncState::Walk);
     let root = index.volume(volume).unwrap().root;
     let exts = ["mp4", "jpg", "rs", "txt", "zip", "pdf", "mp3", "exe", "log", "bin"];
     let mut made = 0;

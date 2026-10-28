@@ -59,7 +59,14 @@ pub struct Capacity {
 /// An Indexed Volume.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Volume {
+    /// Where the filesystem is mounted now, or was when last seen if it is offline.
     pub mount: PathBuf,
+    /// What makes this Volume the same Volume at any mount path: the filesystem's UUID or
+    /// serial, or device and mount path where the platform has none.
+    pub identity: String,
+    /// Mounted right now. Not saved: a loaded Volume is offline until the launch finds it.
+    #[serde(skip)]
+    pub online: bool,
     pub fs_type: String,
     pub root: EntryId,
     pub sync: SyncState,
@@ -91,8 +98,8 @@ const NO_PARENT: u32 = u32::MAX;
 const NO_SLOT: u32 = u32::MAX;
 
 const MAGIC: &[u8; 8] = b"VEINDEX\0";
-/// v2 adds Last Synced and capacity per Volume.
-const FORMAT_VERSION: u32 = 2;
+/// v2 adds Last Synced and capacity per Volume; v3 adds the Volume's identity.
+const FORMAT_VERSION: u32 = 3;
 
 /// The persistent record of every Entry on every Indexed Volume.
 ///
@@ -150,6 +157,7 @@ impl Index {
         &mut self,
         mount: &Path,
         fs_type: &str,
+        identity: &str,
         meta: EntryMeta,
         sync: SyncState,
     ) -> VolumeId {
@@ -157,6 +165,8 @@ impl Index {
         let root = self.push(NO_PARENT, &mount.to_string_lossy(), meta);
         let volume = Volume {
             mount: mount.to_path_buf(),
+            identity: identity.to_owned(),
+            online: true,
             fs_type: fs_type.to_owned(),
             root,
             sync,
@@ -183,6 +193,30 @@ impl Index {
 
     pub fn volume(&self, id: VolumeId) -> Option<&Volume> {
         self.volumes.get(id.0 as usize)?.as_ref()
+    }
+
+    /// The Volume with filesystem identity `identity`.
+    pub fn volume_with_identity(&self, identity: &str) -> Option<VolumeId> {
+        self.volumes()
+            .find(|(_, v)| v.identity == identity)
+            .map(|(id, _)| id)
+    }
+
+    /// Records that `id` is mounted at `mount` (a remount keeps every Entry), or not mounted.
+    pub fn set_mount(&mut self, id: VolumeId, mount: Option<&Path>) {
+        let Some(Some(volume)) = self.volumes.get_mut(id.0 as usize) else {
+            return;
+        };
+        volume.online = mount.is_some();
+        let Some(mount) = mount.filter(|m| *m != volume.mount) else {
+            return;
+        };
+        volume.mount = mount.to_path_buf();
+        let root = volume.root;
+        let (start, len) = self.store_name(&mount.to_string_lossy());
+        self.name_start[root.index()] = start;
+        self.name_len[root.index()] = len;
+        self.touch();
     }
 
     pub fn set_sync_state(&mut self, id: VolumeId, sync: SyncState) {

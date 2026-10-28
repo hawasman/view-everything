@@ -15,7 +15,7 @@ fn root() -> EntryMeta {
 fn index_with(mounts: &[&str]) -> Index {
     let mut index = Index::new();
     for mount in mounts {
-        index.add_volume(Path::new(mount), "ext4", root(), SyncState::Walk);
+        index.add_volume(Path::new(mount), "ext4", mount, root(), SyncState::Walk);
     }
     index
 }
@@ -87,6 +87,7 @@ fn ntfs_volumes_always_catch_up() {
     let id = index.add_volume(
         Path::new("C:\\"),
         "NTFS",
+        "guid:c",
         root(),
         SyncState::Ntfs { journal_id: 1, next_usn: 0 },
     );
@@ -105,4 +106,33 @@ fn the_overall_last_synced_is_the_oldest_volume() {
     assert_eq!(index.oldest_synced(), Some(None));
     index.mark_synced(ids[1], 300, None);
     assert_eq!(index.oldest_synced(), Some(Some(300)));
+}
+
+#[test]
+fn a_v2_file_is_refused_as_needing_a_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.bin");
+    let mut v2 = b"VEINDEX\0".to_vec();
+    v2.extend_from_slice(&2u32.to_le_bytes());
+    v2.extend_from_slice(&[0xAB; 64]);
+    std::fs::write(&path, v2).unwrap();
+    let err = Index::load(&path).err().expect("v2 must not load");
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert!(err.to_string().contains("needs rebuild"), "{err}");
+}
+
+#[test]
+fn identity_survives_a_save_and_a_remount_renames_the_root() {
+    let mut index = index_with(&["/mnt/a"]);
+    let id = index.volume_with_identity("/mnt/a").unwrap();
+    index.set_mount(id, Some(Path::new("/run/media/a")));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.bin");
+    index.save(&path).unwrap();
+    let back = Index::load(&path).unwrap();
+    let id = back.volume_with_identity("/mnt/a").unwrap();
+    let volume = back.volume(id).unwrap();
+    assert_eq!(volume.mount, Path::new("/run/media/a"));
+    assert_eq!(back.name(volume.root), "/run/media/a");
+    assert!(!volume.online);
 }

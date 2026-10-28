@@ -17,7 +17,7 @@ fn loaded() -> Index {
         ..EntryMeta::default()
     };
     let mut index = Index::new();
-    let volume = index.add_volume(Path::new("X:\\"), "NTFS", root, SyncState::Walk);
+    let volume = index.add_volume(Path::new("X:\\"), "NTFS", "guid:x", root, SyncState::Walk);
     let index = SharedIndex::new(index);
     let progress = Progress::default();
     ve_scan::ntfs::load(&index, volume, Cursor::new(image), &progress).unwrap();

@@ -7,12 +7,14 @@
 mod capacity;
 pub mod ntfs;
 mod platform;
+mod reconcile;
 mod volumes;
 mod walk;
 
 #[cfg(windows)]
 pub use platform::windows::{is_elevated, relaunch_elevated};
 pub use capacity::capacity;
+pub use reconcile::reconcile;
 pub use volumes::{VolumeInfo, discover_volumes};
 
 use parking_lot::RecursiveRwLock;
@@ -47,11 +49,16 @@ impl Progress {
 }
 
 /// Adds the Volume mounted at `mount` to the Index with only its root, ready for [`sync`].
-pub fn add_volume(index: &SharedIndex, mount: &Path, fs_type: &str) -> io::Result<VolumeId> {
+pub fn add_volume(
+    index: &SharedIndex,
+    mount: &Path,
+    fs_type: &str,
+    identity: &str,
+) -> io::Result<VolumeId> {
     let meta = walk::root_meta(mount)?;
     Ok(index
         .write()
-        .add_volume(mount, fs_type, meta, SyncState::Walk))
+        .add_volume(mount, fs_type, identity, meta, SyncState::Walk))
 }
 
 /// Brings one Volume in the Index up to date with the filesystem.
