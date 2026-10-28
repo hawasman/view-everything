@@ -1,7 +1,7 @@
 //! Noticing Volumes mounted or unmounted while the app runs.
 //!
 //! Linux waits for the kernel to flag a change of `/proc/self/mountinfo` (`POLLPRI`), so a
-//! plugged-in disk is seen at once and an idle app uses no CPU. Windows and macOS compare the
+//! newly mounted Volume is seen at once and an idle app uses no CPU. Windows and macOS compare the
 //! list of mounted Volumes every few seconds; their native events (`WM_DEVICECHANGE`,
 //! DiskArbitration) need a message loop or run loop that this thread does not own.
 
@@ -17,24 +17,24 @@ const SETTLE: Duration = Duration::from_millis(300);
 const POLL: Duration = Duration::from_secs(3);
 
 /// Starts a thread that calls `on_change` with the Volumes mounted now whenever they differ
-/// from the last look.
-pub fn watch(on_change: impl FnMut(Vec<VolumeInfo>) + Send + 'static) {
+/// from the last look, the first being `initial`.
+pub fn watch(initial: Vec<VolumeInfo>, on_change: impl FnMut(Vec<VolumeInfo>) + Send + 'static) {
     let spawned = thread::Builder::new()
         .name("ve-watch".into())
-        .spawn(move || run(mount_waiter(), discover_volumes, on_change));
+        .spawn(move || run(initial, mount_waiter(), discover_volumes, on_change));
     if let Err(e) = spawned {
-        eprintln!("Cannot watch for new disks: {e}");
+        eprintln!("Cannot watch for new Volumes: {e}");
     }
 }
 
 /// Reports each change to what `look` finds, once `wait` says something may have changed;
 /// ends when `wait` returns false.
 fn run(
+    mut last: Vec<VolumeInfo>,
     mut wait: impl FnMut() -> bool,
     mut look: impl FnMut() -> Vec<VolumeInfo>,
     mut on_change: impl FnMut(Vec<VolumeInfo>),
 ) {
-    let mut last = look();
     while wait() {
         let now = look();
         if now != last {
@@ -96,16 +96,17 @@ mod tests {
     #[test]
     fn only_a_changed_list_of_volumes_is_reported() {
         let (a, b) = (volume("/a"), volume("/b"));
+        let first = vec![a.clone()];
         let mut looks = vec![
-            vec![a.clone()],
-            vec![a.clone()],           // woken, nothing new
+            vec![a.clone()],            // woken, nothing new
             vec![a.clone(), b.clone()], // plugged in
-            vec![a.clone()],           // unplugged
+            vec![a.clone()],            // unplugged
         ]
         .into_iter();
         let mut wakes = 3;
         let mut seen = Vec::new();
         run(
+            first,
             || {
                 wakes -= 1;
                 wakes >= 0
@@ -122,9 +123,11 @@ mod tests {
         let usb = VolumeInfo { mount: dir.path().into(), ..volume("/x") };
         let index = crate::SharedIndex::new(ve_core::Index::new());
         crate::reconcile(&index, std::slice::from_ref(&usb), std::slice::from_ref(&usb));
-        let mut looks = vec![vec![usb.clone()], vec![], vec![usb.clone()]].into_iter();
+        let first = vec![usb.clone()];
+        let mut looks = vec![vec![], vec![usb.clone()]].into_iter();
         let (mut wakes, mut caught_up) = (2, Vec::new());
         run(
+            first,
             || {
                 wakes -= 1;
                 wakes >= 0

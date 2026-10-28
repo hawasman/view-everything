@@ -185,7 +185,7 @@ impl Shell {
         })
         .detach();
 
-        // Disks plugged in while running: a returning Offline Volume catches up at once, a new
+        // Volumes mounted while running: a returning Offline Volume catches up at once, a new
         // removable one is offered for indexing.
         #[cfg(feature = "bench")]
         let watching = std::env::var_os("VE_BENCH_MOUNT").is_none();
@@ -193,7 +193,7 @@ impl Shell {
         let watching = true;
         if watching {
             let (mounts, mounted) = async_channel::unbounded::<Vec<VolumeInfo>>();
-            ve_scan::watch::watch(move |now| {
+            ve_scan::watch::watch(volumes.clone(), move |now| {
                 let _ = mounts.send_blocking(now);
             });
             cx.spawn_in(window, async move |this, cx| {
@@ -257,7 +257,7 @@ impl Shell {
     fn offer_to_index(&mut self, volume: VolumeInfo, window: &mut Window, cx: &mut Context<Self>) {
         let shell = cx.entity().downgrade();
         let name = if volume.label.is_empty() { volume.mount.display().to_string() } else { volume.label.clone() };
-        let note = Notification::info(format!("{name} was connected. Index it so its files can be searched and sized?"))
+        let note = Notification::info(format!("{name} was mounted. Index it so its files can be searched and sized?"))
             .title("Index this?")
             .id1::<Shell>(volume.identity.clone())
             .autohide(false)

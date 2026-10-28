@@ -127,6 +127,10 @@ impl SettingsPage {
             .save()
             .err()
             .map(|e| format!("Could not save settings: {e}"));
+        self.emit_changed(cx);
+    }
+
+    fn emit_changed(&mut self, cx: &mut Context<Self>) {
         let indexed: Vec<VolumeInfo> = self
             .volumes
             .iter()
@@ -321,7 +325,9 @@ impl SettingsPage {
             })
             .collect();
         self.volumes = volumes;
-        self.commit(cx);
+        // Nothing to save: only what is mounted changed (and a settings file that could not be
+        // read at startup must not be overwritten by a hot-plug).
+        self.emit_changed(cx);
     }
 
     /// Changes the settings with `change`, saves them and tells the window.
