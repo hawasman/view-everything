@@ -94,7 +94,6 @@ impl DashboardPage {
         trash: Trash,
         categories: CategoryMap,
         settings: &Settings,
-        volumes: Vec<VolumeInfo>,
         repaint: crate::engine::Repaint,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -114,6 +113,8 @@ impl DashboardPage {
         if std::env::var_os("VE_DASH_BENCH").is_some() {
             bench::start(latest.clone(), window, cx);
         }
+        #[cfg(not(feature = "bench"))]
+        let _ = window;
         let mut page = Self {
             shared,
             trash,
@@ -125,7 +126,7 @@ impl DashboardPage {
             recent_query,
             editing: None,
         };
-        page.set_context(settings, volumes, cx);
+        page.set_context(settings, Vec::new(), cx);
         page
     }
 

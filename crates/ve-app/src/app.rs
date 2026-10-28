@@ -95,16 +95,10 @@ impl Shell {
         let trash = Trash::new(engine.shared.clone(), repaint.clone());
 
         let dashboard = cx.new(|cx| {
-            DashboardPage::new(
-                engine.shared.clone(),
-                trash.clone(),
-                categories.clone(),
-                &settings,
-                volumes.clone(),
-                repaint,
-                window,
-                cx,
-            )
+            let mut page =
+                DashboardPage::new(engine.shared.clone(), trash.clone(), categories.clone(), &settings, repaint, window, cx);
+            page.set_context(&settings, volumes.clone(), cx);
+            page
         });
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
         cx.subscribe_in(&dashboard, window, |this, _, act: &Act, window, cx| this.dashboard_act(act, window, cx))
