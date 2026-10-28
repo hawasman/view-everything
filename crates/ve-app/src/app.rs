@@ -69,6 +69,10 @@ enum Dialog {
     ConfirmEmptyTrash {
         size: Option<u64>,
     },
+    /// Empty Trash left items the user may not delete; offers to delete them as root.
+    DeleteAsAdmin {
+        failures: Vec<trash::PurgeFailure>,
+    },
     Volumes {
         choices: Vec<(VolumeInfo, bool)>,
         refresh_minutes: u64,
@@ -79,6 +83,7 @@ enum Dialog {
 enum Confirmed {
     Trash(Vec<PathBuf>),
     EmptyTrash,
+    DeleteAsAdmin(Vec<PathBuf>),
     Volumes(Vec<(VolumeInfo, bool)>, u64),
 }
 
@@ -88,7 +93,8 @@ enum Job {
         missing: Vec<PathBuf>,
         error: Option<String>,
     },
-    Emptied(Result<(), String>),
+    Emptied(Result<trash::EmptyOutcome, String>),
+    AdminDeleted(Result<(), String>),
     TrashSize(Option<u64>),
 }
 
@@ -268,10 +274,43 @@ impl App {
                     self.notify(text.trim().to_owned());
                     self.measure_trash(ctx);
                 }
-                Job::Emptied(result) => {
+                Job::Emptied(Err(e)) => {
+                    self.notify(format!("Could not empty the Trash: {e}"));
+                    self.measure_trash(ctx);
+                }
+                Job::Emptied(Ok(outcome)) => {
+                    let (needs_admin, other): (Vec<_>, Vec<_>) = outcome
+                        .failed
+                        .into_iter()
+                        .partition(|f| f.admin_paths.is_some());
+                    let mut text = match outcome.purged {
+                        0 => String::new(),
+                        n => format!("Permanently deleted {n} item(s) from the Trash."),
+                    };
+                    if let Some(first) = other.first() {
+                        text.push_str(&format!(
+                            " {} item(s) could not be deleted: {} ({})",
+                            other.len(),
+                            first.original.display(),
+                            first.error
+                        ));
+                    }
+                    if !text.is_empty() {
+                        self.notify(text.trim_start().to_owned());
+                    }
+                    if !needs_admin.is_empty() {
+                        self.dialog = Some(Dialog::DeleteAsAdmin {
+                            failures: needs_admin,
+                        });
+                    }
+                    self.measure_trash(ctx);
+                }
+                Job::AdminDeleted(result) => {
                     match result {
-                        Ok(()) => self.notify("Emptied the Trash."),
-                        Err(e) => self.notify(format!("Could not empty the Trash: {e}")),
+                        Ok(()) => {
+                            self.notify("Deleted the remaining Trash items as administrator.")
+                        }
+                        Err(e) => self.notify(format!("Left in the Trash: {e}")),
                     }
                     self.measure_trash(ctx);
                 }
@@ -1030,6 +1069,41 @@ impl App {
                         }
                     });
                 }
+                Dialog::DeleteAsAdmin { failures } => {
+                    ui.heading("Administrator rights needed");
+                    ui.label(
+                        "These Trash items contain files your user may not delete, usually because \
+                         something created them as root. Delete them as administrator?",
+                    );
+                    for failure in failures.iter() {
+                        ui.label(RichText::new(failure.original.display().to_string()).strong())
+                            .on_hover_text(&failure.error);
+                    }
+                    let paths: Vec<PathBuf> =
+                        failures.iter().flat_map(|f| f.admin_paths.iter().flatten().cloned()).collect();
+                    ui.add_space(6.0);
+                    ui.label("You will be asked for your password once. Only this command runs as root:");
+                    egui::Frame::new()
+                        .fill(ui.visuals().extreme_bg_color)
+                        .inner_margin(6.0)
+                        .show(ui, |ui| {
+                            ui.add(egui::Label::new(
+                                RichText::new(trash::admin_command(&paths).join(" ")).monospace(),
+                            ).wrap());
+                        });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let danger = egui::Button::new(RichText::new("Delete as administrator").color(Color32::WHITE))
+                            .fill(ui.visuals().error_fg_color);
+                        if ui.add(danger).clicked() {
+                            confirmed = Some(Confirmed::DeleteAsAdmin(paths));
+                            close = true;
+                        }
+                        if ui.button("Leave in Trash").clicked() {
+                            close = true;
+                        }
+                    });
+                }
                 Dialog::Volumes { choices, refresh_minutes } => {
                     ui.heading("Indexed Volumes");
                     ui.label("Local fixed Volumes are indexed by default; removable ones only when ticked.");
@@ -1074,6 +1148,7 @@ impl App {
         match confirmed {
             Some(Confirmed::Trash(items)) => self.start_trash(items),
             Some(Confirmed::EmptyTrash) => self.start_empty_trash(),
+            Some(Confirmed::DeleteAsAdmin(paths)) => self.start_admin_delete(paths),
             Some(Confirmed::Volumes(choices, minutes)) => self.save_volumes(choices, minutes),
             None => {}
         }
@@ -1105,6 +1180,15 @@ impl App {
                 },
             };
             let _ = sender.send(job);
+            ctx.request_repaint();
+        });
+    }
+
+    fn start_admin_delete(&mut self, paths: Vec<PathBuf>) {
+        let ctx = self.ctx.clone();
+        let sender = self.job_sender.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(Job::AdminDeleted(trash::delete_as_admin(&paths)));
             ctx.request_repaint();
         });
     }
