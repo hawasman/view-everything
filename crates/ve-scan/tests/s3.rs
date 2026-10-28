@@ -276,3 +276,24 @@ fn an_s3_remote_survives_a_save_and_settings_style_round_trip() {
     ve_scan::reconcile_remotes(&loaded, &[]);
     assert_eq!(loaded.read().volumes().count(), 0);
 }
+
+/// Typed keys end to end through the real OS keyring. Needs a Secret Service / Keychain /
+/// Credential Manager, so not run by default: `cargo test -p ve-scan --test s3 -- --ignored`.
+#[test]
+#[ignore]
+fn typed_keys_take_their_secret_from_the_keyring() {
+    let server = start(&OBJECTS);
+    *server.state.require_key.lock().unwrap() = Some("AKIATEST".into());
+    let remote = remote(&server, "photos");
+    let identity = remote.identity();
+    s3::store_secret(&identity, "typed-secret").unwrap();
+    let index = SharedIndex::new(Index::new());
+    let id = index.write().add_remote(&Remote::S3(remote));
+    let result = s3::sync(&index, id, &Progress::default());
+    s3::forget_secret(&identity);
+    result.unwrap();
+    assert_eq!(index.read().live_count(), 8);
+    // With the secret gone the sync says where it should have been.
+    let err = s3::sync(&index, id, &Progress::default()).unwrap_err();
+    assert!(err.to_string().contains("OS keyring"), "{err}");
+}

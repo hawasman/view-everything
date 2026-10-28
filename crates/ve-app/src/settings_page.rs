@@ -13,10 +13,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use crate::engine::{Intervals, last_synced_label};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::tooltip::Tooltip;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use ve_core::Remote;
+use ve_core::{Remote, S3Remote};
 use ve_scan::VolumeInfo;
 
 /// The refresh choices, in minutes; 0 is Manual (never re-read while running).
@@ -40,6 +39,56 @@ impl SelectItem for Every {
 }
 
 type RefreshSelect = Entity<SelectState<Vec<Every>>>;
+
+/// The fields of the Add Remote dialog's S3 tab.
+#[derive(Clone)]
+struct S3Form {
+    bucket: Entity<InputState>,
+    prefix: Entity<InputState>,
+    endpoint: Entity<InputState>,
+    region: Entity<InputState>,
+    profile: Entity<InputState>,
+    key: Entity<InputState>,
+    secret: Entity<InputState>,
+}
+
+impl S3Form {
+    fn new(window: &mut Window, cx: &mut Context<SettingsPage>) -> Self {
+        let mut input = |hint: &'static str| cx.new(|cx| InputState::new(window, cx).placeholder(hint));
+        let (bucket, prefix, endpoint) = (input("my-bucket"), input("backups/2024 (optional)"), input("https://host:9000 (optional)"));
+        let (region, profile, key) = (input("us-east-1"), input("default"), input("AKIA..."));
+        let secret = cx.new(|cx| InputState::new(window, cx).placeholder("stored in the OS keyring").masked(true));
+        Self { bucket, prefix, endpoint, region, profile, key, secret }
+    }
+
+    fn all(&self) -> [&Entity<InputState>; 7] {
+        [&self.bucket, &self.prefix, &self.endpoint, &self.region, &self.profile, &self.key, &self.secret]
+    }
+
+    /// The S3 Remote typed in, with its secret stored in the OS keyring. Empty Region and Endpoint
+    /// are taken from the profile or the environment, as the AWS tools do.
+    fn remote(&self, path_style: bool, cx: &App) -> Result<Remote, String> {
+        let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_owned();
+        let (profile, key, secret) = (text(&self.profile), text(&self.key), self.secret.read(cx).value().to_string());
+        let defaults = ve_scan::s3::with_system_chain(|c| c.defaults(Some(profile.as_str()).filter(|p| !p.is_empty())));
+        let (mut region, mut endpoint) = (text(&self.region), text(&self.endpoint));
+        if region.is_empty() {
+            region = defaults.region.unwrap_or_else(|| "us-east-1".into());
+        }
+        if endpoint.is_empty() {
+            endpoint = defaults.endpoint.unwrap_or_default();
+        }
+        let remote = S3Remote::new(&text(&self.bucket), &text(&self.prefix), &endpoint, &region, path_style, &profile, &key)?;
+        match (key.is_empty(), secret.is_empty()) {
+            (false, true) => return Err("Enter the Secret key that goes with the Access key".into()),
+            (true, false) => return Err("Enter the Access key that goes with the Secret key".into()),
+            (false, false) if !profile.is_empty() => return Err("Use a Profile or an Access key, not both".into()),
+            (false, false) => ve_scan::s3::store_secret(&remote.identity(), &secret)?,
+            (true, true) => {}
+        }
+        Ok(Remote::S3(remote))
+    }
+}
 
 /// What the Engine must be told after the user changes a setting.
 pub struct Changed {
@@ -69,6 +118,10 @@ pub struct SettingsPage {
     remote_host: Entity<InputState>,
     remote_path: Entity<InputState>,
     remote_every: RefreshSelect,
+    s3: S3Form,
+    /// The Add Remote dialog shows its S3 tab.
+    s3_tab: bool,
+    s3_path_style: bool,
     /// One refresh-interval select per Remote, in `settings.remotes` order.
     remote_refresh: Vec<RefreshSelect>,
     /// Last Synced of each Remote by identity, as the Engine reports it.
@@ -107,6 +160,10 @@ impl SettingsPage {
             remote_host,
             remote_path,
             remote_every,
+            s3: S3Form::new(window, cx),
+            // Screenshots: VE_DIALOG_TAB=s3 opens the Add Remote dialog on its S3 tab.
+            s3_tab: cfg!(feature = "bench") && std::env::var("VE_DIALOG_TAB").as_deref() == Ok("s3"),
+            s3_path_style: false,
             remote_refresh,
             remote_synced: HashMap::new(),
         }
@@ -120,7 +177,7 @@ impl SettingsPage {
             .collect()
     }
 
-    /// Adds an SSH Remote with its refresh interval and has it indexed.
+    /// Adds a Remote with its refresh interval and has it indexed.
     fn add_remote(&mut self, remote: Remote, minutes: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.settings.add_remote(remote, minutes);
         self.remote_refresh = Self::remote_selects(&self.settings, window, cx);
@@ -128,6 +185,9 @@ impl SettingsPage {
     }
 
     fn remove_remote(&mut self, remote: &Remote, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(remote, Remote::S3(r) if r.access_key.is_some()) {
+            ve_scan::s3::forget_secret(&remote.identity());
+        }
         self.settings.remove_remote(remote);
         self.remote_refresh = Self::remote_selects(&self.settings, window, cx);
         self.commit(cx);
@@ -245,7 +305,7 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// A Remote: its host and path, the Remote · SSH tag, Last Synced with Refresh now, and Remove.
+    /// A Remote: its host and path or bucket, the Remote · protocol tag, Last Synced with Refresh now, and Remove.
     fn remote_row(&self, ix: usize, first: bool, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
         let remote = self.settings.remotes[ix].clone();
@@ -269,7 +329,7 @@ impl SettingsPage {
                             .gap(px(8.))
                             .items_center()
                             .child(div().font_weight(FontWeight::MEDIUM).truncate().child(remote.label()))
-                            .child(tag("Remote · SSH", Tone::Neutral, cx)),
+                            .child(tag(format!("Remote · {}", remote.kind()), Tone::Neutral, cx)),
                     )
                     .child(
                         h_flex()
@@ -410,16 +470,18 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// The Add Remote dialog: SSH details for a read-only Remote (S3 waits for issue 18).
+    /// The Add Remote dialog: SSH or S3 details for a read-only Remote.
     pub fn open_add_remote(&self, window: &mut Window, cx: &mut Context<Self>) {
         let (host, path, every) = (self.remote_host.clone(), self.remote_path.clone(), self.remote_every.clone());
+        let form = self.s3.clone();
         let page = cx.entity();
         window.open_dialog(cx, move |dialog, _, cx| {
-            let (host, path, every, page) = (host.clone(), path.clone(), every.clone(), page.clone());
+            let (host, path, every, page, form) = (host.clone(), path.clone(), every.clone(), page.clone(), form.clone());
+            let (s3_tab, path_style) = page.read_with(cx, |p, _| (p.s3_tab, p.s3_path_style));
             let p = palette(cx);
             let (surface, ground, border, muted, text) = (p.surface, p.ground, p.border, p.muted, p.text);
             let field = |label: &'static str, input: &Entity<InputState>| {
-                v_flex().gap(px(8.)).child(div().font_weight(FontWeight::MEDIUM).child(label)).child(
+                v_flex().flex_1().min_w_0().gap(px(8.)).child(div().font_weight(FontWeight::MEDIUM).child(label)).child(
                     h_flex()
                         .h(px(38.))
                         .px(px(6.))
@@ -439,24 +501,59 @@ impl SettingsPage {
                     .items_center()
                     .rounded_full()
                     .font_weight(FontWeight::MEDIUM)
+                    .cursor_pointer()
                     .text_color(if on { text } else { muted })
                     .when(on, |d| d.bg(ground).border_1().border_color(border))
                     .child(label)
             };
+            let tab = |id: &'static str, label: &'static str, s3: bool| {
+                let page = page.clone();
+                seg(label, s3_tab == s3).id(id).on_click(move |_, window, cx| {
+                    page.update(cx, |page, _| page.s3_tab = s3);
+                    window.refresh();
+                })
+            };
             let refresh = Select::new(&every).w_full();
-            let s3 = seg("S3", false).id("tab-s3").tooltip(|window, cx| {
-                Tooltip::new("Available once S3 Remotes land (issue 18)").build(window, cx)
-            });
+            let refresh = v_flex().gap(px(8.)).child(div().font_weight(FontWeight::MEDIUM).child("Refresh")).child(refresh);
+            let body = if s3_tab {
+                v_flex()
+                    .gap(px(11.))
+                    .child(h_flex().gap(px(12.)).child(field("Bucket", &form.bucket)).child(field("Prefix", &form.prefix)))
+                    .child(h_flex().gap(px(12.)).child(field("Endpoint", &form.endpoint)).child(field("Region", &form.region)))
+                    .child(field("Profile", &form.profile))
+                    .child(
+                        h_flex().gap(px(12.)).child(field("Access key", &form.key)).child(field("Secret", &form.secret)),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(10.))
+                            .items_center()
+                            .child(Switch::new("s3-path-style").checked(path_style).on_click({
+                                let page = page.clone();
+                                move |checked: &bool, _, cx| page.update(cx, |page, _| page.s3_path_style = *checked)
+                            }))
+                            .child(div().text_color(muted).child("Path-style URLs (MinIO and most custom endpoints)")),
+                    )
+                    .child(refresh)
+            } else {
+                v_flex().gap(px(11.)).child(field("Host", &host)).child(field("Path", &path)).child(refresh)
+            };
             let add = {
-                let (host, path, every, page) = (host.clone(), path.clone(), every.clone(), page.clone());
+                let (host, path, every, page, form) = (host.clone(), path.clone(), every.clone(), page.clone(), form.clone());
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                    let remote = Remote::new(host.read(cx).value().as_ref(), path.read(cx).value().as_ref());
+                    let (s3_tab, path_style) = page.read_with(cx, |p, _| (p.s3_tab, p.s3_path_style));
+                    let remote = if s3_tab {
+                        form.remote(path_style, cx)
+                    } else {
+                        Remote::new(host.read(cx).value().as_ref(), path.read(cx).value().as_ref())
+                    };
                     match remote {
                         Ok(remote) => {
                             let minutes = every.read(cx).selected_value().copied().unwrap_or(0);
                             page.update(cx, |page, cx| page.add_remote(remote, minutes, window, cx));
-                            host.update(cx, |h, cx| h.set_value("", window, cx));
-                            path.update(cx, |p, cx| p.set_value("", window, cx));
+                            for input in [&host, &path].into_iter().chain(form.all()) {
+                                input.update(cx, |i, cx| i.set_value("", window, cx));
+                            }
                             window.close_dialog(cx);
                         }
                         Err(why) => window.push_notification(Notification::error(why), cx),
@@ -480,16 +577,22 @@ impl SettingsPage {
                     v_flex()
                         .gap(px(11.))
                         .child(div().text_color(muted).child("Remotes are read-only: listed and sized, never changed, no Trash."))
-                        .child(h_flex().child(h_flex().p(px(3.)).rounded_full().bg(surface).child(seg("SSH", true)).child(s3)))
-                        .child(field("Host", &host))
-                        .child(field("Path", &path))
-                        .child(v_flex().gap(px(8.)).child(div().font_weight(FontWeight::MEDIUM).child("Refresh")).child(refresh)),
+                        .child(
+                            h_flex().child(
+                                h_flex().p(px(3.)).rounded_full().bg(surface).child(tab("tab-ssh", "SSH", false)).child(tab("tab-s3", "S3", true)),
+                            ),
+                        )
+                        .child(body),
                 )
                 .footer(
                     h_flex()
                         .gap(px(8.))
                         .items_center()
-                        .child(div().flex_1().text_xs().text_color(muted).child("Keys and ssh-agent only"))
+                        .child(div().flex_1().text_xs().text_color(muted).child(if s3_tab {
+                            "No keys here: AWS_* variables or ~/.aws. Typed secrets go to the OS keyring"
+                        } else {
+                            "Keys and ssh-agent only"
+                        }))
                         .child(pill("remote-cancel", "Cancel").build(cx, |_, window, cx| window.close_dialog(cx)))
                         .child(pill("remote-add", "Add Remote").primary().build(cx, add)),
                 )
