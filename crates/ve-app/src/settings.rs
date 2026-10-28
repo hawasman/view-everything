@@ -99,8 +99,9 @@ impl Settings {
     }
 
     /// The Volumes in `now` that were not mounted `before` and are worth offering to index:
-    /// removable (a network share is listed in Settings, not offered), not indexed, not declined, and not already in the
-    /// Index (`in_index`, by identity: a returning Offline Volume catches up on its own).
+    /// opt-in (removable or a mounted network share), not indexed, not declined, and not
+    /// already in the Index (`in_index`, by identity: a returning Offline Volume catches up on
+    /// its own).
     pub fn index_offers(
         &self,
         before: &[VolumeInfo],
@@ -108,7 +109,7 @@ impl Settings {
         in_index: impl Fn(&str) -> bool,
     ) -> Vec<VolumeInfo> {
         now.iter()
-            .filter(|v| v.removable && !v.network && !self.is_indexed(v))
+            .filter(|v| v.opt_in() && !self.is_indexed(v))
             .filter(|v| !before.iter().any(|b| b.identity == v.identity))
             .filter(|v| !self.declined.contains(&v.identity) && !in_index(&v.identity))
             .cloned()
