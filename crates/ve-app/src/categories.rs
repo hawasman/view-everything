@@ -1,23 +1,22 @@
 //! The Category breakdown panel: Filtered Size per Category, expandable to its extensions.
 
 use crate::format;
-use crate::treemap::category_color;
+use crate::theme::{RADIUS_CARD, palette};
+use crate::ui::swatch;
 use crate::view::View;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
+use gpui_kit::component::{Icon, IconName, h_flex, v_flex};
 use gpui_kit::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 use ve_core::Category;
 
-/// Digits of equal width (OpenType `tnum`), so sizes line up down the panel.
-fn tabular_figures() -> FontFeatures {
-    FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
-}
-
-/// Every Category's bar has this height; small Categories are kept visible by a minimum length.
-const BAR_HEIGHT: Pixels = px(6.);
+/// Column widths after the name, as in the design: bar, Size, Files, Share.
+const BAR: f32 = 140.;
+const SIZE: f32 = 80.;
+const FILES: f32 = 80.;
+const SHARE: f32 = 64.;
 
 pub struct CategoryPanel {
     query: Entity<InputState>,
@@ -65,82 +64,56 @@ impl CategoryPanel {
 
 impl Render for CategoryPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (border, muted, hover, dark, track) = (
-            theme.border,
-            theme.muted_foreground,
-            theme.accent,
-            theme.is_dark(),
-            theme.muted,
-        );
+        let p = palette(cx);
+        let (muted, rule, free, hover, text) = (p.muted, p.rule, p.free, p.active, p.text);
+        let cats = Category::ALL.map(|c| p.category(c));
         let panel = v_flex()
             .size_full()
-            .border_l_1()
-            .border_color(border)
-            .p_3()
-            .gap_2();
+            .bg(p.surface)
+            .rounded(px(RADIUS_CARD))
+            .pt(px(16.))
+            .px(px(12.))
+            .pb(px(8.));
+        let heading = h_flex()
+            .px(px(8.))
+            .mb(px(4.))
+            .justify_between()
+            .items_baseline()
+            .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child("Categories"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("All Locations · click a row to add type: to the Query"),
+            );
         let Some(view) = self.view.clone() else {
-            return panel;
+            return panel.child(heading);
         };
-        let largest = view
-            .categories
-            .first()
-            .map_or(1, |r| r.totals.on_disk.max(1));
-        let mut list = v_flex()
-            .id("categories")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .gap_0p5();
+        let largest = view.categories.first().map_or(1, |r| r.totals.on_disk.max(1));
+        let whole = view.total.on_disk.max(1);
+        let cell = |w: f32| div().w(px(w)).flex_none().text_right().whitespace_nowrap();
+        let header = h_flex()
+            .h(px(30.))
+            .px(px(8.))
+            .items_center()
+            .text_xs()
+            .text_color(muted)
+            .child(div().flex_1().child("Category"))
+            .child(div().w(px(BAR)).flex_none())
+            .child(cell(SIZE).child("Size"))
+            .child(cell(FILES).child("Files"))
+            .child(cell(SHARE).child("Share"));
+        let mut list = v_flex().id("categories").flex_1().min_h_0().overflow_y_scroll();
         for row in &view.categories {
             let category = row.category;
             let open = self.open.contains(&category);
-            let color = category_color(category, dark);
+            let color = cats[category as usize];
             let share = row.totals.on_disk as f32 / largest as f32;
             // The chevron expands; the rest of the row adds the Category to the Query.
-            let pick = v_flex()
-                .id(("category", category as usize))
-                .flex_1()
-                .cursor_pointer()
-                .tooltip({
-                    let text = format!(
-                        "{} files — show only this Category",
-                        format::count(row.totals.files)
-                    );
-                    move |window, cx| Tooltip::new(text.clone()).build(window, cx)
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.add_to_query(
-                        format!("type:{}", category.name().to_lowercase()),
-                        window,
-                        cx,
-                    );
-                }))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(div().size_3().rounded_sm().bg(color))
-                        .child(div().flex_1().child(category.name()))
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_features(tabular_figures())
-                                .child(format::size(row.totals.on_disk)),
-                        ),
-                )
-                .child(
-                    div().mt_1().h(BAR_HEIGHT).rounded_full().bg(track).child(
-                        div()
-                            .h_full()
-                            .w(relative(share.clamp(0.0, 1.0)))
-                            .min_w(px(6.))
-                            .rounded_full()
-                            .bg(color),
-                    ),
-                );
             let chevron = div()
                 .id(("expand", category as usize))
+                .w(px(14.))
+                .flex_none()
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if !this.open.remove(&category) {
@@ -149,48 +122,71 @@ impl Render for CategoryPanel {
                     cx.notify();
                 }))
                 .child(
-                    Icon::new(if open {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .size_4()
-                    .text_color(muted),
+                    Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+                        .size(px(14.))
+                        .text_color(muted),
                 );
             list = list.child(
                 h_flex()
-                    .gap_2()
-                    .rounded_md()
-                    .px_1()
-                    .py_1()
-                    .hover(move |s| s.bg(hover))
-                    .child(chevron)
-                    .child(pick),
+                    .id(("category", category as usize))
+                    .h(px(30.))
+                    .px(px(8.))
+                    .items_center()
+                    .border_t_1()
+                    .border_color(rule)
+                    .text_size(px(13.))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover).rounded(px(8.)))
+                    .tooltip({
+                        let text = format!("{} files — show only this Category", format::count(row.totals.files));
+                        move |window, cx| Tooltip::new(text.clone()).build(window, cx)
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.add_to_query(format!("type:{}", category.name().to_lowercase()), window, cx);
+                    }))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(6.))
+                            .items_center()
+                            .child(chevron)
+                            .child(swatch(color).mx(px(2.)))
+                            .child(category.name()),
+                    )
+                    .child(
+                        div().w(px(BAR)).flex_none().px(px(12.)).child(
+                            div().h(px(4.)).rounded(px(2.)).bg(free).overflow_hidden().child(
+                                div().h_full().w(relative(share.clamp(0.0, 1.0))).bg(color),
+                            ),
+                        ),
+                    )
+                    .child(cell(SIZE).child(format::size(row.totals.on_disk)))
+                    .child(cell(FILES).child(format::count(row.totals.files)))
+                    .child(cell(SHARE).child(format!("{:.1}%", row.totals.on_disk as f64 * 100.0 / whole as f64))),
             );
             if open {
                 for (ext, totals) in &row.extensions {
                     let term = (ext != "(none)").then(|| format!("ext:{ext}"));
-                    let label = if term.is_some() {
-                        format!(".{ext}")
-                    } else {
-                        ext.clone()
-                    };
+                    let label = if term.is_some() { format!(".{ext}") } else { ext.clone() };
                     let mut item = h_flex()
                         .id(SharedString::from(format!("ext-{category:?}-{ext}")))
-                        .pl_8()
-                        .pr_1()
-                        .py_0p5()
-                        .rounded_md()
-                        .text_sm()
+                        .h(px(30.))
+                        .pl(px(36.))
+                        .pr(px(8.))
+                        .items_center()
+                        .border_t_1()
+                        .border_color(rule)
+                        .text_size(px(13.))
                         .child(div().flex_1().child(label))
-                        .child(
-                            div()
-                                .font_features(tabular_figures())
-                                .text_color(muted)
-                                .child(format::size(totals.on_disk)),
-                        );
+                        .child(cell(SIZE).text_color(muted).child(format::size(totals.on_disk)))
+                        .child(cell(FILES).text_color(muted).child(format::count(totals.files)))
+                        .child(cell(SHARE).text_color(muted).child(format!(
+                            "{:.1}%",
+                            totals.on_disk as f64 * 100.0 / whole as f64
+                        )));
                     if let Some(term) = term {
-                        item = item.cursor_pointer().hover(move |s| s.bg(hover)).on_click(
+                        item = item.cursor_pointer().hover(move |s| s.bg(hover).text_color(text)).on_click(
                             cx.listener(move |this, _, window, cx| {
                                 this.add_to_query(term.clone(), window, cx);
                             }),
@@ -200,18 +196,6 @@ impl Render for CategoryPanel {
                 }
             }
         }
-        panel
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Categories"),
-            )
-            .child(div().text_sm().text_color(muted).child(format!(
-                "{} on disk in {} files",
-                format::size(view.total.on_disk),
-                format::count(view.total.files)
-            )))
-            .child(list)
+        panel.child(heading).child(header).child(list)
     }
 }

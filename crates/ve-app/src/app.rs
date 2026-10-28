@@ -6,47 +6,39 @@ use crate::categories::CategoryPanel;
 use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
 use crate::format;
-use crate::settings::{Settings, ThemeChoice};
-use crate::settings_page::{Changed, SettingsPage, apply_theme};
+use crate::settings::Settings;
+use crate::settings_page::{Changed, SettingsPage};
+use crate::theme::{palette, tabular};
+use crate::ui::{caption, dot, pill};
 use crate::tree::TreeList;
 use crate::trash::{self, Trash};
 use crate::treemap::Treemap;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
-use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::table::{DataTable, TableEvent, TableState};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _, Theme, h_flex, v_flex};
+use gpui_kit::component::{Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::borrow::Cow;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 use ve_core::CategoryMap;
 use ve_scan::VolumeInfo;
 
-const GEIST: &[u8] = include_bytes!("../assets/fonts/Geist-Variable.ttf");
-const GEIST_MONO: &[u8] = include_bytes!("../assets/fonts/GeistMono-Variable.ttf");
+/// A Volume's label, or its mount point when it has none (a device path is no name).
+pub fn volume_name(v: &VolumeInfo) -> String {
+    if v.label.is_empty() || v.label.starts_with("/dev/") {
+        v.mount.display().to_string()
+    } else {
+        v.label.clone()
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Dashboard,
     Explorer,
     Settings,
-}
-
-/// Loads the Geist fonts and applies the theme choice; call once before opening the window.
-pub fn init_theme(choice: ThemeChoice, cx: &mut App) {
-    cx.text_system()
-        .add_fonts(vec![Cow::Borrowed(GEIST), Cow::Borrowed(GEIST_MONO)])
-        .expect("embedded fonts are valid");
-    let theme = Theme::global_mut(cx);
-    theme.font_family = "Geist".into();
-    theme.mono_font_family = "Geist Mono".into();
-    apply_theme(choice, cx);
 }
 
 pub struct Shell {
@@ -64,6 +56,8 @@ pub struct Shell {
     treemap: Entity<Treemap>,
     categories: Entity<CategoryPanel>,
     volumes: Vec<VolumeInfo>,
+    /// The Volumes the Index holds, as the sidebar lists them.
+    indexed: Vec<VolumeInfo>,
     startup_problems: Vec<String>,
     /// The Explorer lists' width in pixels, as of the last paint.
     list_width: Rc<Cell<f32>>,
@@ -83,6 +77,7 @@ impl Shell {
             .filter(|v| settings.is_indexed(v))
             .cloned()
             .collect();
+        let shown_volumes = indexed.clone();
         let intervals = settings.intervals(&indexed);
         // One pending wake-up is enough: the window then reads everything that changed.
         let (wake, woken) = async_channel::bounded::<()>(1);
@@ -95,6 +90,7 @@ impl Shell {
 
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
         cx.subscribe(&settings_page, |this, _, changed: &Changed, cx| {
+            this.indexed = changed.indexed.clone();
             this.engine.set_volumes(changed.indexed.clone());
             this.engine.set_intervals(changed.intervals.clone());
             // Saved fine, so the settings file read at startup has been replaced.
@@ -106,7 +102,7 @@ impl Shell {
         .detach();
 
         let query = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Search names, or try size:>1gb type:video")
+            InputState::new(window, cx).placeholder("Find a file by name")
         });
         let filters = cx.new(|cx| FiltersPanel::new(window, cx));
         cx.subscribe_in(&query, window, |this, query, event: &InputEvent, window, cx| {
@@ -114,6 +110,9 @@ impl Shell {
                 let text = query.read(cx).value().to_string();
                 this.filters.update(cx, |f, cx| f.reload(&text, window, cx));
                 this.engine.set_query(text);
+                // Searching from anywhere shows the results.
+                this.page = Page::Explorer;
+                cx.notify();
             }
         })
         .detach();
@@ -125,15 +124,15 @@ impl Shell {
         let list = FlatList::new(engine.shared.clone());
         let table = cx.new(|cx| {
             TableState::new(list, window, cx)
-                .col_resizable(true)
+                .col_resizable(false)
                 .select_on_modifier_click(false)
         });
         let treemap = cx.new(|cx| Treemap::new(engine.shared.clone(), categories.clone(), cx));
         let category_panel = cx.new(|_| CategoryPanel::new(query.clone()));
 
         let tree = cx.new(|cx| {
-            TableState::new(TreeList::new(engine.shared.clone()), window, cx)
-                .col_resizable(true)
+            TableState::new(TreeList::new(engine.shared.clone(), categories.clone()), window, cx)
+                .col_resizable(false)
                 .select_on_modifier_click(false)
         });
 
@@ -169,6 +168,22 @@ impl Shell {
             crate::bench::start(table.clone(), window);
         }
 
+        // Screenshots: VE_PAGE picks the page, VE_OPEN_DIALOG opens the Add Remote dialog.
+        #[cfg(feature = "bench")]
+        let page = match std::env::var("VE_PAGE").as_deref() {
+            Ok("settings") => Page::Settings,
+            Ok("dashboard") => Page::Dashboard,
+            _ => Page::Explorer,
+        };
+        #[cfg(not(feature = "bench"))]
+        let page = Page::Explorer;
+        #[cfg(feature = "bench")]
+        if std::env::var_os("VE_OPEN_DIALOG").is_some() {
+            cx.defer_in(window, |this, window, cx| {
+                this.settings_page.clone().update(cx, |page, cx| page.open_add_remote(window, cx))
+            });
+        }
+
         cx.spawn(async move |this, cx| {
             while woken.recv().await.is_ok() {
                 if this.update(cx, |this, cx| this.poll(cx)).is_err() {
@@ -187,7 +202,7 @@ impl Shell {
 
         Self {
             engine,
-            page: Page::Explorer,
+            page,
             query,
             table,
             tree,
@@ -199,6 +214,7 @@ impl Shell {
             treemap,
             categories: category_panel,
             volumes,
+            indexed: shown_volumes,
             startup_problems,
             list_width: Rc::default(),
         }
@@ -224,67 +240,62 @@ impl Shell {
         cx.notify();
     }
 
+    /// The one-line bar under the Explorer: sync state, Last Synced, problems, totals, Trash.
     fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let (muted, text, border, accent, warn) = (p.muted, p.text, p.border, p.accent, p.warning);
         let shared = &self.engine.shared;
         let status = shared.status.lock().clone();
         let progress = &shared.progress;
-        let phase = match &status.phase {
-            Phase::LoadingIndex => h_flex()
-                .gap_2()
-                .child(Spinner::new())
-                .child("Loading the saved Index…")
-                .into_any_element(),
-            Phase::Syncing {
-                volumes,
-                catching_up,
-                started,
-            } => {
+        let sep = || div().w(px(1.)).h(px(14.)).flex_none().bg(border);
+        let item = || h_flex().gap(px(8.)).items_center();
+        let mut bar = h_flex()
+            .flex_none()
+            .h(px(36.))
+            .px(px(24.))
+            .gap(px(16.))
+            .items_center()
+            .border_t_1()
+            .border_color(border)
+            .text_xs()
+            .text_color(muted)
+            .whitespace_nowrap()
+            .overflow_hidden();
+        match &status.phase {
+            Phase::LoadingIndex => {
+                bar = bar.child(item().child(dot(accent)).child("Loading the saved Index…"));
+            }
+            Phase::Syncing { volumes, catching_up, started } => {
                 let what = if *catching_up { "Catching up" } else { "Scanning" };
                 let names: Vec<_> = volumes.iter().map(|v| v.display().to_string()).collect();
-                h_flex()
-                    .gap_2()
-                    .child(Spinner::new())
-                    .child(format!(
-                        "{what} {} — {} entries read, {}s",
-                        names.join(", "),
-                        format::count(progress.entries()),
-                        started.elapsed().as_secs()
-                    ))
-                    .into_any_element()
+                bar = bar.child(item().child(dot(accent)).child(format!(
+                    "{what} {} — {} Entries read, {}s",
+                    names.join(", "),
+                    format::count(progress.entries()),
+                    started.elapsed().as_secs()
+                )));
             }
-            Phase::Idle => format!(
-                "{} entries indexed",
-                format::count(shared.index.read().live_count() as u64)
-            )
-            .into_any_element(),
-        };
-        let mut left = h_flex().gap_3().child(phase);
+            Phase::Idle => {}
+        }
         let synced = {
             let oldest = shared.index.read().oldest_synced();
             last_synced_label(oldest, chrono::Utc::now().timestamp())
         };
         if let Some(label) = synced.filter(|_| !matches!(status.phase, Phase::LoadingIndex)) {
-            left = left.child(format!("· {label}"));
+            bar = bar.child(sep()).child(item().child(label));
         }
         if progress.unreadable() > 0 {
-            left = left.child(format!(
-                "· {} folders unreadable",
-                format::count(progress.unreadable())
-            ));
+            bar = bar
+                .child(sep())
+                .child(item().child(format!("{} folders unreadable", format::count(progress.unreadable()))));
         }
-        if let Some(view) = shared
-            .view
-            .lock()
-            .as_ref()
-            .filter(|v| !v.query.trim().is_empty())
-        {
-            left = left.child(format!(
-                "· {} matched in {} ms",
+        if let Some(view) = shared.view.lock().as_ref().filter(|v| !v.query.trim().is_empty()) {
+            bar = bar.child(sep()).child(item().child(format!(
+                "{} matched in {} ms",
                 format::count(view.flat.len() as u64),
                 view.took.as_millis()
-            ));
+            )));
         }
-        let warn = cx.theme().warning;
         let problems = status
             .problems
             .into_iter()
@@ -292,36 +303,49 @@ impl Shell {
             .chain(shared.query_error.lock().clone())
             .chain(self.startup_problems.iter().cloned());
         for problem in problems {
-            left = left.child(div().text_color(warn).child(problem));
+            bar = bar.child(sep()).child(div().text_color(warn).child(problem));
         }
-        StatusBar::new()
-            .px_3()
-            .py_1()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .text_sm()
-            .left(left)
-            .right(self.trash_controls(cx))
+        bar.child(div().flex_1())
+            .child(item().child(
+                h_flex()
+                    .gap(px(4.))
+                    .child(div().text_color(text).child(format::count(shared.index.read().live_count() as u64)))
+                    .child("Entries"),
+            ))
+            .child(sep())
+            .child(self.trash_controls(cx))
     }
 
     fn trash_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let (text, hover) = (p.text, p.active);
         let size = self.trash.size();
-        let label = size.map_or_else(|| "Trash".to_owned(), |s| format!("{} in Trash", format::size(s)));
-        let mut controls = h_flex().gap_2().child(
-            Button::new("open-trash")
-                .ghost()
-                .xsmall()
-                .label(label)
-                .tooltip("Trashed files still take up space until the Trash is emptied. Click to open the Trash.")
+        let label = size.map_or_else(|| "Trash".to_owned(), |s| format!("Trash {}", format::size(s)));
+        let mut controls = h_flex().gap(px(8.)).items_center().child(
+            div()
+                .id("open-trash")
+                .cursor_pointer()
+                .rounded(px(6.))
+                .px(px(4.))
+                .hover(move |s| s.bg(hover).text_color(text))
+                .child(label)
+                .tooltip(|window, cx| {
+                    Tooltip::new(
+                        "Trashed files still take up space until the Trash is emptied. Click to open the Trash.",
+                    )
+                    .build(window, cx)
+                })
                 .on_click(cx.listener(|this, _, window, cx| this.trash.open(window, cx))),
         );
-        if trash::CAN_EMPTY {
+        if trash::CAN_EMPTY && size != Some(0) {
             controls = controls.child(
-                Button::new("empty-trash")
-                    .ghost()
-                    .xsmall()
-                    .label("Empty Trash")
-                    .disabled(size == Some(0))
+                div()
+                    .id("empty-trash")
+                    .cursor_pointer()
+                    .rounded(px(6.))
+                    .px(px(4.))
+                    .hover(move |s| s.bg(hover).text_color(text))
+                    .child("Empty Trash")
                     .on_click(cx.listener(|this, _, window, cx| this.trash.ask_empty(window, cx))),
             );
         }
@@ -344,7 +368,7 @@ impl Shell {
         }
     }
 
-    /// Lets the lists' name columns take the width left beside the Categories panel.
+    /// Lets the lists' name columns take the width the panel gives them.
     fn fit_lists(&self, cx: &mut Context<Self>) {
         let width = self.list_width.get();
         self.table.update(cx, |t, cx| {
@@ -359,135 +383,371 @@ impl Shell {
         });
     }
 
+    fn nav_row(&self, id: &'static str, label: &'static str, icon: IconName, page: Page, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = palette(cx);
+        let (muted, text, active) = (p.muted, p.text, p.active);
+        let current = self.page == page;
+        h_flex()
+            .id(id)
+            .h(px(32.))
+            .my(px(1.))
+            .px(px(12.))
+            .gap(px(10.))
+            .items_center()
+            .rounded(px(10.))
+            .cursor_pointer()
+            .text_color(if current { text } else { muted })
+            .when(current, |d| d.bg(active))
+            .hover(move |s| s.text_color(text))
+            .child(Icon::new(icon).size(px(16.)))
+            .child(label)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.page = page;
+                cx.notify();
+            }))
+    }
+
+    /// Brand, scope switcher, Find-a-file, pages, Locations; Settings and the user at the bottom.
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let item = |label: &'static str, icon: IconName, page: Page, cx: &mut Context<Self>| {
-            SidebarMenuItem::new(label)
-                .icon(icon)
-                .active(self.page == page)
+        let p = palette(cx);
+        let (text, muted, border, ground, surface, accent) = (p.text, p.muted, p.border, p.ground, p.surface, p.accent);
+        let control = p.control;
+        let (positive, avatar) = (p.positive, p.avatar);
+        let status = self.engine.shared.status.lock().clone();
+        let syncing: Vec<_> = match &status.phase {
+            Phase::Syncing { volumes, .. } => volumes.clone(),
+            _ => Vec::new(),
+        };
+        let locations = self.indexed.iter().enumerate().map(|(ix, v)| {
+            let name = volume_name(v);
+            let state = if syncing.contains(&v.mount) { accent } else { positive };
+            h_flex()
+                .id(("location", ix))
+                .h(px(32.))
+                .my(px(1.))
+                .px(px(12.))
+                .gap(px(10.))
+                .items_center()
+                .text_color(muted)
+                .child(dot(state))
+                .child(div().min_w_0().truncate().child(name))
+        });
+        let count = self.indexed.len();
+        let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "user".into());
+        let initial = user.chars().next().map_or('U', |c| c.to_ascii_uppercase());
+        let display_name = format!("{initial}{}", user.chars().skip(1).collect::<String>());
+        let entries = self.engine.shared.index.read().live_count() as u64;
+
+        let mark = div()
+            .relative()
+            .size(px(22.))
+            .flex_none()
+            .child(div().absolute().left(px(1.)).top(px(1.)).w(px(12.)).h(px(20.)).rounded(px(2.)).bg(text))
+            .child(div().absolute().left(px(15.)).top(px(1.)).w(px(6.)).h(px(9.)).rounded(px(2.)).bg(accent))
+            .child(div().absolute().left(px(15.)).top(px(12.)).w(px(6.)).h(px(9.)).rounded(px(2.)).bg(control));
+        let find = h_flex()
+            .h(px(32.))
+            .mt(px(12.))
+            .mb(px(8.))
+            .pl(px(4.))
+            .pr(px(10.))
+            .gap(px(4.))
+            .items_center()
+            .rounded_full()
+            .border_1()
+            .border_color(border)
+            .bg(surface)
+            .child(div().flex_1().min_w_0().child(Input::new(&self.query).appearance(false).bordered(false).small()))
+            .child(div().text_xs().text_color(muted).child("/"));
+
+        v_flex()
+            .w(px(224.))
+            .h_full()
+            .flex_none()
+            .pt(px(20.))
+            .px(px(12.))
+            .pb(px(16.))
+            .bg(ground)
+            .border_r_1()
+            .border_color(border)
+            .child(
+                h_flex()
+                    .h(px(32.))
+                    .px(px(8.))
+                    .gap(px(10.))
+                    .items_center()
+                    .text_size(px(15.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(mark)
+                    .child("view-everything"),
+            )
+            .child(
+                h_flex()
+                    .h(px(36.))
+                    .mt(px(12.))
+                    .px(px(12.))
+                    .justify_between()
+                    .items_center()
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(border)
+                    .child("Index")
+                    .child(caption(format!("{count} Location{}", if count == 1 { "" } else { "s" }), cx)),
+            )
+            .child(find)
+            .child(self.nav_row("nav-dashboard", "Dashboard", IconName::LayoutDashboard, Page::Dashboard, cx))
+            .child(self.nav_row("nav-explorer", "Explorer", IconName::Folder, Page::Explorer, cx))
+            .child(div().mt(px(30.)).mb(px(8.)).px(px(12.)).child(caption("Locations", cx)))
+            .child(v_flex().id("locations").flex_1().min_h_0().overflow_y_scroll().children(locations))
+            .child(self.nav_row("nav-settings", "Settings", IconName::Settings, Page::Settings, cx).mt(px(16.)))
+            .child(
+                h_flex()
+                    .mt(px(8.))
+                    .pt(px(12.))
+                    .px(px(12.))
+                    .gap(px(10.))
+                    .items_center()
+                    .border_t_1()
+                    .border_color(border)
+                    .child(
+                        div()
+                            .size(px(28.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(avatar.0)
+                            .text_color(avatar.1)
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(initial.to_string()),
+                    )
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .child(div().font_weight(FontWeight::MEDIUM).child(display_name))
+                            .child(caption(format!("{} Entries", format::count(entries)), cx)),
+                    ),
+            )
+    }
+
+    /// `.tabs`: underlined Tree / Flat list with the summary line at the right.
+    fn tabs(&self, summary: String, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let (text, muted, border) = (p.text, p.muted, p.border);
+        let tab = |id: &'static str, label: &'static str, on: bool, tree: bool, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .relative()
+                .h(px(36.))
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(if on { text } else { muted })
+                .child(label)
+                .when(on, |d| {
+                    d.child(div().absolute().left_0().right_0().bottom(px(-1.)).h(px(2.)).bg(text))
+                })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.page = page;
+                    this.show_tree = tree;
                     cx.notify();
                 }))
         };
-        Sidebar::new("sidebar").child(
-            SidebarGroup::new("view-everything").child(
-                SidebarMenu::new()
-                    .child(item("Dashboard", IconName::LayoutDashboard, Page::Dashboard, cx))
-                    .child(item("Explorer", IconName::Folder, Page::Explorer, cx))
-                    .child(item("Settings", IconName::Settings, Page::Settings, cx)),
-            ),
-        )
+        h_flex()
+            .gap(px(24.))
+            .items_center()
+            .border_b_1()
+            .border_color(border)
+            .child(tab("tab-tree", "Tree", self.show_tree, true, cx))
+            .child(tab("tab-flat", "Flat list", !self.show_tree, false, cx))
+            .child(div().ml_auto().text_xs().text_color(muted).child(summary))
     }
 
     fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.fit_lists(cx);
-        let list = if self.show_tree {
-            DataTable::new(&self.tree).into_any_element()
-        } else {
-            DataTable::new(&self.table).into_any_element()
+        let p = palette(cx);
+        let (text, muted, rule) = (p.text, p.muted, p.rule);
+        let surface = p.surface;
+        let (tree_sort, entries, total) = {
+            let view = self.engine.shared.view.lock().clone();
+            let sort = self.tree.read(cx).delegate().sort_label();
+            (
+                sort,
+                view.as_ref().map_or(0, |v| v.flat.len() as u64),
+                view.as_ref().map_or(0, |v| v.total.on_disk),
+            )
         };
+        let summary = format!(
+            "{} Entries · Filtered Size {} · sorted by {}",
+            format::count(entries),
+            format::size(total),
+            if self.show_tree { tree_sort } else { "On-disk Size" }
+        );
         let selected = self.selected_entries(cx);
         let blocked = self.trash.blocker_of(&selected, &self.volumes);
+        let selected_size = {
+            let view = self.engine.shared.view.lock().clone();
+            let index = self.engine.shared.index.read();
+            view.map_or(0, |v| {
+                selected
+                    .iter()
+                    .filter(|&&id| index.is_live(id))
+                    .map(|&id| v.filter.totals(&index, id).on_disk)
+                    .sum()
+            })
+        };
         let width = self.list_width.clone();
         let measure = canvas(move |b, _, _| width.set(f32::from(b.size.width)), |_, _, _, _| {})
             .absolute()
             .size_full();
         let active = self.filters.read(cx).active();
         let label = if active > 0 { format!("Filters · {active}") } else { "Filters".into() };
-        let toggle = Button::new("filters").label(label).on_click(cx.listener(|this, _, _, cx| {
-            this.show_filters = !this.show_filters;
-            cx.notify();
-        }));
+        let filters = pill("filters", label)
+            .icon("icons/filters.svg")
+            .small()
+            .selected(self.show_filters)
+            .build(
+                cx,
+                cx.listener(|this, _, _, cx| {
+                    this.show_filters = !this.show_filters;
+                    cx.notify();
+                }),
+            );
+        let why = if selected.is_empty() {
+            Some(SharedString::from("Select Entries to move to the Trash"))
+        } else {
+            blocked.map(SharedString::from)
+        };
+        let trash = pill("trash", "Move to Trash")
+            .icon("icons/trash.svg")
+            .kbd("Del")
+            .small()
+            .disabled(why)
+            .build(cx, cx.listener(|this, _, window, cx| this.ask_trash_selected(window, cx)));
+        let selection = (!selected.is_empty()).then(|| {
+            h_flex()
+                .gap(px(4.))
+                .text_xs()
+                .text_color(muted)
+                .child(div().font_weight(FontWeight::MEDIUM).text_color(text).child(selected.len().to_string()))
+                .child(format!("selected · {}", format::size(selected_size)))
+        });
+        let list = if self.show_tree {
+            DataTable::new(&self.tree).small().bordered(false).stripe(false).header_row_height(px(30.)).into_any_element()
+        } else {
+            DataTable::new(&self.table).small().bordered(false).stripe(false).header_row_height(px(30.)).into_any_element()
+        };
+        let grow = |weight: f32| v_flex().min_w_0().h_full().gap(px(16.)).flex_grow(weight).flex_basis(relative(0.));
+        let left = grow(7.)
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .bg(surface)
+                    .rounded(px(22.))
+                    .pt(px(16.))
+                    .px(px(12.))
+                    .pb(px(8.))
+                    .child(measure)
+                    .child(list),
+            )
+            .child(div().h(px(301.)).flex_none().child(self.categories.clone()));
+        let right = grow(5.).child(if self.show_filters {
+            self.filters.clone().into_any_element()
+        } else {
+            self.treemap.clone().into_any_element()
+        });
+        let _ = rule;
         v_flex()
             .size_full()
-            .gap_2()
-            .p_3()
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let focus = if this.show_tree {
-                    this.tree.focus_handle(cx)
-                } else {
-                    this.table.focus_handle(cx)
-                };
-                if event.keystroke.key == "delete" && focus.is_focused(window) {
-                    this.ask_trash_selected(window, cx);
-                }
-            }))
             .child(
-                h_flex()
-                    .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.query).cleanable(true)))
-                    .child(if self.show_filters { toggle.primary() } else { toggle })
-                    .child(
-                        Button::new("trash")
-                            .icon(IconName::Delete)
-                            .label("Move to Trash")
-                            .danger()
-                            .disabled(selected.is_empty() || blocked.is_some())
-                            .when_some(blocked, |b, why| b.tooltip(why))
-                            .on_click(cx.listener(|this, _, window, cx| this.ask_trash_selected(window, cx))),
-                    ),
-            )
-            .when(self.show_filters, |c| c.child(self.filters.clone()))
-            .child(
-                TabBar::new("explorer-lists")
-                    .segmented()
-                    .selected_index(if self.show_tree { 0 } else { 1 })
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.show_tree = *ix == 0;
-                        cx.notify();
-                    }))
-                    .child(Tab::new().label("Tree"))
-                    .child(Tab::new().label("Flat list")),
-            )
-            .child(
-                h_flex()
+                v_flex()
                     .flex_1()
-                    .min_h(px(150.))
+                    .min_h_0()
+                    .pt(px(24.))
+                    .px(px(24.))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        let focus = if this.show_tree {
+                            this.tree.focus_handle(cx)
+                        } else {
+                            this.table.focus_handle(cx)
+                        };
+                        if !focus.is_focused(window) {
+                            return;
+                        }
+                        match event.keystroke.key.as_str() {
+                            "delete" => this.ask_trash_selected(window, cx),
+                            "/" => this.query.focus_handle(cx).focus(window, cx),
+                            _ => {}
+                        }
+                    }))
                     .child(
-                        div()
-                            .relative()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .overflow_hidden()
-                            .child(measure)
-                            .child(list),
+                        h_flex()
+                            .h(px(32.))
+                            .mb(px(8.))
+                            .items_center()
+                            .justify_between()
+                            .child(div().text_size(px(24.)).line_height(px(32.)).child("Explorer"))
+                            .child(h_flex().gap(px(12.)).items_center().children(selection).child(filters).child(trash)),
                     )
-                    .child(div().w(px(280.)).h_full().child(self.categories.clone())),
+                    .child(self.tabs(summary, cx))
+                    .child(h_flex().flex_1().min_h_0().gap(px(16.)).pt(px(16.)).pb(px(16.)).child(left).child(right)),
             )
-            // Open Filters need the room; the Treemap comes back when they close.
-            .when(!self.show_filters, |c| c.child(div().h(px(340.)).child(self.treemap.clone())))
+            .child(self.status_bar(cx))
     }
 
-    fn dashboard(&self) -> impl IntoElement {
+    fn dashboard(&self, cx: &App) -> impl IntoElement {
         let index = self.engine.shared.index.read();
         let volumes = index.volumes().count();
-        v_flex().p_4().gap_2().text_lg().child(format!(
-            "{} entries on {} Volume(s)",
-            format::count(index.live_count() as u64),
-            volumes
-        ))
+        v_flex()
+            .size_full()
+            .p(px(32.))
+            .gap(px(6.))
+            .child(
+                div()
+                    .font_family(crate::theme::SERIF_FAMILY)
+                    .text_size(px(48.))
+                    .line_height(px(54.))
+                    .child("Dashboard"),
+            )
+            .child(div().text_color(palette(cx).muted).child(format!(
+                "{} Entries on {} Volume{}",
+                format::count(index.live_count() as u64),
+                volumes,
+                if volumes == 1 { "" } else { "s" }
+            )))
     }
 }
 
 impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page = match self.page {
-            Page::Dashboard => self.dashboard().into_any_element(),
+            Page::Dashboard => self.dashboard(cx).into_any_element(),
             Page::Explorer => self.explorer(cx).into_any_element(),
             Page::Settings => self.settings_page.clone().into_any_element(),
         };
-        v_flex()
+        let p = palette(cx);
+        // Problems have no status bar to sit in outside the Explorer.
+        let problems = self.page != Page::Explorer
+            && (!self.startup_problems.is_empty() || !self.engine.shared.status.lock().problems.is_empty());
+        h_flex()
             .size_full()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
+            .bg(p.ground)
+            .text_color(p.text)
+            .font_features(tabular())
+            .line_height(px(20.))
+            .child(self.sidebar(cx))
             .child(
-                h_flex()
+                v_flex()
                     .flex_1()
-                    .min_h_0()
-                    .child(self.sidebar(cx))
-                    .child(div().flex_1().min_w_0().h_full().child(page)),
+                    .min_w_0()
+                    .h_full()
+                    .child(div().flex_1().min_h_0().child(page))
+                    .when(problems, |c| c.child(self.status_bar(cx))),
             )
-            .child(self.status_bar(cx))
     }
 }

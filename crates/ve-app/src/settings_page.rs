@@ -1,11 +1,12 @@
 //! The Settings page: which Volumes are indexed, how often they are re-read, and the theme.
 
 use crate::settings::{Settings, ThemeChoice};
-use gpui_kit::component::button::{Button, ButtonGroup};
-use gpui_kit::component::Selectable as _;
-use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::input::{InputEvent, InputState, NumberInput};
-use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, h_flex, v_flex};
+use crate::theme::{self, RADIUS_CARD, SERIF_FAMILY, palette};
+use crate::ui::{caption, panel, pill, tag, Tone};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, WindowExt as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use crate::engine::Intervals;
 use ve_scan::VolumeInfo;
@@ -26,18 +27,15 @@ pub struct SettingsPage {
     volume_refresh: Vec<Entity<InputState>>,
     /// Set when the settings file could not be written.
     problem: Option<String>,
+    /// Fields of the Add Remote dialog.
+    remote_host: Entity<InputState>,
+    remote_path: Entity<InputState>,
 }
+
+/// Whether Remotes can be added yet; until SSH Remotes land the button stays off.
+const REMOTES_AVAILABLE: bool = false;
 
 impl EventEmitter<Changed> for SettingsPage {}
-
-/// Applies the theme choice; the Geist fonts set at startup are kept.
-pub fn apply_theme(choice: ThemeChoice, cx: &mut App) {
-    match choice {
-        ThemeChoice::System => Theme::sync_system_appearance(None, cx),
-        ThemeChoice::Light => Theme::change(ThemeMode::Light, None, cx),
-        ThemeChoice::Dark => Theme::change(ThemeMode::Dark, None, cx),
-    }
-}
 
 impl SettingsPage {
     pub fn new(
@@ -98,12 +96,16 @@ impl SettingsPage {
             }
         })
         .detach();
+        let remote_host = cx.new(|cx| InputState::new(window, cx).placeholder("user@host"));
+        let remote_path = cx.new(|cx| InputState::new(window, cx).placeholder("/srv/backup"));
         Self {
             settings,
             volumes,
             refresh,
             volume_refresh,
             problem: None,
+            remote_host,
+            remote_path,
         }
     }
 
@@ -131,40 +133,69 @@ impl SettingsPage {
         cx.notify();
     }
 
+    /// A pill-shaped minutes field: the number, then its unit.
+    fn minutes_field(&self, input: &Entity<InputState>, cx: &App) -> Div {
+        let p = palette(cx);
+        h_flex()
+            .h(px(36.))
+            .w(px(150.))
+            .flex_none()
+            .pl(px(6.))
+            .pr(px(14.))
+            .gap(px(4.))
+            .items_center()
+            .rounded_full()
+            .border_1()
+            .border_color(p.control)
+            .bg(p.ground)
+            .child(div().w(px(34.)).flex_none().child(Input::new(input).appearance(false).bordered(false)))
+            .child(div().text_color(p.muted).child("min"))
+    }
+
     fn volume_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let (rule, muted) = (p.rule, p.muted);
         let volume = &self.volumes[ix];
-        let mut notes = vec![volume.fs_type.clone()];
-        if !volume.label.is_empty() {
-            notes.push(volume.label.clone());
-        }
-        if volume.removable {
-            notes.push("removable".into());
-        }
+        let name = crate::app::volume_name(volume);
+        let kind = if volume.removable { "Removable" } else { "Local Volume" };
+        let mut notes = vec![volume.mount.display().to_string(), volume.fs_type.clone()];
         if volume.read_only {
             notes.push("read-only".into());
         }
         h_flex()
-            .gap_3()
+            .min_h(px(62.))
+            .py(px(8.))
+            .gap(px(16.))
             .items_center()
+            .when(ix > 0, |d| d.border_t_1().border_color(rule))
             .child(
-                Checkbox::new(("volume", ix))
-                    .label(volume.mount.display().to_string())
-                    .checked(self.settings.is_indexed(volume))
-                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                        let volume = this.volumes[ix].clone();
-                        this.settings.set_indexed(&volume, *checked);
-                        this.commit(cx);
-                    })),
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .items_center()
+                            .child(div().font_weight(FontWeight::MEDIUM).child(name))
+                            .child(tag(kind, Tone::Neutral, cx)),
+                    )
+                    .child(div().text_xs().text_color(muted).truncate().child(notes.join(" · "))),
             )
+            .child(self.minutes_field(&self.volume_refresh[ix], cx))
             .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(notes.join(" · ")),
+                div().w(px(36.)).flex_none().child(
+                    Switch::new(("volume", ix))
+                        .checked(self.settings.is_indexed(volume))
+                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                            let volume = this.volumes[ix].clone();
+                            this.settings.set_indexed(&volume, *checked);
+                            this.commit(cx);
+                        })),
+                ),
             )
-            .child(div().text_sm().child("re-read every"))
-            .child(div().w(px(120.)).child(NumberInput::new(&self.volume_refresh[ix])))
-            .child(div().text_sm().child("min"))
+            // Room for the Forget link of an Offline Volume.
+            .child(div().w(px(64.)).flex_none())
             .into_any_element()
     }
 
@@ -174,66 +205,203 @@ impl SettingsPage {
             ("Light", ThemeChoice::Light),
             ("Dark", ThemeChoice::Dark),
         ];
-        ButtonGroup::new("theme")
-            .outline()
+        let p = palette(cx);
+        let (ground, border, text, muted) = (p.ground, p.border, p.text, p.muted);
+        h_flex()
+            .p(px(3.))
+            .rounded_full()
             .children(CHOICES.map(|(label, choice)| {
-                Button::new(label)
-                    .label(label)
-                    .selected(self.settings.theme == choice)
-            }))
-            .on_click(cx.listener(|this, clicks: &Vec<usize>, _, cx| {
-                if let Some(&(_, choice)) = clicks.first().and_then(|&i| CHOICES.get(i)) {
-                    this.settings.theme = choice;
-                    apply_theme(choice, cx);
-                    this.commit(cx);
-                }
+                let on = self.settings.theme == choice;
+                div()
+                    .id(label)
+                    .h(px(32.))
+                    .px(px(16.))
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if on { text } else { muted })
+                    .when(on, |d| d.bg(ground).border_1().border_color(border))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings.theme = choice;
+                        theme::apply(choice, cx);
+                        this.commit(cx);
+                    }))
             }))
             .into_any_element()
     }
+
+    /// The Add Remote dialog: SSH or S3 details for a read-only Remote. Nothing stands behind
+    /// it until issue 15, so adding closes it without creating anything.
+    pub fn open_add_remote(&self, window: &mut Window, cx: &mut App) {
+        let (host, path) = (self.remote_host.clone(), self.remote_path.clone());
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let p = palette(cx);
+            let (surface, ground, border, muted, text) = (p.surface, p.ground, p.border, p.muted, p.text);
+            let field = |label: &'static str, input: &Entity<InputState>| {
+                v_flex().gap(px(8.)).child(div().font_weight(FontWeight::MEDIUM).child(label)).child(
+                    h_flex()
+                        .h(px(38.))
+                        .px(px(6.))
+                        .items_center()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(p.control)
+                        .bg(ground)
+                        .child(Input::new(input).appearance(false).bordered(false)),
+                )
+            };
+            let seg = |label: &'static str, on: bool| {
+                div()
+                    .h(px(32.))
+                    .px(px(16.))
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if on { text } else { muted })
+                    .when(on, |d| d.bg(ground).border_1().border_color(border))
+                    .child(label)
+            };
+            let refresh = h_flex()
+                .h(px(38.))
+                .px(px(14.))
+                .items_center()
+                .justify_between()
+                .rounded_full()
+                .border_1()
+                .border_color(p.control)
+                .child("Manual")
+                .child(Icon::new(IconName::ChevronDown).size(px(14.)).text_color(muted));
+            dialog
+                .w(px(480.))
+                .centered()
+                .p(px(24.))
+                .close_button(false)
+                .title(
+                    div()
+                        .font_family(SERIF_FAMILY)
+                        .text_size(px(28.))
+                        .line_height(px(32.))
+                        .font_weight(FontWeight::NORMAL)
+                        .child("Add Remote"),
+                )
+                .child(
+                    v_flex()
+                        .gap(px(11.))
+                        .child(div().text_color(muted).child("Remotes are read-only: listed and sized, never changed, no Trash."))
+                        .child(h_flex().child(h_flex().p(px(3.)).rounded_full().bg(surface).child(seg("SSH", true)).child(seg("S3", false))))
+                        .child(field("Host", &host))
+                        .child(field("Path", &path))
+                        .child(v_flex().gap(px(8.)).child(div().font_weight(FontWeight::MEDIUM).child("Refresh")).child(refresh)),
+                )
+                .footer(
+                    h_flex()
+                        .gap(px(8.))
+                        .items_center()
+                        .child(div().flex_1().text_xs().text_color(muted).child("Credentials stay in the system keychain."))
+                        .child(pill("remote-cancel", "Cancel").build(cx, |_, window, cx| window.close_dialog(cx)))
+                        .child(pill("remote-add", "Add Remote").primary().build(cx, |_, window, cx| window.close_dialog(cx))),
+                )
+        });
+    }
 }
 
-fn section(title: &'static str, note: &'static str, body: impl IntoElement, muted: Hsla) -> Div {
-    v_flex()
-        .gap_2()
-        .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(title))
-        .child(div().text_sm().text_color(muted).child(note))
-        .child(body)
+fn section(title: &'static str, note: &'static str, body: impl IntoElement, cx: &App) -> Div {
+    h_flex()
+        .gap(px(16.))
+        .items_start()
+        .child(
+            v_flex()
+                .w(px(356.))
+                .pr(px(24.))
+                .pt(px(3.))
+                .flex_none()
+                .gap(px(6.))
+                .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(title))
+                .child(div().text_color(palette(cx).muted).child(note)),
+        )
+        .child(div().flex_1().min_w_0().child(body))
 }
 
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let (rule, muted, border) = (p.rule, p.muted, p.border);
         let rows: Vec<_> = (0..self.volumes.len()).map(|ix| self.volume_row(ix, cx)).collect();
-        let volumes = v_flex().gap_2().children(rows);
-        let muted = cx.theme().muted_foreground;
-        let refresh = h_flex()
-            .gap_2()
+        let indexed = self.volumes.iter().filter(|v| self.settings.is_indexed(v)).count();
+        let add = pill("add-remote", "Add Remote")
+            .small()
+            .disabled((!REMOTES_AVAILABLE).then_some("Available once SSH Remotes land"))
+            .build(cx, cx.listener(|this, _, window, cx| this.open_add_remote(window, cx)));
+        let head = h_flex()
+            .pb(px(7.))
+            .text_xs()
+            .text_color(muted)
+            .gap(px(16.))
+            .child(div().flex_1().child("Location"))
+            .child(div().w(px(150.)).flex_none().child("Refresh interval"))
+            .child(div().w(px(36.)).flex_none().child("Index"))
+            .child(div().w(px(64.)).flex_none());
+        let default = h_flex()
+            .mt(px(8.))
+            .pt(px(12.))
+            .gap(px(16.))
             .items_center()
-            .child("Volumes without their own interval are re-read every")
-            .child(div().w(px(140.)).child(NumberInput::new(&self.refresh)))
-            .child("minutes while running");
-        let theme = self.theme_buttons(cx);
-        let mut page = v_flex()
-            .id("settings")
-            .size_full()
-            .overflow_y_scroll()
-            .p_4()
-            .gap_6()
+            .border_t_1()
+            .border_color(rule)
+            .child(
+                v_flex().flex_1().child(div().font_weight(FontWeight::MEDIUM).child("Default refresh interval")).child(
+                    div().text_xs().text_color(muted).child("For Volumes without their own interval, re-read while running"),
+                ),
+            )
+            .child(self.minutes_field(&self.refresh, cx))
+            .child(div().w(px(36.)).flex_none())
+            .child(div().w(px(64.)).flex_none());
+        let locations = panel(cx)
+            .child(h_flex().justify_end().mb(px(14.)).child(add))
+            .child(head)
+            .children(rows)
+            .child(default);
+        let showing = if cx.theme().is_dark() { "dark" } else { "light" };
+        let theme = panel(cx)
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(self.theme_buttons(cx))
+            .child(caption(format!("Showing {showing}"), cx));
+        let mut column = v_flex()
+            .w_full()
+            .max_w(px(1164.))
+            .mx_auto()
+            .px(px(32.))
+            .pt(px(32.))
+            .pb(px(48.))
+            .gap(px(24.))
+            .child(
+                v_flex()
+                    .gap(px(6.))
+                    .mb(px(8.))
+                    .child(div().text_size(px(24.)).line_height(px(32.)).child("Settings"))
+                    .child(div().text_color(muted).child(format!(
+                        "{indexed} of {} Volumes are indexed. Changes save as you make them.",
+                        self.volumes.len()
+                    ))),
+            )
             .child(section(
-                "Indexed Volumes",
-                "Local fixed Volumes are indexed by default; removable ones only when ticked.",
-                volumes,
-                muted,
+                "Locations",
+                "Volumes are indexed by default. Removable Volumes and mounted network shares are opt-in. An Offline Volume stays searchable until you forget it.",
+                locations,
+                cx,
             ))
-            .child(section(
-                "Default refresh interval",
-                "A walked Volume is re-read this often while the app runs, and at launch only if its Last Synced is older. Set a different interval beside any Volume above.",
-                refresh,
-                muted,
-            ))
-            .child(section("Theme", "Light, Dark, or following the system.", theme, muted));
+            .child(div().h(px(1.)).bg(border))
+            .child(section("Theme", "System follows the operating system and changes with it.", theme, cx));
         if let Some(problem) = &self.problem {
-            page = page.child(div().text_color(cx.theme().warning).child(problem.clone()));
+            column = column.child(div().text_color(p.warning).child(problem.clone()));
         }
-        page
+        let _ = RADIUS_CARD;
+        div().id("settings").size_full().overflow_y_scroll().child(column)
     }
 }
