@@ -109,70 +109,74 @@ impl Render for CategoryPanel {
             let open = self.open.contains(&category);
             let color = category_color(category, dark);
             let share = row.totals.on_disk as f32 / largest as f32;
+            // The chevron expands; the rest of the row adds the Category to the Query.
+            let pick = v_flex()
+                .id(("category", category as usize))
+                .flex_1()
+                .cursor_pointer()
+                .tooltip({
+                    let text = format!(
+                        "{} files — show only this Category",
+                        format::count(row.totals.files)
+                    );
+                    move |window, cx| Tooltip::new(text.clone()).build(window, cx)
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.add_to_query(
+                        format!("type:{}", category.name().to_lowercase()),
+                        window,
+                        cx,
+                    );
+                }))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().size_3().rounded_sm().bg(color))
+                        .child(div().flex_1().child(category.name()))
+                        .child(
+                            div()
+                                .font_family("Geist Mono")
+                                .text_sm()
+                                .child(format::size(row.totals.on_disk)),
+                        ),
+                )
+                .child(
+                    div().mt_1().h(px(3.)).rounded_full().bg(border).child(
+                        div()
+                            .h_full()
+                            .w(relative(share.clamp(0.0, 1.0)))
+                            .rounded_full()
+                            .bg(color),
+                    ),
+                );
+            let chevron = div()
+                .id(("expand", category as usize))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.open.remove(&category) {
+                        this.open.insert(category);
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    Icon::new(if open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size_4()
+                    .text_color(muted),
+                );
             list = list.child(
-                v_flex()
-                    .id(("category", category as usize))
-                    .cursor_pointer()
+                h_flex()
+                    .gap_2()
                     .rounded_md()
                     .px_1()
                     .py_1()
                     .hover(move |s| s.bg(hover))
-                    .tooltip({
-                        let text = format!(
-                            "{} files — show only this Category",
-                            format::count(row.totals.files)
-                        );
-                        move |window, cx| Tooltip::new(text.clone()).build(window, cx)
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.add_to_query(
-                            format!("type:{}", category.name().to_lowercase()),
-                            window,
-                            cx,
-                        );
-                    }))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                div()
-                                    .id(("expand", category as usize))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        if !this.open.remove(&category) {
-                                            this.open.insert(category);
-                                        }
-                                        cx.notify();
-                                    }))
-                                    .child(
-                                        Icon::new(if open {
-                                            IconName::ChevronDown
-                                        } else {
-                                            IconName::ChevronRight
-                                        })
-                                        .size_4()
-                                        .text_color(muted),
-                                    ),
-                            )
-                            .child(div().size_3().rounded_sm().bg(color))
-                            .child(div().flex_1().child(category.name()))
-                            .child(
-                                div()
-                                    .font_family("Geist Mono")
-                                    .text_sm()
-                                    .child(format::size(row.totals.on_disk)),
-                            ),
-                    )
-                    .child(
-                        div().mt_1().h(px(3.)).rounded_full().bg(border).child(
-                            div()
-                                .h_full()
-                                .w(relative(share.clamp(0.0, 1.0)))
-                                .rounded_full()
-                                .bg(color),
-                        ),
-                    ),
+                    .child(chevron)
+                    .child(pick),
             );
             if open {
                 for (ext, totals) in &row.extensions {

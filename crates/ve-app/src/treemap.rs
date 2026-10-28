@@ -311,6 +311,8 @@ pub struct Treemap {
     selected: Option<EntryId>,
     /// The newest finished tiles; may trail the current View by one layout.
     tiles: Rc<Vec<Tile>>,
+    /// What `tiles` were laid out for; hit-testing is off while it trails the request.
+    tiles_key: Option<LayoutKey>,
     /// The drawing area in window coordinates, as of the last paint.
     bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The tile under the pointer, with the pointer's position inside the drawing area.
@@ -336,6 +338,7 @@ impl Treemap {
             zoom: None,
             selected: None,
             tiles: Rc::new(Vec::new()),
+            tiles_key: None,
             bounds: Rc::default(),
             hovered: None,
         }
@@ -377,8 +380,9 @@ impl Treemap {
                 self.layouter.request(view, root, (w, h));
             }
         }
-        if let Some((_, tiles)) = self.layouter.results.try_iter().last() {
+        if let Some((key, tiles)) = self.layouter.results.try_iter().last() {
             self.tiles = Rc::new(tiles);
+            self.tiles_key = Some(key);
             self.hovered = None;
             cx.notify();
         }
@@ -393,6 +397,9 @@ impl Treemap {
 
     /// The tile at a window position, if it is over the drawing area.
     fn tile_at(&self, position: Point<Pixels>) -> Option<(EntryId, Point<Pixels>)> {
+        if self.tiles_key != self.layouter.requested {
+            return None;
+        }
         let local = position - self.bounds.get().origin;
         hit(&self.tiles, f32::from(local.x), f32::from(local.y)).map(|t| (t.id, local))
     }
@@ -438,12 +445,20 @@ impl Treemap {
             self.categories.of_name(index.name(id)).name().to_owned()
         };
         let theme = cx.theme();
-        v_flex()
-            .absolute()
-            .left(at.x + px(14.))
-            .top(at.y + px(14.))
-            .max_w(px(420.))
-            .px_2()
+        // Opens right of and below the pointer, flipping to the other side near an edge.
+        let surface = self.bounds.get().size;
+        let tip = v_flex().absolute().max_w(px(420.));
+        let tip = if at.x + px(440.) > surface.width {
+            tip.right(surface.width - at.x + px(14.))
+        } else {
+            tip.left(at.x + px(14.))
+        };
+        let tip = if at.y + px(110.) > surface.height {
+            tip.bottom(surface.height - at.y + px(14.))
+        } else {
+            tip.top(at.y + px(14.))
+        };
+        tip.px_2()
             .py_1()
             .gap_0p5()
             .rounded_md()
@@ -459,7 +474,7 @@ impl Treemap {
                     .child(index.path(id).display().to_string()),
             )
             .child(format!(
-                "{} on disk · {} size",
+                "{} on disk · {} logical",
                 format::size(totals.on_disk),
                 format::size(totals.logical)
             ))
