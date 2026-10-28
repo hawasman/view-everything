@@ -55,7 +55,9 @@ fn a_remount_at_another_path_is_the_same_volume_and_only_catches_up() {
     fs::write(new.join("c.txt"), "new").unwrap();
     let mounted = [info(&new, "uuid:1234")];
     let (added, failed) = ve_scan::reconcile(&index, &mounted, &mounted);
-    assert!((added.is_empty() && failed.is_empty()), "no new Volume, so no scan from scratch");
+    assert!(failed.is_empty());
+    assert_eq!(added, [id], "the same Volume, queued to catch up rather than added anew");
+    assert_eq!(index.read().volumes().count(), 1, "no new Volume, so no scan from scratch");
     {
         let index = index.read();
         let volume = index.volume(id).unwrap();

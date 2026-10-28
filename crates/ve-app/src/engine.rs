@@ -231,9 +231,15 @@ fn run_indexer(
 
     let mut saved_generation = shared.index.read().generation();
     let mut last_save = Instant::now();
-    reconcile_volumes(shared, &mounted, &wanted);
-    // The saved Index is already on screen; Catch-up runs only where it has gone stale.
+    let returned = reconcile_volumes(shared, &mounted, &wanted);
+    // The saved Index is already on screen; Catch-up runs where it has gone stale, and for a
+    // Volume that is back (possibly at another path).
     let mut pending = stale_volumes(&shared.index.read(), &intervals, now_secs());
+    for id in returned {
+        if !pending.contains(&id) {
+            pending.push(id);
+        }
+    }
     // When each Volume was last tried, so one that keeps failing is not retried on every
     // journal poll.
     let mut last_attempt: HashMap<VolumeId, Instant> = HashMap::new();

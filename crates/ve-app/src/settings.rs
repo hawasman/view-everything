@@ -82,9 +82,9 @@ impl Settings {
         }
     }
 
-    /// Drops everything remembered about the Volume `identity` last mounted at `mount`.
-    pub fn forget(&mut self, identity: &str, mount: &Path) {
-        let is = |k: &String| k == identity || Path::new(k) == mount;
+    /// Drops everything remembered about the Volume `identity`.
+    pub fn forget(&mut self, identity: &str) {
+        let is = |k: &String| k == identity;
         self.include.retain(|k| !is(k));
         self.exclude.retain(|k| !is(k));
         self.volume_refresh_minutes.retain(|k, _| !is(k));
@@ -209,7 +209,7 @@ mod tests {
         let old: Settings = toml::from_str("include = [\"/run/media/me/usb\"]").unwrap();
         assert!(old.is_indexed(&usb));
 
-        s.forget(&usb.identity, &usb.mount);
+        s.forget(&usb.identity);
         assert!(!s.is_indexed(&usb));
         assert!(s.include.is_empty() && s.volume_refresh_minutes.is_empty());
     }

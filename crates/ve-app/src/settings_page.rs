@@ -163,7 +163,7 @@ impl SettingsPage {
             )
             .child(Button::new(("forget", ix)).label("Forget").on_click(cx.listener(
                 move |this, _, _, cx| {
-                    this.settings.forget(&identity, &mount);
+                    this.settings.forget(&identity);
                     this.commit(cx);
                     cx.emit(Forget(identity.clone()));
                 },
