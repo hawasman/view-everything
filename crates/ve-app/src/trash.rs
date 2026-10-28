@@ -607,10 +607,13 @@ fn top_level(index: &Index, ids: &[EntryId]) -> Vec<EntryId> {
 
 /// Why `id` can't go to the Trash, if it can't.
 fn blocker(index: &Index, volumes: &[VolumeInfo], id: EntryId) -> Option<String> {
+    let volume = index.volume(index.volume_of(id)?)?;
+    if volume.is_remote() {
+        return Some("Remote Locations are read-only".into());
+    }
     if index.parent(id).is_none() {
         return Some("A whole Volume can't be moved to the Trash.".into());
     }
-    let volume = index.volume(index.volume_of(id)?)?;
     if !volume.online {
         return Some("Offline Volume: it is not mounted, so nothing on it can go to the Trash.".into());
     }
@@ -677,5 +680,13 @@ mod tests {
         index.set_mount(vol, None);
         let why = blocker(&index, &[info], inner).unwrap();
         assert!(why.starts_with("Offline Volume"), "{why}");
+
+        // A Remote is read-only, whatever the Entry.
+        let remote = index.add_remote(&ve_core::Remote::new("me@box", "/srv").unwrap());
+        let rroot = index.volume(remote).unwrap().root;
+        let rfile = index.insert(rroot, "f", file);
+        for id in [rroot, rfile] {
+            assert_eq!(blocker(&index, &[], id).as_deref(), Some("Remote Locations are read-only"));
+        }
     }
 }

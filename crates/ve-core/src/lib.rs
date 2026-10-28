@@ -13,5 +13,7 @@ pub mod query;
 pub use bits::BitSet;
 pub use category::{Category, CategoryMap};
 pub use filter::{Filter, Totals};
-pub use index::{Capacity, EntryId, EntryMeta, Index, SyncState, Volume, VolumeId};
+pub use index::{
+    Capacity, EntryId, EntryMeta, Index, MANUAL_REFRESH, Remote, SyncState, Volume, VolumeId,
+};
 pub use query::{Candidate, Query, QueryContext, QueryError};

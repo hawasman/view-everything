@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use ve_core::CategoryMap;
+use ve_core::{CategoryMap, MANUAL_REFRESH, Remote};
 use ve_scan::VolumeInfo;
 
 const APP_DIR: &str = "view-everything";
@@ -32,6 +32,10 @@ pub struct Settings {
     /// Light, Dark, or following the system.
     #[serde(default)]
     pub theme: ThemeChoice,
+    /// The SSH Remotes the user added. Their refresh interval is in `volume_refresh_minutes`
+    /// under their identity; Manual unless set.
+    #[serde(default)]
+    pub remotes: Vec<Remote>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,6 +63,7 @@ impl Default for Settings {
             refresh_minutes: default_refresh_minutes(),
             volume_refresh_minutes: BTreeMap::new(),
             theme: ThemeChoice::System,
+            remotes: Vec::new(),
         }
     }
 }
@@ -137,18 +142,34 @@ impl Settings {
             )
     }
 
-    /// The refresh interval of each of `volumes`, by mount point.
+    /// Adds a Remote (the same one twice is one). Returns whether it was new.
+    pub fn add_remote(&mut self, remote: Remote, refresh_minutes: u64) -> bool {
+        let new = !self.remotes.contains(&remote);
+        self.volume_refresh_minutes.insert(remote.identity(), refresh_minutes);
+        if new {
+            self.remotes.push(remote);
+        }
+        new
+    }
+
+    pub fn remove_remote(&mut self, remote: &Remote) {
+        self.remotes.retain(|r| r != remote);
+        self.volume_refresh_minutes.remove(&remote.identity());
+    }
+
+    /// The refresh interval of a Remote, in minutes: Manual (0) unless chosen.
+    pub fn remote_refresh_minutes(&self, remote: &Remote) -> u64 {
+        self.volume_refresh_minutes.get(&remote.identity()).copied().unwrap_or(0)
+    }
+
+    /// The refresh interval of each of `volumes`, and of each Remote, by mount point.
     pub fn intervals(&self, volumes: &[VolumeInfo]) -> HashMap<PathBuf, Duration> {
+        // ponytail: Manual (0) is an interval too long to ever come due.
+        let every = |minutes: u64| if minutes == 0 { MANUAL_REFRESH } else { Duration::from_secs(minutes * 60) };
         volumes
             .iter()
-            .map(|v| {
-                // ponytail: Manual (0) is an interval too long to ever come due.
-                let secs = match self.refresh_minutes_for(v) {
-                    0 => u32::MAX as u64,
-                    m => m * 60,
-                };
-                (v.mount.clone(), Duration::from_secs(secs))
-            })
+            .map(|v| (v.mount.clone(), every(self.refresh_minutes_for(v))))
+            .chain(self.remotes.iter().map(|r| (PathBuf::from(r.identity()), every(self.remote_refresh_minutes(r)))))
             .collect()
     }
 
@@ -242,6 +263,25 @@ mod tests {
         assert_eq!(s.refresh_minutes_for(&nas), 10);
         s.set_indexed(&nas, false);
         assert!(s.include.is_empty() && !s.is_indexed(&nas));
+    }
+
+    #[test]
+    fn remotes_default_to_manual_and_keep_their_interval() {
+        let remote = Remote::new("me@box", "/srv/backup").unwrap();
+        let mut s = Settings::default();
+        assert!(s.add_remote(remote.clone(), 0));
+        assert!(!s.add_remote(remote.clone(), 120));
+        assert_eq!(s.remotes.len(), 1);
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+        let key = PathBuf::from("ssh:me@box:/srv/backup");
+        assert_eq!(back.intervals(&[])[&key], Duration::from_secs(120 * 60));
+        s.volume_refresh_minutes.clear();
+        assert_eq!(s.intervals(&[])[&key], MANUAL_REFRESH);
+        s.remove_remote(&remote);
+        assert!(s.remotes.is_empty() && s.intervals(&[]).is_empty());
+        // An older settings file has no Remotes.
+        assert!(toml::from_str::<Settings>("include = []").unwrap().remotes.is_empty());
     }
 
     #[test]

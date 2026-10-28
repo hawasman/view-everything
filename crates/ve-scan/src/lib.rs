@@ -8,6 +8,7 @@ mod capacity;
 pub mod ntfs;
 mod platform;
 mod reconcile;
+pub mod remote;
 mod volumes;
 mod walk;
 pub mod watch;
@@ -16,6 +17,7 @@ pub mod watch;
 pub use platform::windows::{is_elevated, relaunch_elevated};
 pub use capacity::capacity;
 pub use reconcile::reconcile;
+pub use remote::reconcile_remotes;
 pub use volumes::{VolumeInfo, discover_volumes};
 
 use parking_lot::RecursiveRwLock;
@@ -68,6 +70,9 @@ pub fn add_volume(
 /// change journal when the process is elevated; otherwise, and on every other platform, the
 /// folder tree is walked and differences applied.
 pub fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::Result<()> {
+    if index.read().volume(volume).is_some_and(|v| v.is_remote()) {
+        return remote::sync(index, volume, progress);
+    }
     #[cfg(windows)]
     if ntfs::sync_windows(index, volume, progress)? {
         return Ok(());

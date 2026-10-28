@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use ve_core::{CategoryMap, Index, Query, QueryContext, SyncState, VolumeId};
+use ve_core::{CategoryMap, Index, Query, QueryContext, Remote, SyncState, VolumeId};
 use ve_scan::{Progress, SharedIndex, VolumeInfo};
 
 /// How often a Volume kept current by the NTFS change journal is polled while the app runs.
@@ -73,8 +73,10 @@ pub enum Phase {
 }
 
 enum Command {
-    /// Every Volume mounted, and the ones of them to index.
-    SetVolumes(Vec<VolumeInfo>, Vec<VolumeInfo>),
+    /// Every Volume mounted, the ones of them to index, and the Remotes to hold.
+    SetVolumes(Vec<VolumeInfo>, Vec<VolumeInfo>, Vec<Remote>),
+    /// Syncs the Location with this identity now (Refresh).
+    RefreshLocation(String),
     /// Drops an Offline Volume, by identity, from the Index.
     Forget(String),
     #[allow(dead_code)]
@@ -96,6 +98,7 @@ impl Engine {
         repaint: Repaint,
         mounted: Vec<VolumeInfo>,
         volumes: Vec<VolumeInfo>,
+        remotes: Vec<Remote>,
         intervals: Intervals,
         categories: CategoryMap,
     ) -> Engine {
@@ -118,7 +121,7 @@ impl Engine {
             let shared = shared.clone();
             thread::Builder::new()
                 .name("ve-indexer".into())
-                .spawn(move || run_indexer(&shared, mounted, volumes, intervals, &command_rx))
+                .spawn(move || run_indexer(&shared, mounted, volumes, remotes, intervals, &command_rx))
                 .expect("spawn indexer thread")
         };
         {
@@ -141,8 +144,13 @@ impl Engine {
         let _ = self.queries.send(text);
     }
 
-    pub fn set_volumes(&self, mounted: Vec<VolumeInfo>, volumes: Vec<VolumeInfo>) {
-        let _ = self.commands.send(Command::SetVolumes(mounted, volumes));
+    pub fn set_volumes(&self, mounted: Vec<VolumeInfo>, volumes: Vec<VolumeInfo>, remotes: Vec<Remote>) {
+        let _ = self.commands.send(Command::SetVolumes(mounted, volumes, remotes));
+    }
+
+    /// Brings one Location up to date now, whatever its refresh interval.
+    pub fn refresh_location(&self, identity: String) {
+        let _ = self.commands.send(Command::RefreshLocation(identity));
     }
 
     pub fn forget(&self, identity: String) {
@@ -214,6 +222,7 @@ fn run_indexer(
     shared: &Shared,
     mut mounted: Vec<VolumeInfo>,
     mut wanted: Vec<VolumeInfo>,
+    mut remotes: Vec<Remote>,
     mut intervals: Intervals,
     commands: &Receiver<Command>,
 ) {
@@ -231,7 +240,7 @@ fn run_indexer(
 
     let mut saved_generation = shared.index.read().generation();
     let mut last_save = Instant::now();
-    let returned = reconcile_volumes(shared, &mounted, &wanted);
+    let returned = reconcile_volumes(shared, &mounted, &wanted, &remotes);
     // The saved Index is already on screen; Catch-up runs where it has gone stale, and for a
     // Volume that is back (possibly at another path).
     let mut pending = stale_volumes(&shared.index.read(), &intervals, now_secs());
@@ -277,10 +286,15 @@ fn run_indexer(
         };
         quiet = false;
         match commands.recv_timeout(timeout) {
-            Ok(Command::SetVolumes(now_mounted, volumes)) => {
+            Ok(Command::SetVolumes(now_mounted, volumes, now_remotes)) => {
                 mounted = now_mounted;
                 wanted = volumes;
-                pending = reconcile_volumes(shared, &mounted, &wanted);
+                remotes = now_remotes;
+                pending = reconcile_volumes(shared, &mounted, &wanted, &remotes);
+            }
+            Ok(Command::RefreshLocation(identity)) => {
+                let index = shared.index.read();
+                pending = index.volume_with_identity(&identity).into_iter().collect();
             }
             Ok(Command::Forget(identity)) => {
                 let mut index = shared.index.write();
@@ -384,10 +398,11 @@ pub fn last_synced_label(oldest: Option<Option<i64>>, now: i64) -> Option<String
     })
 }
 
-/// Makes the Index agree with what is mounted (see [`ve_scan::reconcile`]). Returns the
-/// Volumes newly added.
-fn reconcile_volumes(shared: &Shared, mounted: &[VolumeInfo], wanted: &[VolumeInfo]) -> Vec<VolumeId> {
-    let (added, failed) = ve_scan::reconcile(&shared.index, mounted, wanted);
+/// Makes the Index agree with what is mounted (see [`ve_scan::reconcile`]) and with the
+/// Remotes the user added. Returns the Locations newly added.
+fn reconcile_volumes(shared: &Shared, mounted: &[VolumeInfo], wanted: &[VolumeInfo], remotes: &[Remote]) -> Vec<VolumeId> {
+    let (mut added, failed) = ve_scan::reconcile(&shared.index, mounted, wanted);
+    added.extend(ve_scan::reconcile_remotes(&shared.index, remotes));
     for (mount, e) in failed {
         shared.report(format!("volume {}", mount.display()), format!("Cannot index {}: {e}", mount.display()));
     }
@@ -442,13 +457,18 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
             for (id, mount) in &mounts {
                 scope.spawn(move || {
                     let cause = format!("volume {}", mount.display());
+                    let remote = shared.index.read().volume(*id).is_some_and(|v| v.is_remote());
                     // Stamped before the walk: changes made while it runs are not covered.
                     let started = now_secs();
                     match ve_scan::sync(&shared.index, *id, &shared.progress) {
                         Ok(_) => {
                             shared.resolve(&cause);
-                            let capacity = ve_scan::capacity(mount);
+                            // A Remote has no mount to measure.
+                            let capacity = if remote { None } else { ve_scan::capacity(mount) };
                             shared.index.write().mark_synced(*id, started, capacity);
+                        }
+                        Err(e) if remote => {
+                            shared.report(cause, format!("Could not refresh {}: {e}", mount.display()))
                         }
                         Err(e) => shared
                             .report(cause, format!("Could not read {}: {e}", mount.display())),
@@ -591,6 +611,26 @@ mod tests {
         // Already overdue: wait the floor rather than spinning.
         let overdue = index_with_volumes(&[Some(now - 7200)]);
         assert_eq!(next_wait(&overdue, &intervals, now), MIN_WAIT);
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_remote_is_searchable_and_its_manual_interval_never_goes_stale() {
+        let mut index = index_with_volumes(&[Some(100_000 - 60)]);
+        let remote = Remote::new("me@box", "/srv").unwrap();
+        let id = index.add_remote(&remote);
+        let root = index.volume(id).unwrap().root;
+        let file = ve_core::EntryMeta { logical: 10, on_disk: 4096, ..Default::default() };
+        let hit = index.insert(root, "quarterly-report.pdf", file);
+        let categories = CategoryMap::builtin();
+        let query = Query::parse("report", &QueryContext::new(categories.clone(), Local::now())).unwrap();
+        let view = View::compute(&index, "report", Some(&query), &categories);
+        assert_eq!(view.flat, vec![hit]);
+        assert_eq!(index.path(hit).to_string_lossy(), "ssh:me@box:/srv/quarterly-report.pdf");
+        // Never synced, Manual: launch Catch-up leaves it alone; with an interval it is due.
+        let manual: Intervals = [(PathBuf::from(remote.identity()), ve_core::MANUAL_REFRESH)].into_iter().collect();
+        assert!(!stale_volumes(&index, &manual, 100_000).contains(&id));
+        let hourly: Intervals = [(PathBuf::from(remote.identity()), Duration::from_secs(3600))].into_iter().collect();
+        assert!(stale_volumes(&index, &hourly, 100_000).contains(&id));
     }
 
     #[::core::prelude::v1::test]
