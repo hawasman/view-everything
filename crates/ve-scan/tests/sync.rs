@@ -25,7 +25,7 @@ fn snapshot(index: &Index, volume: VolumeId) -> BTreeMap<String, (bool, u64, u64
 
 fn scan(root: &Path) -> (SharedIndex, VolumeId) {
     let index = SharedIndex::new(Index::new());
-    let volume = ve_scan::add_volume(&index, root, "test").unwrap();
+    let volume = ve_scan::add_volume(&index, root, "test", "uuid:test").unwrap();
     ve_scan::sync(&index, volume, &Progress::default()).unwrap();
     (index, volume)
 }
@@ -179,7 +179,7 @@ fn unreadable_folders_are_kept_and_counted() {
     }
 
     let index = SharedIndex::new(Index::new());
-    let volume = ve_scan::add_volume(&index, dir.path(), "test").unwrap();
+    let volume = ve_scan::add_volume(&index, dir.path(), "test", "uuid:test").unwrap();
     let progress = Progress::default();
     ve_scan::sync(&index, volume, &progress).unwrap();
     fs::set_permissions(dir.path().join("locked"), fs::Permissions::from_mode(0o755)).unwrap();

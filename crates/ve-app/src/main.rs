@@ -51,6 +51,7 @@ fn main() {
     if let Some(mount) = std::env::var_os("VE_BENCH_MOUNT") {
         volumes = vec![ve_scan::VolumeInfo {
             mount: mount.into(),
+            identity: "bench".into(),
             fs_type: "ext4".into(),
             label: "bench".into(),
             removable: false,

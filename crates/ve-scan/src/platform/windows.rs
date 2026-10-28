@@ -14,7 +14,7 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     GetCompressedFileSizeW, GetDiskFreeSpaceW, GetDriveTypeW, GetLogicalDriveStringsW,
-    GetVolumeInformationW,
+    GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
@@ -57,13 +57,14 @@ pub fn discover_volumes() -> Vec<VolumeInfo> {
         let mut label = [0u16; 261];
         let mut fs = [0u16; 261];
         let mut flags = 0u32;
+        let mut serial = 0u32;
         // SAFETY: all out-buffers are valid for the lengths given.
         let ok = unsafe {
             GetVolumeInformationW(
                 root_z.as_ptr(),
                 label.as_mut_ptr(),
                 label.len() as u32,
-                std::ptr::null_mut(),
+                &mut serial,
                 std::ptr::null_mut(),
                 &mut flags,
                 fs.as_mut_ptr(),
@@ -74,6 +75,7 @@ pub fn discover_volumes() -> Vec<VolumeInfo> {
             continue; // no media, or unreadable
         }
         volumes.push(VolumeInfo {
+            identity: identity(&root_z, serial),
             mount: PathBuf::from(OsString::from_wide(root)),
             fs_type: from_wide(&fs),
             label: from_wide(&label),
@@ -82,6 +84,21 @@ pub fn discover_volumes() -> Vec<VolumeInfo> {
         });
     }
     volumes
+}
+
+/// The Volume GUID (`\\?\Volume{...}\`), which stays with the volume whatever letter it is
+/// given; the volume serial number if Windows has no GUID for it.
+fn identity(root_z: &[u16], serial: u32) -> String {
+    let mut name = [0u16; 64];
+    // SAFETY: `root_z` is NUL terminated and `name` is valid for the length given.
+    let ok = unsafe {
+        GetVolumeNameForVolumeMountPointW(root_z.as_ptr(), name.as_mut_ptr(), name.len() as u32)
+    };
+    if ok != 0 {
+        format!("guid:{}", from_wide(&name))
+    } else {
+        format!("serial:{serial:08X}")
+    }
 }
 
 /// Whether this process runs with an elevated (administrator) token.

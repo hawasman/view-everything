@@ -7,7 +7,7 @@ use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
 use crate::format;
 use crate::settings::{Settings, ThemeChoice};
-use crate::settings_page::{Changed, SettingsPage, apply_theme};
+use crate::settings_page::{Changed, Forget, SettingsPage, apply_theme};
 use crate::tree::TreeList;
 use crate::trash::{self, Trash};
 use crate::treemap::Treemap;
@@ -89,13 +89,13 @@ impl Shell {
         let repaint: Repaint = Arc::new(move || {
             let _ = wake.try_send(());
         });
-        let engine = Engine::start(repaint.clone(), indexed, intervals, categories.clone());
+        let engine = Engine::start(repaint.clone(), volumes.clone(), indexed, intervals, categories.clone());
 
         let trash = Trash::new(engine.shared.clone(), repaint);
 
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
         cx.subscribe(&settings_page, |this, _, changed: &Changed, cx| {
-            this.engine.set_volumes(changed.indexed.clone());
+            this.engine.set_volumes(changed.mounted.clone(), changed.indexed.clone());
             this.engine.set_intervals(changed.intervals.clone());
             // Saved fine, so the settings file read at startup has been replaced.
             if !this.settings_page.read(cx).has_problem() {
@@ -104,6 +104,8 @@ impl Shell {
             cx.notify();
         })
         .detach();
+        cx.subscribe(&settings_page, |this, _, forget: &Forget, _| this.engine.forget(forget.0.clone()))
+            .detach();
 
         let query = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Search names, or try size:>1gb type:video")
@@ -221,6 +223,16 @@ impl Shell {
             }
         });
         self.categories.update(cx, |panel, cx| panel.set_view(latest, cx));
+        let offline: Vec<_> = self
+            .engine
+            .shared
+            .index
+            .read()
+            .volumes()
+            .filter(|(_, v)| !v.online)
+            .map(|(_, v)| (v.identity.clone(), v.mount.clone()))
+            .collect();
+        self.settings_page.update(cx, |page, cx| page.set_offline(offline, cx));
         cx.notify();
     }
 
@@ -265,6 +277,10 @@ impl Shell {
         };
         if let Some(label) = synced.filter(|_| !matches!(status.phase, Phase::LoadingIndex)) {
             left = left.child(format!("· {label}"));
+        }
+        let offline = shared.index.read().volumes().filter(|(_, v)| !v.online).count();
+        if offline > 0 {
+            left = left.child(format!("· {offline} Volume(s) offline"));
         }
         if progress.unreadable() > 0 {
             left = left.child(format!(

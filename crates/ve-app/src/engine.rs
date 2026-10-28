@@ -73,7 +73,10 @@ pub enum Phase {
 }
 
 enum Command {
-    SetVolumes(Vec<VolumeInfo>),
+    /// Every Volume mounted, and the ones of them to index.
+    SetVolumes(Vec<VolumeInfo>, Vec<VolumeInfo>),
+    /// Drops an Offline Volume, by identity, from the Index.
+    Forget(String),
     #[allow(dead_code)]
     Refresh,
     SetIntervals(Intervals),
@@ -91,6 +94,7 @@ impl Engine {
     /// Starts loading the saved Index, then Catch-up or a first scan of `volumes`.
     pub fn start(
         repaint: Repaint,
+        mounted: Vec<VolumeInfo>,
         volumes: Vec<VolumeInfo>,
         intervals: Intervals,
         categories: CategoryMap,
@@ -114,7 +118,7 @@ impl Engine {
             let shared = shared.clone();
             thread::Builder::new()
                 .name("ve-indexer".into())
-                .spawn(move || run_indexer(&shared, volumes, intervals, &command_rx))
+                .spawn(move || run_indexer(&shared, mounted, volumes, intervals, &command_rx))
                 .expect("spawn indexer thread")
         };
         {
@@ -137,8 +141,12 @@ impl Engine {
         let _ = self.queries.send(text);
     }
 
-    pub fn set_volumes(&self, volumes: Vec<VolumeInfo>) {
-        let _ = self.commands.send(Command::SetVolumes(volumes));
+    pub fn set_volumes(&self, mounted: Vec<VolumeInfo>, volumes: Vec<VolumeInfo>) {
+        let _ = self.commands.send(Command::SetVolumes(mounted, volumes));
+    }
+
+    pub fn forget(&self, identity: String) {
+        let _ = self.commands.send(Command::Forget(identity));
     }
 
     pub fn set_intervals(&self, intervals: Intervals) {
@@ -204,6 +212,7 @@ impl Shared {
 
 fn run_indexer(
     shared: &Shared,
+    mut mounted: Vec<VolumeInfo>,
     mut wanted: Vec<VolumeInfo>,
     mut intervals: Intervals,
     commands: &Receiver<Command>,
@@ -222,9 +231,15 @@ fn run_indexer(
 
     let mut saved_generation = shared.index.read().generation();
     let mut last_save = Instant::now();
-    reconcile_volumes(shared, &wanted);
-    // The saved Index is already on screen; Catch-up runs only where it has gone stale.
+    let returned = reconcile_volumes(shared, &mounted, &wanted);
+    // The saved Index is already on screen; Catch-up runs where it has gone stale, and for a
+    // Volume that is back (possibly at another path).
     let mut pending = stale_volumes(&shared.index.read(), &intervals, now_secs());
+    for id in returned {
+        if !pending.contains(&id) {
+            pending.push(id);
+        }
+    }
     // When each Volume was last tried, so one that keeps failing is not retried on every
     // journal poll.
     let mut last_attempt: HashMap<VolumeId, Instant> = HashMap::new();
@@ -249,7 +264,7 @@ fn run_indexer(
             .index
             .read()
             .volumes()
-            .filter(|(_, v)| matches!(v.sync, SyncState::Ntfs { .. }))
+            .filter(|(_, v)| v.online && matches!(v.sync, SyncState::Ntfs { .. }))
             .map(|(id, _)| id)
             .collect();
         let timeout = {
@@ -262,12 +277,32 @@ fn run_indexer(
         };
         quiet = false;
         match commands.recv_timeout(timeout) {
-            Ok(Command::SetVolumes(volumes)) => {
+            Ok(Command::SetVolumes(now_mounted, volumes)) => {
+                mounted = now_mounted;
                 wanted = volumes;
-                pending = reconcile_volumes(shared, &wanted);
+                pending = reconcile_volumes(shared, &mounted, &wanted);
+            }
+            Ok(Command::Forget(identity)) => {
+                let mut index = shared.index.write();
+                // Only an Offline Volume can be forgotten; a mounted one is un-ticked instead.
+                if let Some(id) = index.volume_with_identity(&identity)
+                    && index.volume(id).is_some_and(|v| !v.online)
+                {
+                    index.remove_volume(id);
+                }
+                drop(index);
+                save_if_changed(shared, index_path.as_deref(), &mut saved_generation, false);
+                (shared.repaint)();
+                pending = Vec::new();
             }
             Ok(Command::Refresh) => {
-                pending = shared.index.read().volumes().map(|(id, _)| id).collect()
+                pending = shared
+                    .index
+                    .read()
+                    .volumes()
+                    .filter(|(_, v)| v.online)
+                    .map(|(id, _)| id)
+                    .collect()
             }
             Ok(Command::SetIntervals(new)) => {
                 intervals = new;
@@ -304,7 +339,7 @@ fn interval_of(intervals: &Intervals, mount: &Path) -> Duration {
 fn stale_volumes(index: &Index, intervals: &Intervals, now: i64) -> Vec<VolumeId> {
     index
         .volumes()
-        .filter(|(_, v)| v.needs_catch_up(now, interval_of(intervals, &v.mount)))
+        .filter(|(_, v)| v.online && v.needs_catch_up(now, interval_of(intervals, &v.mount)))
         .map(|(id, _)| id)
         .collect()
 }
@@ -313,6 +348,7 @@ fn stale_volumes(index: &Index, intervals: &Intervals, now: i64) -> Vec<VolumeId
 fn next_wait(index: &Index, intervals: &Intervals, now: i64) -> Duration {
     index
         .volumes()
+        .filter(|(_, v)| v.online)
         .map(|(_, v)| {
             let interval = interval_of(intervals, &v.mount);
             match v.last_synced {
@@ -346,36 +382,17 @@ pub fn last_synced_label(oldest: Option<Option<i64>>, now: i64) -> Option<String
     })
 }
 
-/// Makes the Index hold exactly the `wanted` Volumes. Returns the ones newly added.
-fn reconcile_volumes(shared: &Shared, wanted: &[VolumeInfo]) -> Vec<VolumeId> {
-    {
-        let mut index = shared.index.write();
-        let unwanted: Vec<VolumeId> = index
-            .volumes()
-            .filter(|(_, v)| !wanted.iter().any(|w| w.mount == v.mount))
-            .map(|(id, _)| id)
-            .collect();
-        for id in unwanted {
-            index.remove_volume(id);
-        }
+/// Makes the Index agree with what is mounted (see [`ve_scan::reconcile`]). Returns the
+/// Volumes newly added.
+fn reconcile_volumes(shared: &Shared, mounted: &[VolumeInfo], wanted: &[VolumeInfo]) -> Vec<VolumeId> {
+    let (added, failed) = ve_scan::reconcile(&shared.index, mounted, wanted);
+    for (mount, e) in failed {
+        shared.report(format!("volume {}", mount.display()), format!("Cannot index {}: {e}", mount.display()));
     }
-    let mut added = Vec::new();
-    for volume in wanted {
-        let present = shared
-            .index
-            .read()
-            .volumes()
-            .any(|(_, v)| v.mount == volume.mount);
-        if present {
-            continue;
-        }
-        let cause = format!("volume {}", volume.mount.display());
-        match ve_scan::add_volume(&shared.index, &volume.mount, &volume.fs_type) {
-            Ok(id) => {
-                shared.resolve(&cause);
-                added.push(id);
-            }
-            Err(e) => shared.report(cause, format!("Cannot index {}: {e}", volume.mount.display())),
+    for &id in &added {
+        let mount = shared.index.read().volume(id).map(|v| v.mount.clone());
+        if let Some(mount) = mount {
+            shared.resolve(&format!("volume {}", mount.display()));
         }
     }
     added
@@ -542,7 +559,7 @@ mod tests {
         let mut index = Index::new();
         let root = ve_core::EntryMeta { is_dir: true, ..Default::default() };
         for (i, at) in synced.iter().enumerate() {
-            let id = index.add_volume(Path::new(&format!("/v{i}")), "ext4", root, SyncState::Walk);
+            let id = index.add_volume(Path::new(&format!("/v{i}")), "ext4", &format!("v{i}"), root, SyncState::Walk);
             if let Some(at) = at {
                 index.mark_synced(id, *at, None);
             }

@@ -611,6 +611,9 @@ fn blocker(index: &Index, volumes: &[VolumeInfo], id: EntryId) -> Option<String>
         return Some("A whole Volume can't be moved to the Trash.".into());
     }
     let volume = index.volume(index.volume_of(id)?)?;
+    if !volume.online {
+        return Some("Offline Volume: it is not mounted, so nothing on it can go to the Trash.".into());
+    }
     let info = volumes.iter().find(|v| v.mount == volume.mount)?;
     info.read_only.then(|| {
         format!(
@@ -649,7 +652,7 @@ mod tests {
             ..Default::default()
         };
         let mut index = Index::new();
-        let vol = index.add_volume(Path::new("/mnt/ro"), "ext4", dir, SyncState::Walk);
+        let vol = index.add_volume(Path::new("/mnt/ro"), "ext4", "uuid:ro", dir, SyncState::Walk);
         let root = index.volume(vol).unwrap().root;
         let folder = index.insert(root, "a", dir);
         let inner = index.insert(folder, "f", file);
@@ -659,6 +662,7 @@ mod tests {
 
         let mut info = VolumeInfo {
             mount: "/mnt/ro".into(),
+            identity: "uuid:ro".into(),
             fs_type: "ext4".into(),
             label: String::new(),
             removable: false,
@@ -667,6 +671,10 @@ mod tests {
         assert!(blocker(&index, std::slice::from_ref(&info), inner).is_some());
         assert!(blocker(&index, std::slice::from_ref(&info), root).is_some());
         info.read_only = false;
-        assert!(blocker(&index, &[info], inner).is_none());
+        assert!(blocker(&index, std::slice::from_ref(&info), inner).is_none());
+        // Not mounted: Trash is off whatever the mount flags were.
+        index.set_mount(vol, None);
+        let why = blocker(&index, &[info], inner).unwrap();
+        assert!(why.starts_with("Offline Volume"), "{why}");
     }
 }

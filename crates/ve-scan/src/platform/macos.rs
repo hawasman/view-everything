@@ -37,6 +37,7 @@ pub fn discover_volumes() -> Vec<VolumeInfo> {
                 return None;
             }
             Some(VolumeInfo {
+                identity: identity(&mount, &c_text(&m.f_mntfromname)),
                 removable: mount.starts_with("/Volumes/"),
                 read_only: m.f_flags & libc::MNT_RDONLY as u32 != 0,
                 label: c_text(&m.f_mntfromname),
@@ -47,9 +48,38 @@ pub fn discover_volumes() -> Vec<VolumeInfo> {
         .collect()
 }
 
+/// The volume UUID `diskutil` reports; device and mount path if it reports none.
+fn identity(mount: &str, device: &str) -> String {
+    let plist = std::process::Command::new("diskutil")
+        .args(["info", "-plist", mount])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    match volume_uuid(&plist) {
+        Some(uuid) => format!("uuid:{uuid}"),
+        None => format!("dev:{device}@{mount}"),
+    }
+}
+
+fn volume_uuid(plist: &str) -> Option<&str> {
+    let rest = plist.split("<key>VolumeUUID</key>").nth(1)?;
+    let rest = rest.split("<string>").nth(1)?;
+    rest.split("</string>").next()
+}
+
 fn c_text(field: &[libc::c_char]) -> String {
     // SAFETY: statfs name fields are NUL-terminated within their fixed size.
     unsafe { CStr::from_ptr(field.as_ptr()) }
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_volume_uuid_is_read_from_the_plist() {
+        let plist = "<dict><key>VolumeName</key><string>Data</string>\n<key>VolumeUUID</key>\n\t<string>AB12-34</string></dict>";
+        assert_eq!(super::volume_uuid(plist), Some("AB12-34"));
+        assert_eq!(super::volume_uuid("<dict></dict>"), None);
+    }
 }

@@ -8,18 +8,25 @@ use gpui_kit::component::input::{InputEvent, InputState, NumberInput};
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, h_flex, v_flex};
 use gpui_kit::*;
 use crate::engine::Intervals;
+use std::path::PathBuf;
 use ve_scan::VolumeInfo;
 
 const REFRESH_RANGE: std::ops::RangeInclusive<u64> = 1..=1440;
 
 /// What the Engine must be told after the user changes a setting.
 pub struct Changed {
+    pub mounted: Vec<VolumeInfo>,
     pub indexed: Vec<VolumeInfo>,
     pub intervals: Intervals,
 }
 
+/// The user asked to Forget the Offline Volume with this identity.
+pub struct Forget(pub String);
+
 pub struct SettingsPage {
     settings: Settings,
+    /// Offline Volumes as (identity, last mount path).
+    offline: Vec<(String, PathBuf)>,
     volumes: Vec<VolumeInfo>,
     refresh: Entity<InputState>,
     /// One refresh-interval field per Volume, in `volumes` order.
@@ -29,6 +36,7 @@ pub struct SettingsPage {
 }
 
 impl EventEmitter<Changed> for SettingsPage {}
+impl EventEmitter<Forget> for SettingsPage {}
 
 /// Applies the theme choice; the Geist fonts set at startup are kept.
 pub fn apply_theme(choice: ThemeChoice, cx: &mut App) {
@@ -59,21 +67,21 @@ impl SettingsPage {
         let refresh = minutes_input(settings.refresh_minutes, window, cx);
         let volume_refresh: Vec<_> = volumes
             .iter()
-            .map(|v| minutes_input(settings.refresh_minutes_for(&v.mount), window, cx))
+            .map(|v| minutes_input(settings.refresh_minutes_for(v), window, cx))
             .collect();
         for (ix, input) in volume_refresh.iter().enumerate() {
             // Same rule as the default field: taken on Enter or when the field is left.
             cx.subscribe_in(input, window, move |this, input, event: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { .. } | InputEvent::Blur = event {
-                    let mount = this.volumes[ix].mount.clone();
+                    let volume = this.volumes[ix].clone();
                     let minutes = input.read(cx).value().trim().parse::<u64>().ok();
                     if let Some(m) = minutes.filter(|m| REFRESH_RANGE.contains(m))
-                        && m != this.settings.refresh_minutes_for(&mount)
+                        && m != this.settings.refresh_minutes_for(&volume)
                     {
-                        this.settings.volume_refresh_minutes.insert(mount.clone(), m);
+                        this.settings.volume_refresh_minutes.insert(volume.identity.clone(), m);
                         this.commit(cx);
                     }
-                    let text = this.settings.refresh_minutes_for(&mount).to_string();
+                    let text = this.settings.refresh_minutes_for(&volume).to_string();
                     input.update(cx, |input, cx| input.set_value(text, window, cx));
                 }
             })
@@ -100,6 +108,7 @@ impl SettingsPage {
         .detach();
         Self {
             settings,
+            offline: Vec::new(),
             volumes,
             refresh,
             volume_refresh,
@@ -125,10 +134,41 @@ impl SettingsPage {
             .cloned()
             .collect();
         cx.emit(Changed {
+            mounted: self.volumes.clone(),
             intervals: self.settings.intervals(&indexed),
             indexed,
         });
         cx.notify();
+    }
+
+    /// Replaces the list of Offline Volumes the Engine reports.
+    pub fn set_offline(&mut self, offline: Vec<(String, PathBuf)>, cx: &mut Context<Self>) {
+        if self.offline != offline {
+            self.offline = offline;
+            cx.notify();
+        }
+    }
+
+    fn offline_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let (identity, mount) = self.offline[ix].clone();
+        h_flex()
+            .gap_3()
+            .items_center()
+            .child(div().child(mount.display().to_string()))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("offline · searchable, not changeable"),
+            )
+            .child(Button::new(("forget", ix)).label("Forget").on_click(cx.listener(
+                move |this, _, _, cx| {
+                    this.settings.forget(&identity);
+                    this.commit(cx);
+                    cx.emit(Forget(identity.clone()));
+                },
+            )))
+            .into_any_element()
     }
 
     fn volume_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -203,7 +243,8 @@ fn section(title: &'static str, note: &'static str, body: impl IntoElement, mute
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rows: Vec<_> = (0..self.volumes.len()).map(|ix| self.volume_row(ix, cx)).collect();
-        let volumes = v_flex().gap_2().children(rows);
+        let offline: Vec<_> = (0..self.offline.len()).map(|ix| self.offline_row(ix, cx)).collect();
+        let volumes = v_flex().gap_2().children(rows).children(offline);
         let muted = cx.theme().muted_foreground;
         let refresh = h_flex()
             .gap_2()
