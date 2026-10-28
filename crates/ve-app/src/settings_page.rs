@@ -7,7 +7,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{InputEvent, InputState, NumberInput};
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, h_flex, v_flex};
 use gpui_kit::*;
-use std::time::Duration;
+use crate::engine::Intervals;
 use ve_scan::VolumeInfo;
 
 const REFRESH_RANGE: std::ops::RangeInclusive<u64> = 1..=1440;
@@ -15,13 +15,15 @@ const REFRESH_RANGE: std::ops::RangeInclusive<u64> = 1..=1440;
 /// What the Engine must be told after the user changes a setting.
 pub struct Changed {
     pub indexed: Vec<VolumeInfo>,
-    pub refresh: Duration,
+    pub intervals: Intervals,
 }
 
 pub struct SettingsPage {
     settings: Settings,
     volumes: Vec<VolumeInfo>,
     refresh: Entity<InputState>,
+    /// One refresh-interval field per Volume, in `volumes` order.
+    volume_refresh: Vec<Entity<InputState>>,
     /// Set when the settings file could not be written.
     problem: Option<String>,
 }
@@ -44,15 +46,39 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let refresh = cx.new(|cx| {
-            InputState::new(window, cx)
-                .step(1.0)
-                .min(*REFRESH_RANGE.start() as f64)
-                .max(*REFRESH_RANGE.end() as f64)
-        });
-        refresh.update(cx, |input, cx| {
-            input.set_value(settings.refresh_minutes.to_string(), window, cx)
-        });
+        let minutes_input = |minutes: u64, window: &mut Window, cx: &mut Context<Self>| {
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .step(1.0)
+                    .min(*REFRESH_RANGE.start() as f64)
+                    .max(*REFRESH_RANGE.end() as f64)
+            });
+            input.update(cx, |input, cx| input.set_value(minutes.to_string(), window, cx));
+            input
+        };
+        let refresh = minutes_input(settings.refresh_minutes, window, cx);
+        let volume_refresh: Vec<_> = volumes
+            .iter()
+            .map(|v| minutes_input(settings.refresh_minutes_for(&v.mount), window, cx))
+            .collect();
+        for (ix, input) in volume_refresh.iter().enumerate() {
+            // Same rule as the default field: taken on Enter or when the field is left.
+            cx.subscribe_in(input, window, move |this, input, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } | InputEvent::Blur = event {
+                    let mount = this.volumes[ix].mount.clone();
+                    let minutes = input.read(cx).value().trim().parse::<u64>().ok();
+                    if let Some(m) = minutes.filter(|m| REFRESH_RANGE.contains(m))
+                        && m != this.settings.refresh_minutes_for(&mount)
+                    {
+                        this.settings.volume_refresh_minutes.insert(mount.clone(), m);
+                        this.commit(cx);
+                    }
+                    let text = this.settings.refresh_minutes_for(&mount).to_string();
+                    input.update(cx, |input, cx| input.set_value(text, window, cx));
+                }
+            })
+            .detach();
+        }
         cx.subscribe_in(&refresh, window, |this, input, event: &InputEvent, window, cx| {
             match event {
                 // Typing "15" must not apply 1 on the way, so the value is taken on Enter or when
@@ -76,6 +102,7 @@ impl SettingsPage {
             settings,
             volumes,
             refresh,
+            volume_refresh,
             problem: None,
         }
     }
@@ -91,14 +118,15 @@ impl SettingsPage {
             .save()
             .err()
             .map(|e| format!("Could not save settings: {e}"));
+        let indexed: Vec<VolumeInfo> = self
+            .volumes
+            .iter()
+            .filter(|v| self.settings.is_indexed(v))
+            .cloned()
+            .collect();
         cx.emit(Changed {
-            indexed: self
-                .volumes
-                .iter()
-                .filter(|v| self.settings.is_indexed(v))
-                .cloned()
-                .collect(),
-            refresh: Duration::from_secs(self.settings.refresh_minutes * 60),
+            intervals: self.settings.intervals(&indexed),
+            indexed,
         });
         cx.notify();
     }
@@ -117,6 +145,7 @@ impl SettingsPage {
         }
         h_flex()
             .gap_3()
+            .items_center()
             .child(
                 Checkbox::new(("volume", ix))
                     .label(volume.mount.display().to_string())
@@ -133,6 +162,9 @@ impl SettingsPage {
                     .text_color(cx.theme().muted_foreground)
                     .child(notes.join(" · ")),
             )
+            .child(div().text_sm().child("re-read every"))
+            .child(div().w(px(120.)).child(NumberInput::new(&self.volume_refresh[ix])))
+            .child(div().text_sm().child("min"))
             .into_any_element()
     }
 
@@ -176,7 +208,7 @@ impl Render for SettingsPage {
         let refresh = h_flex()
             .gap_2()
             .items_center()
-            .child("Re-read walked Volumes every")
+            .child("Volumes without their own interval are re-read every")
             .child(div().w(px(140.)).child(NumberInput::new(&self.refresh)))
             .child("minutes while running");
         let theme = self.theme_buttons(cx);
@@ -192,7 +224,12 @@ impl Render for SettingsPage {
                 volumes,
                 muted,
             ))
-            .child(section("Refresh interval", "How often walked Volumes are re-read.", refresh, muted))
+            .child(section(
+                "Default refresh interval",
+                "A walked Volume is re-read this often while the app runs, and at launch only if its Last Synced is older. Set a different interval beside any Volume above.",
+                refresh,
+                muted,
+            ))
             .child(section("Theme", "Light, Dark, or following the system.", theme, muted));
         if let Some(problem) = &self.problem {
             page = page.child(div().text_color(cx.theme().warning).child(problem.clone()));

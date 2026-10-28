@@ -1,7 +1,7 @@
 //! The window: sidebar, the pages (Explorer with its Query bar, lists, panels and Treemap,
 //! Settings) and the status bar.
 
-use crate::engine::{Engine, Phase, Repaint};
+use crate::engine::{Engine, Phase, Repaint, last_synced_label};
 use crate::categories::CategoryPanel;
 use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
@@ -25,7 +25,6 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 use ve_core::CategoryMap;
 use ve_scan::VolumeInfo;
 
@@ -84,20 +83,20 @@ impl Shell {
             .filter(|v| settings.is_indexed(v))
             .cloned()
             .collect();
-        let refresh = Duration::from_secs(settings.refresh_minutes.max(1) * 60);
+        let intervals = settings.intervals(&indexed);
         // One pending wake-up is enough: the window then reads everything that changed.
         let (wake, woken) = async_channel::bounded::<()>(1);
         let repaint: Repaint = Arc::new(move || {
             let _ = wake.try_send(());
         });
-        let engine = Engine::start(repaint.clone(), indexed, refresh, categories.clone());
+        let engine = Engine::start(repaint.clone(), indexed, intervals, categories.clone());
 
         let trash = Trash::new(engine.shared.clone(), repaint);
 
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
         cx.subscribe(&settings_page, |this, _, changed: &Changed, cx| {
             this.engine.set_volumes(changed.indexed.clone());
-            this.engine.set_refresh(changed.refresh);
+            this.engine.set_intervals(changed.intervals.clone());
             // Saved fine, so the settings file read at startup has been replaced.
             if !this.settings_page.read(cx).has_problem() {
                 this.startup_problems.retain(|p| !p.starts_with("Settings ignored"));
@@ -260,6 +259,13 @@ impl Shell {
             .into_any_element(),
         };
         let mut left = h_flex().gap_3().child(phase);
+        let synced = {
+            let oldest = shared.index.read().oldest_synced();
+            last_synced_label(oldest, chrono::Utc::now().timestamp())
+        };
+        if let Some(label) = synced.filter(|_| !matches!(status.phase, Phase::LoadingIndex)) {
+            left = left.child(format!("· {label}"));
+        }
         if progress.unreadable() > 0 {
             left = left.child(format!(
                 "· {} folders unreadable",

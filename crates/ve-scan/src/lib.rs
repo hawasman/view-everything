@@ -4,6 +4,7 @@
 //! [`Index`] up to date with the filesystem, starting from whatever the Index already holds.
 //! A freshly added Volume holds only its root, so its first sync is a full scan.
 
+mod capacity;
 pub mod ntfs;
 mod platform;
 mod volumes;
@@ -11,6 +12,7 @@ mod walk;
 
 #[cfg(windows)]
 pub use platform::windows::{is_elevated, relaunch_elevated};
+pub use capacity::capacity;
 pub use volumes::{VolumeInfo, discover_volumes};
 
 use parking_lot::RecursiveRwLock;
