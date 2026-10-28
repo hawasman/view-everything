@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use ve_core::{CategoryMap, MANUAL_REFRESH, Remote, S3Remote};
+use ve_core::{CategoryMap, MANUAL_REFRESH, Remote};
 use ve_scan::VolumeInfo;
 
 const APP_DIR: &str = "view-everything";
@@ -225,6 +225,7 @@ pub fn load_categories() -> Result<CategoryMap, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ve_core::S3Remote;
 
     fn volume(mount: &str, removable: bool) -> VolumeInfo {
         VolumeInfo {

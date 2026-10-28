@@ -250,7 +250,7 @@ pub fn list(
             .with_config()
             .limit(64 * 1024 * 1024)
             .read_to_string()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{}: {e}", remote.endpoint_host())))?;
+            .map_err(|e| io::Error::other(format!("{}: {e}", remote.endpoint_host())))?;
         if status != 200 {
             return Err(http_failure(remote, status, &body, credentials.is_none()));
         }

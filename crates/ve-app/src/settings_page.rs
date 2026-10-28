@@ -589,7 +589,7 @@ impl SettingsPage {
                         .gap(px(8.))
                         .items_center()
                         .child(div().flex_1().text_xs().text_color(muted).child(if s3_tab {
-                            "No keys here: AWS_* variables or ~/.aws. Typed secrets go to the OS keyring"
+                            "Keys left empty: AWS_* or ~/.aws"
                         } else {
                             "Keys and ssh-agent only"
                         }))
