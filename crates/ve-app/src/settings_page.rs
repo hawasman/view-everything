@@ -1,7 +1,7 @@
 //! The Settings page: which Volumes are indexed, how often they are re-read, and the theme.
 
 use crate::settings::{Settings, ThemeChoice};
-use crate::theme::{self, RADIUS_CARD, SERIF_FAMILY, palette};
+use crate::theme::{self, SERIF_FAMILY, palette};
 use crate::ui::{caption, panel, pill, tag, Tone};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
@@ -401,7 +401,6 @@ impl Render for SettingsPage {
         if let Some(problem) = &self.problem {
             column = column.child(div().text_color(p.warning).child(problem.clone()));
         }
-        let _ = RADIUS_CARD;
         div().id("settings").size_full().overflow_y_scroll().child(column)
     }
 }

@@ -351,16 +351,20 @@ impl Shell {
                 })
                 .on_click(cx.listener(|this, _, window, cx| this.trash.open(window, cx))),
         );
-        if trash::CAN_EMPTY && size != Some(0) {
+        if trash::CAN_EMPTY {
+            let empty = size == Some(0);
             controls = controls.child(
                 div()
                     .id("empty-trash")
-                    .cursor_pointer()
                     .rounded(px(6.))
                     .px(px(4.))
-                    .hover(move |s| s.bg(hover).text_color(text))
-                    .child("Empty Trash")
-                    .on_click(cx.listener(|this, _, window, cx| this.trash.ask_empty(window, cx))),
+                    .when(empty, |d| d.opacity(0.5))
+                    .when(!empty, |d| {
+                        d.cursor_pointer()
+                            .hover(move |s| s.bg(hover).text_color(text))
+                            .on_click(cx.listener(|this, _, window, cx| this.trash.ask_empty(window, cx)))
+                    })
+                    .child("Empty Trash"),
             );
         }
         controls
@@ -582,7 +586,7 @@ impl Shell {
     fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.fit_lists(cx);
         let p = palette(cx);
-        let (text, muted, rule) = (p.text, p.muted, p.rule);
+        let (text, muted) = (p.text, p.muted);
         let surface = p.surface;
         let (tree_sort, entries, total) = {
             let view = self.engine.shared.view.lock().clone();
@@ -675,7 +679,6 @@ impl Shell {
         } else {
             self.treemap.clone().into_any_element()
         });
-        let _ = rule;
         v_flex()
             .size_full()
             .child(
