@@ -55,6 +55,7 @@ fn main() {
             fs_type: "ext4".into(),
             label: "bench".into(),
             removable: false,
+            network: false,
             read_only: true,
         }];
     }

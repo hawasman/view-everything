@@ -1,6 +1,6 @@
 //! Windows Volume discovery, elevation and file facts.
 
-use crate::volumes::VolumeInfo;
+use crate::volumes::{VolumeInfo, share_identity};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -9,6 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_CANCELLED, GetLastError, HANDLE, NO_ERROR,
 };
+use windows_sys::Win32::NetworkManagement::WNet::WNetGetConnectionW;
 use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };
@@ -21,6 +22,7 @@ use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, 
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 const DRIVE_REMOVABLE: u32 = 2;
+const DRIVE_REMOTE: u32 = 4;
 const DRIVE_FIXED: u32 = 3;
 const FILE_READ_ONLY_VOLUME: u32 = 0x0008_0000;
 const INVALID_FILE_SIZE: u32 = u32::MAX;
@@ -36,7 +38,7 @@ fn from_wide(buf: &[u16]) -> String {
         .into_owned()
 }
 
-/// Fixed and removable local drives.
+/// Fixed and removable local drives, and mapped network drives.
 pub fn discover_volumes() -> Vec<VolumeInfo> {
     let mut buf = vec![0u16; 512];
     // SAFETY: the buffer length passed matches the allocation.
@@ -49,9 +51,10 @@ pub fn discover_volumes() -> Vec<VolumeInfo> {
         let root_z: Vec<u16> = root.iter().copied().chain(std::iter::once(0)).collect();
         // SAFETY: `root_z` is NUL terminated.
         let kind = unsafe { GetDriveTypeW(root_z.as_ptr()) };
-        let removable = match kind {
-            DRIVE_FIXED => false,
-            DRIVE_REMOVABLE => true,
+        let (removable, network) = match kind {
+            DRIVE_FIXED => (false, false),
+            DRIVE_REMOVABLE => (true, false),
+            DRIVE_REMOTE => (false, true),
             _ => continue,
         };
         let mut label = [0u16; 261];
@@ -75,15 +78,30 @@ pub fn discover_volumes() -> Vec<VolumeInfo> {
             continue; // no media, or unreadable
         }
         volumes.push(VolumeInfo {
-            identity: identity(&root_z, serial),
+            identity: match network.then(|| remote_name(root)).flatten() {
+                Some(unc) => share_identity(&unc),
+                None => identity(&root_z, serial),
+            },
+            network,
             mount: PathBuf::from(OsString::from_wide(root)),
-            fs_type: from_wide(&fs),
+            // Not plain "NTFS" on a share: the MFT fast path reads local volumes only.
+            fs_type: if network { format!("{} (remote)", from_wide(&fs)) } else { from_wide(&fs) },
             label: from_wide(&label),
             removable,
             read_only: flags & FILE_READ_ONLY_VOLUME != 0,
         });
     }
     volumes
+}
+
+/// The `\\server\share` a mapped drive root such as `Z:\` points at.
+fn remote_name(root: &[u16]) -> Option<String> {
+    let local = [root[0], u16::from(b':'), 0];
+    let mut buf = vec![0u16; 1024];
+    let mut len = buf.len() as u32;
+    // SAFETY: `local` is NUL terminated and `buf` is valid for `len` characters.
+    let err = unsafe { WNetGetConnectionW(local.as_ptr(), buf.as_mut_ptr(), &mut len) };
+    (err == NO_ERROR).then(|| from_wide(&buf))
 }
 
 /// The Volume GUID (`\\?\Volume{...}\`), which stays with the volume whatever letter it is
