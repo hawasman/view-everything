@@ -256,7 +256,14 @@ impl Shell {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(div().flex_1().min_w_0().h_full().child(DataTable::new(&self.table)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_hidden()
+                            .child(DataTable::new(&self.table)),
+                    )
                     .child(div().w(px(280.)).h_full().child(self.categories.clone())),
             )
             .child(div().h(px(340.)).child(self.treemap.clone()))

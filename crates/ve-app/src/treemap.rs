@@ -15,8 +15,9 @@ use std::thread;
 use std::time::Duration;
 use ve_core::{Category, CategoryMap, EntryId, Filter, Index};
 
-/// Stop laying out once this many rectangles exist; deeper detail is invisible anyway.
-const MAX_TILES: usize = 60_000;
+/// Stop laying out once this many rectangles exist; deeper detail is invisible anyway. Painting
+/// costs about a microsecond a tile, so this keeps a frame within 16 ms beside a scrolling list.
+const MAX_TILES: usize = 15_000;
 /// Folders smaller than this (in pixels, either side) are drawn as one block.
 const MIN_FOLDER_SIDE: f32 = 6.0;
 /// How often the panel looks for a new View or finished layout.

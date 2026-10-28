@@ -4,7 +4,7 @@ use crate::engine::Shared;
 use crate::format;
 use crate::treemap::category_color;
 use crate::view::View;
-use gpui_kit::component::input::InputState;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 use gpui_kit::*;
@@ -70,6 +70,8 @@ impl CategoryPanel {
             }
             text.push_str(&term);
             query.set_value(text, window, cx);
+            // set_value is silent; the Shell recomputes the View on Change.
+            cx.emit(InputEvent::Change);
         });
     }
 }
