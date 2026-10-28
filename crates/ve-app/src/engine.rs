@@ -18,6 +18,8 @@ use ve_scan::{Progress, VolumeInfo};
 const JOURNAL_POLL: Duration = Duration::from_secs(5);
 /// Minimum time between View recomputations while the Index is being filled.
 const VIEW_THROTTLE: Duration = Duration::from_millis(800);
+/// How often changes picked up by journal polls are saved; a full save rewrites the Index.
+const POLL_SAVE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// State shared between the UI and the background threads.
 pub struct Shared {
@@ -29,6 +31,8 @@ pub struct Shared {
     /// Why the current Query text could not be parsed.
     pub query_error: Mutex<Option<String>>,
     busy: AtomicBool,
+    /// Held while the Index is written to disk, so two saves never share the temporary file.
+    saving: Mutex<()>,
     ctx: egui::Context,
 }
 
@@ -83,6 +87,7 @@ impl Engine {
             view: Mutex::new(None),
             query_error: Mutex::new(None),
             busy: AtomicBool::new(true),
+            saving: Mutex::new(()),
             ctx,
         });
         let (commands, command_rx) = mpsc::channel();
@@ -126,10 +131,16 @@ impl Engine {
         self.shared.busy.load(Ordering::Relaxed)
     }
 
-    /// Saves the Index and stops. If a sync is still running the app exits without waiting:
-    /// the previously saved Index stays valid and the next launch catches up from it.
+    /// Saves the Index and stops. If a sync is still running, the Index as filled so far is
+    /// saved without waiting for it: the next launch's Catch-up completes it.
     pub fn shutdown(&mut self) {
         if self.is_busy() {
+            if let Some(path) = settings::index_path() {
+                let _saving = self.shared.saving.lock();
+                if let Err(e) = self.shared.index.read().save(&path) {
+                    eprintln!("Could not save the Index to {}: {e}", path.display());
+                }
+            }
             return;
         }
         let _ = self.commands.send(Command::Shutdown);
@@ -170,18 +181,28 @@ fn run_indexer(
     shared.ctx.request_repaint();
 
     let mut saved_generation = shared.index.read().generation();
+    let mut last_save = Instant::now();
     let mut last_walk: HashMap<VolumeId, Instant> = HashMap::new();
     reconcile_volumes(shared, &wanted);
     let mut pending: Vec<VolumeId> = shared.index.read().volumes().map(|(id, _)| id).collect();
+    // Journal polls run every few seconds; they neither show as busy nor save every time.
+    let mut quiet = false;
     loop {
         if !pending.is_empty() {
-            sync_volumes(shared, &pending);
+            sync_volumes(shared, &pending, quiet);
             let now = Instant::now();
-            last_walk.extend(pending.drain(..).map(|id| (id, now)));
-            save_if_changed(shared, index_path.as_deref(), &mut saved_generation);
+            if !quiet {
+                last_walk.extend(pending.iter().map(|&id| (id, now)));
+            }
+            pending.clear();
+            if !quiet || last_save.elapsed() >= POLL_SAVE_INTERVAL {
+                save_if_changed(shared, index_path.as_deref(), &mut saved_generation);
+                last_save = Instant::now();
+            }
         }
-        shared.busy.store(false, Ordering::Relaxed);
-        shared.set_phase(Phase::Idle);
+        if shared.busy.swap(false, Ordering::Relaxed) {
+            shared.set_phase(Phase::Idle);
+        }
 
         let journaled: Vec<VolumeId> = shared
             .index
@@ -195,6 +216,7 @@ fn run_indexer(
         } else {
             JOURNAL_POLL.min(refresh)
         };
+        quiet = false;
         match commands.recv_timeout(timeout) {
             Ok(Command::SetVolumes(volumes)) => {
                 wanted = volumes;
@@ -216,9 +238,10 @@ fn run_indexer(
                     .map(|(id, _)| id)
                     .filter(|id| journaled.contains(id) || due(id))
                     .collect();
+                quiet = pending.iter().all(|id| journaled.contains(id));
             }
         }
-        if !pending.is_empty() {
+        if !pending.is_empty() && !quiet {
             shared.busy.store(true, Ordering::Relaxed);
         }
     }
@@ -255,7 +278,7 @@ fn reconcile_volumes(shared: &Shared, wanted: &[VolumeInfo]) -> Vec<VolumeId> {
     added
 }
 
-fn sync_volumes(shared: &Shared, volumes: &[VolumeId]) {
+fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
     let (mounts, catching_up) = {
         let index = shared.index.read();
         let mounts: Vec<(VolumeId, PathBuf)> = volumes
@@ -268,13 +291,15 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId]) {
             .any(|v| !index.children(v.root).is_empty());
         (mounts, catching_up)
     };
-    shared.progress.entries.store(0, Ordering::Relaxed);
-    shared.progress.unreadable.store(0, Ordering::Relaxed);
-    shared.set_phase(Phase::Syncing {
-        volumes: mounts.iter().map(|(_, m)| m.clone()).collect(),
-        catching_up,
-        started: Instant::now(),
-    });
+    if !quiet {
+        shared.progress.entries.store(0, Ordering::Relaxed);
+        shared.progress.unreadable.store(0, Ordering::Relaxed);
+        shared.set_phase(Phase::Syncing {
+            volumes: mounts.iter().map(|(_, m)| m.clone()).collect(),
+            catching_up,
+            started: Instant::now(),
+        });
+    }
     thread::scope(|scope| {
         for (id, mount) in &mounts {
             scope.spawn(move || {
@@ -288,6 +313,7 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId]) {
 
 fn save_if_changed(shared: &Shared, path: Option<&std::path::Path>, saved_generation: &mut u64) {
     let Some(path) = path else { return };
+    let _saving = shared.saving.lock();
     let index = shared.index.read();
     if index.generation() == *saved_generation {
         return;

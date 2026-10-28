@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Source of Index generations, shared by every Index in the process.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Identifies one Entry within an [`Index`]. Stable for the lifetime of the in-memory Index;
 /// ids are reassigned when an Index is saved and loaded.
@@ -89,12 +93,19 @@ pub struct Index {
 
 impl Index {
     pub fn new() -> Self {
-        Self::default()
+        let mut index = Self::default();
+        index.touch();
+        index
     }
 
-    /// Increases on every change; lets observers detect that derived data is stale.
+    /// Changes on every change, and differs between Index instances (including one loaded from
+    /// disk), so observers can tell that derived data is stale.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    fn touch(&mut self) {
+        self.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Number of Entry ids ever allocated, including removed ones. Valid ids are below this.
@@ -147,7 +158,7 @@ impl Index {
     pub fn set_sync_state(&mut self, id: VolumeId, sync: SyncState) {
         if let Some(Some(volume)) = self.volumes.get_mut(id.0 as usize) {
             volume.sync = sync;
-            self.generation += 1;
+            self.touch();
         }
     }
 
@@ -197,7 +208,7 @@ impl Index {
             self.slot.push(NO_SLOT);
         }
         self.live += 1;
-        self.generation += 1;
+        self.touch();
         id
     }
 
@@ -227,7 +238,7 @@ impl Index {
         self.on_disk[i] = meta.on_disk;
         self.modified[i] = meta.modified;
         self.key[i] = meta.key;
-        self.generation += 1;
+        self.touch();
     }
 
     /// Moves an Entry (and everything beneath it) to a new parent folder and name.
@@ -242,7 +253,7 @@ impl Index {
             self.name_start[id.index()] = start;
             self.name_len[id.index()] = len;
         }
-        self.generation += 1;
+        self.touch();
     }
 
     /// Removes an Entry and everything beneath it.
@@ -251,6 +262,28 @@ impl Index {
             return;
         }
         self.detach(id);
+        self.tombstone(id);
+        self.touch();
+    }
+
+    /// Removes several children of `dir` and everything beneath them, detaching them in one
+    /// pass rather than one search per child.
+    pub fn remove_children(&mut self, dir: EntryId, ids: &[EntryId]) {
+        if ids.is_empty() {
+            return;
+        }
+        let gone: std::collections::HashSet<EntryId> = ids.iter().copied().collect();
+        let slot = self.slot[dir.index()] as usize;
+        self.children[slot].retain(|c| !gone.contains(c));
+        for &id in ids {
+            if self.is_live(id) {
+                self.tombstone(id);
+            }
+        }
+        self.touch();
+    }
+
+    fn tombstone(&mut self, id: EntryId) {
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
             let i = current.index();
@@ -260,7 +293,6 @@ impl Index {
                 stack.append(&mut self.children[self.slot[i] as usize]);
             }
         }
-        self.generation += 1;
     }
 
     fn detach(&mut self, id: EntryId) {
@@ -474,7 +506,10 @@ impl Index {
                 "not a saved Index of this version",
             ));
         }
-        bincode::deserialize_from(input).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let mut index: Index = bincode::deserialize_from(input)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        index.touch();
+        Ok(index)
     }
 }
 

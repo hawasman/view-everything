@@ -13,6 +13,7 @@ use settings::Settings;
 
 /// Skip asking for administrator rights on Windows (the Volume is then walked, not read from
 /// its Master File Table).
+#[cfg(windows)]
 const NO_ELEVATE: &str = "--no-elevate";
 
 fn main() -> eframe::Result {
@@ -24,7 +25,6 @@ fn main() -> eframe::Result {
             return Ok(());
         }
     }
-    let _ = NO_ELEVATE;
 
     let mut problems = Vec::new();
     let settings = Settings::load().unwrap_or_else(|e| {

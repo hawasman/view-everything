@@ -19,14 +19,16 @@ use ve_core::{EntryId, EntryMeta, Index, VolumeId};
 /// Entries inserted per write-lock acquisition, so readers get in between.
 const BATCH: usize = 4096;
 
-pub(crate) fn entry_meta(record: &Record) -> EntryMeta {
-    EntryMeta {
-        is_dir: record.is_dir,
-        logical: record.logical,
-        on_disk: record.on_disk,
-        modified: record.modified,
-        key: record.number,
-        hardlinked: record.names.len() > 1,
+impl From<&Record> for EntryMeta {
+    fn from(record: &Record) -> Self {
+        EntryMeta {
+            is_dir: record.is_dir,
+            logical: record.logical,
+            on_disk: record.on_disk,
+            modified: record.modified,
+            key: record.number,
+            hardlinked: record.names.len() > 1,
+        }
     }
 }
 
@@ -62,9 +64,7 @@ pub fn load<R: Read + Seek>(
             w.remove(id);
         }
         if let Some(root_record) = records.iter().find(|r| r.number == ROOT_RECORD) {
-            let mut meta = entry_meta(root_record);
-            meta.hardlinked = false;
-            w.update(root, meta);
+            w.update(root, EntryMeta::from(root_record));
         }
     }
 
@@ -79,7 +79,7 @@ pub fn load<R: Read + Seek>(
         let mut inserted = 0usize;
         for &(r, n) in kids {
             let record = &records[r];
-            let child = w.insert(id, &record.names[n].name, entry_meta(record));
+            let child = w.insert(id, &record.names[n].name, EntryMeta::from(record));
             inserted += 1;
             if record.is_dir && visited.insert(record.number) {
                 queue.push_back((record.number, child));

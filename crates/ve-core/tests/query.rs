@@ -278,6 +278,8 @@ fn invalid_modifier_values_are_errors_naming_the_modifier() {
         "size:huge",
         "size:5zb",
         "dm:2025-13",
+        // The last representable year: its end lies past the calendar's range.
+        "dm:262142",
         "dm:soon",
         "type:movies",
         "regex:(",

@@ -322,16 +322,29 @@ fn date_span(text: &str, now: DateTime<Local>) -> Result<(i64, i64), String> {
             match parts[..] {
                 [_] => {
                     let start = NaiveDate::from_ymd_opt(year, 1, 1).ok_or_else(invalid)?;
-                    (start, start + Months::new(12))
+                    (
+                        start,
+                        start
+                            .checked_add_months(Months::new(12))
+                            .ok_or_else(invalid)?,
+                    )
                 }
                 [_, m] => {
                     let start = NaiveDate::from_ymd_opt(year, number(m)?, 1).ok_or_else(invalid)?;
-                    (start, start + Months::new(1))
+                    (
+                        start,
+                        start
+                            .checked_add_months(Months::new(1))
+                            .ok_or_else(invalid)?,
+                    )
                 }
                 [_, m, d] => {
                     let start = NaiveDate::from_ymd_opt(year, number(m)?, number(d)?)
                         .ok_or_else(invalid)?;
-                    (start, start + Days::new(1))
+                    (
+                        start,
+                        start.checked_add_days(Days::new(1)).ok_or_else(invalid)?,
+                    )
                 }
                 _ => return Err(invalid()),
             }

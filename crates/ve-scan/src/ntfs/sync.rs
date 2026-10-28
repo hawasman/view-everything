@@ -1,6 +1,6 @@
 //! Windows: full MFT load from a volume handle, then Catch-up through the USN change journal.
 
-use super::{entry_meta, load, mft};
+use super::{load, mft};
 use crate::Progress;
 use crate::platform::windows::is_elevated;
 use mft::{ROOT_RECORD, Record};
@@ -151,40 +151,25 @@ fn fetch_record(handle: &File, number: u64) -> io::Result<Option<Vec<u8>>> {
 }
 
 /// One changed file, merged across its extension records; `None` when deleted.
-fn current_record(handle: &File, number: u64, extra: &mut Vec<u64>) -> io::Result<Option<Record>> {
-    let Some(mut raw) = fetch_record(handle, number)? else {
+fn current_record(
+    handle: &File,
+    geometry: &mft::Geometry,
+    number: u64,
+    extra: &mut Vec<u64>,
+) -> io::Result<Option<Record>> {
+    let parse = |number: u64| -> io::Result<Option<mft::Parsed>> {
+        Ok(fetch_record(handle, number)?
+            .and_then(|mut raw| mft::parse_record(number, &mut raw, false, false)))
+    };
+    let Some(base) = parse(number)? else {
         return Ok(None);
     };
-    let Some(mut base) = mft::parse_record(number, &mut raw, false, false) else {
-        return Ok(None);
-    };
-    if !base.in_use {
-        return Ok(None);
-    }
-    if base.base != 0 && base.base != number {
+    if base.in_use && base.base != 0 && base.base != number {
         extra.push(base.base); // an extension record changed: the base file is what changed
         return Ok(None);
     }
-    if let Some(list) = base.attr_list.take() {
-        let mut reader = handle.try_clone()?;
-        let bytes = match &list {
-            mft::AttrList::Resident(b) => b.clone(),
-            mft::AttrList::NonResident { .. } => {
-                let geometry = mft::read_geometry(&mut reader)?;
-                list.bytes(&mut reader, &geometry)?
-            }
-        };
-        for ext in mft::list_extension_records(&bytes, None, number) {
-            if let Some(mut raw) = fetch_record(handle, ext)?
-                && let Some(p) = mft::parse_record(ext, &mut raw, false, false)
-                && p.in_use
-                && p.base == number
-            {
-                base.merge_from(p);
-            }
-        }
-    }
-    Ok(base.into_record())
+    let mut reader = handle.try_clone()?;
+    mft::finish_record(base, &mut reader, geometry, parse)
 }
 
 fn volume_path(mount: &std::path::Path) -> Option<String> {
@@ -234,12 +219,10 @@ fn apply(
         return true;
     };
     if number == ROOT_RECORD {
-        let mut meta = entry_meta(record);
-        meta.hardlinked = false;
-        index.update(existing[0], meta);
+        index.update(existing[0], EntryMeta::from(record));
         return true;
     }
-    let meta: EntryMeta = entry_meta(record);
+    let meta = EntryMeta::from(record);
     // A file cannot turn into a folder in place: replace it.
     let (mut existing, replaced): (Vec<EntryId>, Vec<EntryId>) = existing
         .into_iter()
@@ -302,17 +285,18 @@ fn catch_up(
     root: EntryId,
     journal: &Journal,
     from: i64,
-) -> io::Result<i64> {
+) -> io::Result<Option<i64>> {
     let (mut changed, next) = read_changes(handle, journal, from)?;
     if changed.is_empty() {
-        return Ok(next);
+        return Ok(Some(next));
     }
+    let geometry = mft::read_geometry(&mut handle.try_clone()?)?;
     let mut work: Vec<(u64, Option<Record>)> = Vec::new();
     let mut done = HashSet::new();
     while let Some(number) = changed.pop() {
         if done.insert(number) {
             let mut extra = Vec::new();
-            let record = current_record(handle, number, &mut extra)?;
+            let record = current_record(handle, &geometry, number, &mut extra)?;
             changed.extend(extra);
             work.push((number, record));
         }
@@ -327,7 +311,9 @@ fn catch_up(
             break;
         }
     }
-    Ok(next)
+    // A change whose parent is unknown cannot be applied; the caller reloads instead of
+    // advancing past it.
+    Ok(work.is_empty().then_some(next))
 }
 
 /// Brings an NTFS Volume up to date. `Ok(false)` leaves the Volume to the portable walk.
@@ -378,7 +364,7 @@ pub(crate) fn sync_windows(
             return Ok(true); // nothing changed since the last sync
         }
         match catch_up(index, &handle, root, &journal, next_usn) {
-            Ok(next) => {
+            Ok(Some(next)) => {
                 index.write().set_sync_state(
                     volume,
                     SyncState::Ntfs {
@@ -388,6 +374,7 @@ pub(crate) fn sync_windows(
                 );
                 return Ok(true);
             }
+            Ok(None) => {}
             Err(e) if e.raw_os_error() == Some(ERROR_JOURNAL_ENTRY_DELETED) => {}
             Err(e) => return Err(e),
         }

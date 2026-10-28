@@ -26,6 +26,13 @@ enum Tab {
     Flat,
 }
 
+/// The tree's sort column and direction.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Sort {
+    key: SortKey,
+    descending: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SortKey {
     Name,
@@ -96,13 +103,15 @@ pub struct App {
     expanded: HashSet<EntryId>,
     expanded_version: u64,
     selection: Vec<EntryId>,
-    sort: (SortKey, bool),
+    sort: Sort,
     rows: Vec<Row>,
-    rows_key: Option<(usize, u64, (SortKey, bool))>,
+    /// The View id, expansion state and sort the tree rows were built for.
+    rows_key: Option<(u64, u64, Sort)>,
     scroll_to: Option<EntryId>,
     zoom: Option<EntryId>,
     tiles: Vec<Tile>,
-    tiles_key: Option<(usize, EntryId, [u32; 2])>,
+    /// The View id, zoom root and pixel size the Treemap tiles were laid out for.
+    tiles_key: Option<(u64, EntryId, [u32; 2])>,
     treemap_menu: Option<EntryId>,
     open_categories: HashSet<Category>,
     dialog: Option<Dialog>,
@@ -139,7 +148,10 @@ impl App {
             expanded: HashSet::new(),
             expanded_version: 0,
             selection: Vec::new(),
-            sort: (SortKey::OnDisk, true),
+            sort: Sort {
+                key: SortKey::OnDisk,
+                descending: true,
+            },
             rows: Vec::new(),
             rows_key: None,
             scroll_to: None,
@@ -468,11 +480,7 @@ impl App {
                 });
                 let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click());
                 let rect = response.rect;
-                let key = (
-                    Arc::as_ptr(view) as usize,
-                    root,
-                    [rect.width() as u32, rect.height() as u32],
-                );
+                let key = (view.id, root, [rect.width() as u32, rect.height() as u32]);
                 if self.tiles_key != Some(key) {
                     self.tiles = treemap::layout(index, &view.filter, &self.categories, root, rect);
                     self.tiles_key = Some(key);
@@ -503,12 +511,7 @@ impl App {
                 if response.double_clicked()
                     && let Some(id) = hovered
                 {
-                    let folder = if index.is_dir(id) {
-                        Some(id)
-                    } else {
-                        index.parent(id)
-                    };
-                    if let Some(folder) = folder {
+                    if let Some(folder) = folder_of(index, id) {
                         actions.push(Action::ZoomTo(folder));
                     }
                 } else if response.clicked()
@@ -550,7 +553,7 @@ impl App {
     }
 
     fn rebuild_rows(&mut self, index: &Index, view: &Arc<View>) {
-        let key = (Arc::as_ptr(view) as usize, self.expanded_version, self.sort);
+        let key = (view.id, self.expanded_version, self.sort);
         if self.rows_key == Some(key) {
             return;
         }
@@ -586,7 +589,7 @@ impl App {
     }
 
     fn sort_entries(&self, index: &Index, view: &View, ids: &mut [EntryId]) {
-        let (key, descending) = self.sort;
+        let Sort { key, descending } = self.sort;
         let totals = |id: EntryId| view.filter.totals(index, id);
         match key {
             SortKey::Name => ids.sort_by_cached_key(|&id| index.name(id).to_lowercase()),
@@ -602,18 +605,31 @@ impl App {
 
     fn sort_header(&mut self, ui: &mut Ui, key: SortKey, label: &str) {
         let marker = match self.sort {
-            (k, true) if k == key => " ⏷",
-            (k, false) if k == key => " ⏶",
+            Sort {
+                key: k,
+                descending: true,
+            } if k == key => " ⏷",
+            Sort {
+                key: k,
+                descending: false,
+            } if k == key => " ⏶",
             _ => "",
         };
         if ui
             .add(egui::Button::new(RichText::new(format!("{label}{marker}")).strong()).frame(false))
             .clicked()
         {
-            self.sort = if self.sort.0 == key {
-                (key, !self.sort.1)
+            self.sort = if self.sort.key == key {
+                Sort {
+                    key,
+                    descending: !self.sort.descending,
+                }
             } else {
-                (key, key != SortKey::Name)
+                // Sizes and counts read best largest first; names alphabetically.
+                Sort {
+                    key,
+                    descending: key != SortKey::Name,
+                }
             };
         }
     }
@@ -663,16 +679,7 @@ impl App {
                         return;
                     }
                     let totals = view.filter.totals(index, id);
-                    // Volume rows show their share of every Indexed Volume together.
-                    let parent_size = match index.parent(id) {
-                        Some(parent) => view.filter.totals(index, parent).on_disk,
-                        None => view.total.on_disk,
-                    };
-                    let share = if parent_size > 0 {
-                        totals.on_disk as f64 / parent_size as f64
-                    } else {
-                        1.0
-                    };
+                    let share = share_of_parent(index, view, id);
                     table_row.set_selected(self.selection.contains(&id));
                     table_row.col(|ui| {
                         ui.add_space(depth as f32 * INDENT);
@@ -727,13 +734,17 @@ impl App {
             .striped(true)
             .sense(Sense::click())
             .cell_layout(Layout::left_to_right(Align::Center))
-            .column(Column::initial(260.0).at_least(120.0).clip(true))
-            .column(Column::remainder().at_least(200.0).clip(true))
+            .column(Column::initial(240.0).at_least(120.0).clip(true))
+            .column(Column::remainder().at_least(160.0).clip(true))
+            .column(Column::initial(170.0).at_least(90.0))
             .column(Column::initial(90.0).at_least(60.0))
-            .column(Column::initial(90.0).at_least(60.0))
+            .column(Column::initial(60.0).at_least(40.0))
+            .column(Column::initial(90.0).at_least(50.0))
             .column(Column::initial(130.0).at_least(80.0))
             .header(ROW_HEIGHT + 2.0, |mut header| {
-                for title in ["Name", "Folder", "On disk", "Size", "Modified"] {
+                for title in [
+                    "Name", "Folder", "On disk", "Size", "%", "Files", "Modified",
+                ] {
                     header.col(|ui| {
                         ui.strong(title);
                     });
@@ -746,6 +757,7 @@ impl App {
                         return;
                     }
                     let totals = view.filter.totals(index, id);
+                    let share = share_of_parent(index, view, id);
                     table_row.set_selected(self.selection.contains(&id));
                     table_row.col(|ui| {
                         let icon = if index.is_dir(id) { "🗀 " } else { "" };
@@ -766,11 +778,17 @@ impl App {
                                 .selectable(false),
                         );
                     });
-                    table_row.col(|ui| {
-                        ui.label(format::size(totals.on_disk));
-                    });
+                    table_row.col(|ui| size_bar(ui, totals.on_disk, share));
                     table_row.col(|ui| {
                         ui.label(format::size(totals.logical));
+                    });
+                    table_row.col(|ui| {
+                        ui.label(format!("{:.1}%", share * 100.0));
+                    });
+                    table_row.col(|ui| {
+                        if index.is_dir(id) {
+                            ui.label(format::count(totals.files));
+                        }
                     });
                     table_row.col(|ui| {
                         ui.label(format::time(index.modified(id)));
@@ -833,12 +851,7 @@ impl App {
             actions.push(Action::CopyPath(id));
             ui.close();
         }
-        let folder = if index.is_dir(id) {
-            Some(id)
-        } else {
-            index.parent(id)
-        };
-        if let Some(folder) = folder
+        if let Some(folder) = folder_of(index, id)
             && ui.button("Zoom treemap here").clicked()
         {
             actions.push(Action::ZoomTo(folder));
@@ -913,6 +926,21 @@ impl App {
                 }
                 Action::CopyPath(id) => ctx.copy_text(index.path(id).display().to_string()),
                 Action::AskTrash(ids) => {
+                    // A selected folder already takes its selected descendants with it.
+                    let ids: Vec<EntryId> = ids
+                        .iter()
+                        .copied()
+                        .filter(|&id| {
+                            let mut ancestor = index.parent(id);
+                            while let Some(a) = ancestor {
+                                if ids.contains(&a) {
+                                    return false;
+                                }
+                                ancestor = index.parent(a);
+                            }
+                            true
+                        })
+                        .collect();
                     if let Some(reason) = ids.iter().find_map(|&id| self.trash_blocker(index, id)) {
                         self.notify(reason);
                         continue;
@@ -1116,6 +1144,30 @@ fn subtree_on_disk(index: &Index, id: EntryId) -> u64 {
         stack.extend_from_slice(index.children(current));
     }
     total
+}
+
+/// An Entry's share of its parent folder's Filtered On-disk Size. A Volume's share is of every
+/// Indexed Volume together.
+fn share_of_parent(index: &Index, view: &View, id: EntryId) -> f64 {
+    let own = view.filter.totals(index, id).on_disk;
+    let parent = match index.parent(id) {
+        Some(parent) => view.filter.totals(index, parent).on_disk,
+        None => view.total.on_disk,
+    };
+    if parent > 0 {
+        own as f64 / parent as f64
+    } else {
+        1.0
+    }
+}
+
+/// The Entry itself if it is a folder, else the folder holding it.
+fn folder_of(index: &Index, id: EntryId) -> Option<EntryId> {
+    if index.is_dir(id) {
+        Some(id)
+    } else {
+        index.parent(id)
+    }
 }
 
 /// An On-disk Size cell: a bar showing the share of the parent folder, with the size on top.

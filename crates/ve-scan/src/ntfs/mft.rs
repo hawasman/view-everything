@@ -267,10 +267,6 @@ pub struct Parsed {
 }
 
 impl Parsed {
-    pub fn merge_from(&mut self, other: Parsed) {
-        self.merge(other)
-    }
-
     fn merge(&mut self, other: Parsed) {
         self.names.extend(other.names);
         self.modified = self.modified.or(other.modified);
@@ -505,26 +501,24 @@ fn mft_extents<R: Read + Seek>(reader: &mut R, geometry: &Geometry) -> io::Resul
     Ok((segments.into_iter().flat_map(|s| s.runs).collect(), size))
 }
 
-/// Reads one record and its extension records, merged. `None` when the record is unused,
-/// not a base record, or unnamed.
-pub fn read_merged<R: Read + Seek>(
+/// Finishes a base record by merging the extension records its `$ATTRIBUTE_LIST` names.
+/// `fetch` returns the parsed record with the given number, or `None` if it is unavailable.
+/// The result is `None` for an unused, non-base or unnamed record.
+pub fn finish_record<R: Read + Seek>(
+    mut base: Parsed,
     reader: &mut R,
     geometry: &Geometry,
-    mft_runs: &[Run],
-    number: u64,
+    mut fetch: impl FnMut(u64) -> io::Result<Option<Parsed>>,
 ) -> io::Result<Option<Record>> {
-    let Some(mut base) = read_record_at(reader, geometry, mft_runs, number, false)? else {
-        return Ok(None);
-    };
     if !base.in_use || base.base != 0 {
         return Ok(None);
     }
     if let Some(list) = base.attr_list.take() {
         let bytes = list.bytes(reader, geometry)?;
-        for ext in list_extension_records(&bytes, None, number) {
-            if let Some(p) = read_record_at(reader, geometry, mft_runs, ext, false)?
+        for ext in list_extension_records(&bytes, None, base.number) {
+            if let Some(p) = fetch(ext)?
                 && p.in_use
-                && p.base == number
+                && p.base == base.number
             {
                 base.merge(p);
             }
@@ -579,11 +573,4 @@ pub fn read_all<R: Read + Seek>(reader: &mut R) -> io::Result<Vec<Record>> {
         }
     }
     Ok(bases.into_iter().filter_map(Parsed::into_record).collect())
-}
-
-/// Reads the volume geometry and `$MFT` extents once, for repeated [`read_merged`] calls.
-pub fn open_mft<R: Read + Seek>(reader: &mut R) -> io::Result<(Geometry, Vec<Run>)> {
-    let geometry = read_geometry(reader)?;
-    let (runs, _) = mft_extents(reader, &geometry)?;
-    Ok((geometry, runs))
 }

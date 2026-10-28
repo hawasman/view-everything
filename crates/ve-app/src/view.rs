@@ -1,6 +1,7 @@
 //! What the panels show for one Query over one Index generation.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use ve_core::category::extension;
 use ve_core::{Category, CategoryMap, EntryId, Filter, Index, Query, Totals};
@@ -8,7 +9,11 @@ use ve_core::{Category, CategoryMap, EntryId, Filter, Index, Query, Totals};
 /// Extensions listed under each Category in the breakdown.
 const EXTENSIONS_PER_CATEGORY: usize = 12;
 
+static NEXT_VIEW_ID: AtomicU64 = AtomicU64::new(1);
+
 pub struct View {
+    /// Unique per computed View; caches of derived drawing data key on it.
+    pub id: u64,
     /// The Query text this View was computed for.
     pub query: String,
     pub filter: Filter,
@@ -38,23 +43,23 @@ impl View {
         let started = Instant::now();
         let filter = Filter::compute(index, query);
 
-        let mut flat: Vec<EntryId> = filter
+        let mut sized: Vec<(u64, EntryId)> = filter
             .matched()
             .iter()
             .map(|i| EntryId(i as u32))
             .filter(|&id| index.is_live(id) && index.parent(id).is_some())
+            .map(|id| (filter.totals(index, id).on_disk, id))
             .collect();
-        flat.sort_unstable_by_key(|&id| std::cmp::Reverse(filter.totals(index, id).on_disk));
+        sized.sort_unstable_by_key(|&(size, _)| std::cmp::Reverse(size));
+        let flat = sized.into_iter().map(|(_, id)| id).collect();
 
         let mut total = Totals::default();
         for (_, volume) in index.volumes() {
-            let t = filter.totals(index, volume.root);
-            total.logical += t.logical;
-            total.on_disk += t.on_disk;
-            total.files += t.files;
+            total.add(filter.totals(index, volume.root));
         }
 
         View {
+            id: NEXT_VIEW_ID.fetch_add(1, Ordering::Relaxed),
             query: query_text.to_owned(),
             categories: breakdown(index, &filter, categories),
             filter,
@@ -65,13 +70,17 @@ impl View {
     }
 }
 
-/// Filtered Size per Category and extension. A hard-linked file is counted once per link here.
+/// Filtered Size per Category and extension, counting each hard-linked file once.
 fn breakdown(index: &Index, filter: &Filter, categories: &CategoryMap) -> Vec<CategoryRow> {
     let mut by_extension: HashMap<&str, Totals> = HashMap::new();
     let mut lowered: HashMap<String, Totals> = HashMap::new();
     for i in 0..index.capacity() {
         let id = EntryId(i as u32);
-        if !index.is_live(id) || index.is_dir(id) || !filter.is_counted(id) {
+        if !index.is_live(id)
+            || index.is_dir(id)
+            || !filter.is_counted(id)
+            || filter.is_repeated_link(id)
+        {
             continue;
         }
         let ext = extension(index.name(id)).unwrap_or("");
@@ -80,15 +89,14 @@ fn breakdown(index: &Index, filter: &Filter, categories: &CategoryMap) -> Vec<Ca
         } else {
             by_extension.entry(ext).or_default()
         };
-        entry.logical += index.logical(id);
-        entry.on_disk += index.on_disk(id);
-        entry.files += 1;
+        entry.add(Totals {
+            logical: index.logical(id),
+            on_disk: index.on_disk(id),
+            files: 1,
+        });
     }
-    for (ext, t) in &lowered {
-        let entry = by_extension.entry(ext.as_str()).or_default();
-        entry.logical += t.logical;
-        entry.on_disk += t.on_disk;
-        entry.files += t.files;
+    for (ext, totals) in &lowered {
+        by_extension.entry(ext.as_str()).or_default().add(*totals);
     }
 
     let mut rows: HashMap<Category, CategoryRow> = HashMap::new();
@@ -99,9 +107,7 @@ fn breakdown(index: &Index, filter: &Filter, categories: &CategoryMap) -> Vec<Ca
             totals: Totals::default(),
             extensions: Vec::new(),
         });
-        row.totals.logical += totals.logical;
-        row.totals.on_disk += totals.on_disk;
-        row.totals.files += totals.files;
+        row.totals.add(totals);
         let label = if ext.is_empty() {
             "(none)".to_owned()
         } else {

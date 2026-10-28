@@ -13,7 +13,7 @@ pub struct Totals {
 }
 
 impl Totals {
-    fn add(&mut self, other: Totals) {
+    pub fn add(&mut self, other: Totals) {
         self.logical += other.logical;
         self.on_disk += other.on_disk;
         self.files += other.files;
@@ -32,6 +32,8 @@ pub struct Filter {
     counted: BitSet,
     shown: BitSet,
     folders: Vec<Totals>,
+    /// Hard links to a file already counted through another link.
+    repeated_links: BitSet,
 }
 
 impl Filter {
@@ -43,6 +45,7 @@ impl Filter {
         };
         let mut counted = BitSet::new(n);
         let mut shown = BitSet::new(n);
+        let mut repeated_links = BitSet::new(n);
         let mut folders = vec![Totals::default(); index.folder_slots()];
         let mut scratch = (String::new(), Vec::new());
 
@@ -70,6 +73,7 @@ impl Filter {
                     counted.insert(child.index());
                     shown.insert(child.index());
                     if index.is_hardlinked(child) && !seen_links.insert(index.key(child)) {
+                        repeated_links.insert(child.index());
                         continue;
                     }
                     folders[dir_slot].add(Totals {
@@ -104,6 +108,7 @@ impl Filter {
             counted,
             shown,
             folders,
+            repeated_links,
         }
     }
 
@@ -138,6 +143,12 @@ impl Filter {
     /// Whether the file counts toward Filtered Sizes.
     pub fn is_counted(&self, id: EntryId) -> bool {
         self.counted.contains(id.index())
+    }
+
+    /// Whether the file is a hard link to a file already counted through another link, so it
+    /// adds nothing to Filtered Sizes.
+    pub fn is_repeated_link(&self, id: EntryId) -> bool {
+        self.repeated_links.contains(id.index())
     }
 
     /// Entries that match the Query themselves, live or not; callers skip removed ones.

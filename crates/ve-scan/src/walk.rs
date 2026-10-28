@@ -5,6 +5,7 @@
 use crate::Progress;
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::{self, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -21,7 +22,7 @@ pub(crate) fn root_meta(mount: &Path) -> io::Result<EntryMeta> {
             format!("{} is not a folder", mount.display()),
         ));
     }
-    Ok(entry_meta(&metadata, mount))
+    Ok(entry_meta(&metadata, || mount.to_path_buf()))
 }
 
 pub(crate) fn sync(index: &RwLock<Index>, volume: VolumeId, progress: &Progress) -> io::Result<()> {
@@ -33,7 +34,9 @@ pub(crate) fn sync(index: &RwLock<Index>, volume: VolumeId, progress: &Progress)
         (volume.root, volume.mount.clone())
     };
     let metadata = fs::metadata(&mount)?;
-    index.write().update(root, entry_meta(&metadata, &mount));
+    index
+        .write()
+        .update(root, entry_meta(&metadata, || mount.clone()));
     let walk = Walk {
         index,
         progress,
@@ -59,22 +62,29 @@ struct Walk<'a> {
 }
 
 struct Listed {
+    /// The name as the filesystem has it; used to descend.
+    os_name: OsString,
+    /// The name as the Index stores it (lossy for names that aren't valid Unicode).
     name: String,
     meta: EntryMeta,
 }
 
 impl<'a> Walk<'a> {
     fn visit<'s>(&'s self, scope: &rayon::Scope<'s>, dir: EntryId, path: PathBuf) {
-        let listing = self.list(&path);
+        // An unreadable folder keeps what the Index already knows about it: the failure may be
+        // passing, and stale is better than silently losing a subtree.
+        let Some(listing) = self.list(&path) else {
+            return;
+        };
         let subfolders = {
             let mut index = self.index.write();
             if !index.is_live(dir) {
                 return;
             }
-            apply(&mut index, dir, listing.unwrap_or_default())
+            apply(&mut index, dir, listing)
         };
-        for (id, name) in subfolders {
-            let child = path.join(name);
+        for (id, os_name) in subfolders {
+            let child = path.join(os_name);
             scope.spawn(move |scope| self.visit(scope, id, child));
         }
     }
@@ -97,9 +107,14 @@ impl<'a> Walk<'a> {
             if device(&metadata) != self.device {
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let meta = entry_meta(&metadata, &entry.path());
-            listed.push(Listed { name, meta });
+            let os_name = entry.file_name();
+            let name = os_name.to_string_lossy().into_owned();
+            let meta = entry_meta(&metadata, || entry.path());
+            listed.push(Listed {
+                os_name,
+                name,
+                meta,
+            });
         }
         self.progress
             .entries
@@ -109,38 +124,53 @@ impl<'a> Walk<'a> {
 }
 
 /// Makes the Index children of `dir` equal to `listing`. Returns the folders to visit next.
-fn apply(index: &mut Index, dir: EntryId, listing: Vec<Listed>) -> Vec<(EntryId, String)> {
+fn apply(index: &mut Index, dir: EntryId, listing: Vec<Listed>) -> Vec<(EntryId, OsString)> {
     let mut existing: HashMap<String, EntryId> = index
         .children(dir)
         .iter()
         .map(|&c| (index.name(c).to_owned(), c))
         .collect();
     let mut subfolders = Vec::new();
-    for Listed { name, meta } in listing {
+    let mut replaced = Vec::new();
+    let mut added = Vec::new();
+    for Listed {
+        os_name,
+        name,
+        meta,
+    } in listing
+    {
         let id = match existing.remove(&name) {
             Some(id) if index.is_dir(id) == meta.is_dir => {
                 index.update(id, meta);
-                id
+                Some(id)
             }
             Some(id) => {
-                index.remove(id);
-                index.insert(dir, &name, meta)
+                replaced.push(id);
+                None
             }
-            None => index.insert(dir, &name, meta),
+            None => None,
         };
-        if meta.is_dir {
-            subfolders.push((id, name));
+        match id {
+            Some(id) if meta.is_dir => subfolders.push((id, os_name)),
+            Some(_) => {}
+            None => added.push((os_name, name, meta)),
         }
     }
-    for (_, gone) in existing {
-        index.remove(gone);
+    replaced.extend(existing.into_values());
+    index.remove_children(dir, &replaced);
+    for (os_name, name, meta) in added {
+        let id = index.insert(dir, &name, meta);
+        if meta.is_dir {
+            subfolders.push((id, os_name));
+        }
     }
     subfolders
 }
 
 /// Index metadata for one filesystem object, without following symlinks. Folders carry no size
 /// of their own: Folder Size is the sum of their contents.
-fn entry_meta(metadata: &Metadata, path: &Path) -> EntryMeta {
+/// `path` is only built where the platform needs it (Windows On-disk Size).
+fn entry_meta(metadata: &Metadata, path: impl FnOnce() -> PathBuf) -> EntryMeta {
     let is_dir = metadata.is_dir();
     let modified = metadata
         .modified()
@@ -163,7 +193,7 @@ fn entry_meta(metadata: &Metadata, path: &Path) -> EntryMeta {
 }
 
 #[cfg(unix)]
-fn fill_platform_meta(meta: &mut EntryMeta, metadata: &Metadata, _path: &Path) {
+fn fill_platform_meta(meta: &mut EntryMeta, metadata: &Metadata, _path: impl FnOnce() -> PathBuf) {
     use std::os::unix::fs::MetadataExt;
     meta.on_disk = metadata.blocks() * 512;
     meta.key = metadata.ino();
@@ -171,11 +201,11 @@ fn fill_platform_meta(meta: &mut EntryMeta, metadata: &Metadata, _path: &Path) {
 }
 
 #[cfg(windows)]
-fn fill_platform_meta(meta: &mut EntryMeta, metadata: &Metadata, path: &Path) {
+fn fill_platform_meta(meta: &mut EntryMeta, metadata: &Metadata, path: impl FnOnce() -> PathBuf) {
     meta.on_disk = if metadata.file_type().is_symlink() {
         0
     } else {
-        crate::platform::windows::compressed_size(path).unwrap_or(metadata.len())
+        crate::platform::windows::on_disk_size(&path()).unwrap_or(metadata.len())
     };
 }
 

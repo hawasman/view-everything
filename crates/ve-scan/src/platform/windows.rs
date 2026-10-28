@@ -1,9 +1,11 @@
 //! Windows Volume discovery, elevation and file facts.
 
 use crate::volumes::VolumeInfo;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
+use std::sync::{Mutex, OnceLock};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_CANCELLED, GetLastError, HANDLE, NO_ERROR,
 };
@@ -11,7 +13,8 @@ use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    GetCompressedFileSizeW, GetDriveTypeW, GetLogicalDriveStringsW, GetVolumeInformationW,
+    GetCompressedFileSizeW, GetDiskFreeSpaceW, GetDriveTypeW, GetLogicalDriveStringsW,
+    GetVolumeInformationW,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
@@ -163,14 +166,67 @@ fn quote_arg(arg: &str) -> String {
     out
 }
 
-/// Space the file occupies on disk when NTFS compresses it; `None` if it cannot be queried.
-pub fn compressed_size(path: &Path) -> Option<u64> {
-    let path = wide(path);
+/// Storage the file occupies on disk: its compressed/sparse-aware size from the filesystem,
+/// rounded up to the Volume's cluster size. `None` if it cannot be queried.
+pub fn on_disk_size(path: &Path) -> Option<u64> {
+    let (extended, drive) = extended_path(path)?;
     let mut high = 0u32;
-    // SAFETY: `path` is NUL terminated; `high` is a valid out pointer.
-    let low = unsafe { GetCompressedFileSizeW(path.as_ptr(), &mut high) };
+    // SAFETY: `extended` is NUL terminated; `high` is a valid out pointer.
+    let low = unsafe { GetCompressedFileSizeW(extended.as_ptr(), &mut high) };
     if low == INVALID_FILE_SIZE && unsafe { GetLastError() } != NO_ERROR {
         return None;
     }
-    Some((u64::from(high) << 32) | u64::from(low))
+    let size = (u64::from(high) << 32) | u64::from(low);
+    Some(match cluster_size(drive) {
+        Some(cluster) => size.div_ceil(cluster) * cluster,
+        None => size,
+    })
+}
+
+/// The `\\?\`-prefixed, NUL-terminated form of an absolute drive path (so paths beyond
+/// MAX_PATH work), and its drive letter.
+fn extended_path(path: &Path) -> Option<(Vec<u16>, char)> {
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return None;
+    };
+    let drive = match prefix.kind() {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            (letter as char).to_ascii_uppercase()
+        }
+        _ => return None,
+    };
+    if matches!(prefix.kind(), Prefix::VerbatimDisk(_)) {
+        return Some((wide(path), drive));
+    }
+    let mut text = OsString::from(r"\\?\");
+    text.push(path);
+    // The verbatim form does not normalise `/`.
+    let text: String = text.to_string_lossy().replace('/', "\\");
+    Some((wide(text), drive))
+}
+
+fn cluster_size(drive: char) -> Option<u64> {
+    static CACHE: OnceLock<Mutex<HashMap<char, u64>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(&size) = cache.lock().unwrap().get(&drive) {
+        return Some(size);
+    }
+    let root = wide(format!("{drive}:\\"));
+    let (mut sectors, mut bytes, mut free, mut total) = (0u32, 0u32, 0u32, 0u32);
+    // SAFETY: `root` is NUL terminated and the out pointers are valid.
+    let ok = unsafe {
+        GetDiskFreeSpaceW(
+            root.as_ptr(),
+            &mut sectors,
+            &mut bytes,
+            &mut free,
+            &mut total,
+        )
+    };
+    let size = u64::from(sectors) * u64::from(bytes);
+    if ok == 0 || size == 0 {
+        return None;
+    }
+    cache.lock().unwrap().insert(drive, size);
+    Some(size)
 }

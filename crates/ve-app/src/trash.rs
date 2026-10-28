@@ -25,6 +25,13 @@ pub fn open_trash() -> Result<(), String> {
     platform::open_trash()
 }
 
+/// Empties the trash where the `trash` crate can list it (Windows and freedesktop systems).
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn purge_everything() -> Result<(), String> {
+    let items = trash::os_limited::list().map_err(|e| e.to_string())?;
+    trash::os_limited::purge_all(items).map_err(|e| e.to_string())
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 mod platform {
     use std::path::Path;
@@ -41,10 +48,7 @@ mod platform {
         )
     }
 
-    pub fn empty_trash() -> Result<(), String> {
-        let items = trash::os_limited::list().map_err(|e| e.to_string())?;
-        trash::os_limited::purge_all(items).map_err(|e| e.to_string())
-    }
+    pub(crate) use super::purge_everything as empty_trash;
 
     pub fn open_trash() -> Result<(), String> {
         opener::open("trash:///").map_err(|e| e.to_string())
@@ -84,10 +88,7 @@ mod platform {
         (result == 0).then_some(info.i64Size as u64)
     }
 
-    pub fn empty_trash() -> Result<(), String> {
-        let items = trash::os_limited::list().map_err(|e| e.to_string())?;
-        trash::os_limited::purge_all(items).map_err(|e| e.to_string())
-    }
+    pub(crate) use super::purge_everything as empty_trash;
 
     pub fn open_trash() -> Result<(), String> {
         std::process::Command::new("explorer.exe")

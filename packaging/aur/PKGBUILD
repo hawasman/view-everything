@@ -3,7 +3,7 @@
 # git+file://, so `makepkg` works locally. Add `url` and replace `source` when public.
 # Maintainer: view-everything contributors
 pkgname=view-everything-git
-pkgver=0.1.0
+pkgver=0.1.0.r1.ge47ffb5
 pkgrel=1
 pkgdesc='Find files by name and find what is consuming disk space'
 arch=('x86_64')
@@ -13,7 +13,7 @@ depends=('gcc-libs' 'glibc' 'libglvnd' 'libxkbcommon' 'libx11' 'libxcursor'
 makedepends=('cargo' 'git')
 provides=('view-everything')
 conflicts=('view-everything')
-source=("$pkgname::git+file://${startdir}/../..")
+source=("$pkgname::git+file://$(realpath "${startdir}/../..")")
 sha256sums=('SKIP')
 
 pkgver() {
