@@ -174,7 +174,7 @@ impl Render for SettingsPage {
             .gap_2()
             .items_center()
             .child("Re-read walked Volumes every")
-            .child(NumberInput::new(&self.refresh).w(px(140.)))
+            .child(div().w(px(140.)).child(NumberInput::new(&self.refresh)))
             .child("minutes while running");
         let theme = self.theme_buttons(cx);
         let mut page = v_flex()
