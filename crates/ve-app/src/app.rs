@@ -12,6 +12,8 @@ use crate::tree::TreeList;
 use crate::trash::{self, Trash};
 use crate::treemap::Treemap;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
 use gpui_kit::component::spinner::Spinner;
@@ -23,6 +25,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 use ve_core::CategoryMap;
@@ -64,6 +67,8 @@ pub struct Shell {
     treemap: Entity<Treemap>,
     categories: Entity<CategoryPanel>,
     volumes: Vec<VolumeInfo>,
+    /// Identities of the Volumes already offered for indexing this session.
+    offered: HashSet<String>,
     startup_problems: Vec<String>,
     /// The Explorer lists' width in pixels, as of the last paint.
     list_width: Rc<Cell<f32>>,
@@ -180,6 +185,27 @@ impl Shell {
         })
         .detach();
 
+        // Volumes mounted while running: a returning Offline Volume catches up at once, a new
+        // removable one is offered for indexing.
+        #[cfg(feature = "bench")]
+        let watching = std::env::var_os("VE_BENCH_MOUNT").is_none();
+        #[cfg(not(feature = "bench"))]
+        let watching = true;
+        if watching {
+            let (mounts, mounted) = async_channel::unbounded::<Vec<VolumeInfo>>();
+            ve_scan::watch::watch(volumes.clone(), move |now| {
+                let _ = mounts.send_blocking(now);
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                while let Ok(now) = mounted.recv().await {
+                    if this.update_in(cx, |this, window, cx| this.mounts_changed(now, window, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+
         // Save the Index as the app quits.
         cx.on_app_quit(|this, _| {
             this.engine.shutdown();
@@ -201,9 +227,65 @@ impl Shell {
             treemap,
             categories: category_panel,
             volumes,
+            offered: HashSet::new(),
             startup_problems,
             list_width: Rc::default(),
         }
+    }
+
+    /// The mounted Volumes changed: the Settings page re-applies them to the Engine, and each
+    /// removable Volume never seen before is offered for indexing.
+    fn mounts_changed(&mut self, now: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) {
+        let before = std::mem::replace(&mut self.volumes, now.clone());
+        let offers = {
+            let index = self.engine.shared.index.read();
+            self.settings_page
+                .read(cx)
+                .settings()
+                .index_offers(&before, &now, |id| index.volume_with_identity(id).is_some())
+        };
+        self.settings_page.update(cx, |page, cx| page.set_mounted(now, window, cx));
+        for volume in offers {
+            if self.offered.insert(volume.identity.clone()) {
+                self.offer_to_index(volume, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// A non-blocking notification: Index adds the Volume, Not now remembers the answer.
+    fn offer_to_index(&mut self, volume: VolumeInfo, window: &mut Window, cx: &mut Context<Self>) {
+        let shell = cx.entity().downgrade();
+        let name = if volume.label.is_empty() { volume.mount.display().to_string() } else { volume.label.clone() };
+        let note = Notification::info(format!("{name} was mounted. Index it so its files can be searched and sized?"))
+            .title("Index this?")
+            .id1::<Shell>(volume.identity.clone())
+            .autohide(false)
+            .content(move |_, _, cx| {
+                let answer = |id: &'static str, index_it: bool, cx: &mut Context<Notification>| {
+                    let (shell, volume) = (shell.clone(), volume.clone());
+                    Button::new(id).small().on_click(cx.listener(move |note, _, window, cx| {
+                        shell.update(cx, |shell, cx| shell.answer_offer(&volume, index_it, cx)).ok();
+                        note.dismiss(window, cx);
+                    }))
+                };
+                h_flex()
+                    .gap_2()
+                    .mt_2()
+                    .child(answer("index-this", true, cx).primary().label("Index"))
+                    .child(answer("not-now", false, cx).label("Not now"))
+                    .into_any_element()
+            });
+        window.push_notification(note, cx);
+    }
+
+    fn answer_offer(&mut self, volume: &VolumeInfo, index_it: bool, cx: &mut Context<Self>) {
+        self.settings_page.update(cx, |page, cx| {
+            page.apply(
+                |s| if index_it { s.set_indexed(volume, true) } else { s.decline(volume) },
+                cx,
+            )
+        });
     }
 
     /// Picks up what the Engine's threads changed since the last look.

@@ -18,6 +18,9 @@ pub struct Settings {
     /// Fixed Volumes the user asked not to index, by identity.
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Removable Volumes the user answered "Not now" to when offered, by identity.
+    #[serde(default)]
+    pub declined: Vec<String>,
     /// How often a walked Volume is re-walked while the app runs, in minutes, and how old its
     /// Last Synced may be before launch Catch-up re-walks it. Applies to Volumes without a
     /// refresh interval of their own.
@@ -52,6 +55,7 @@ impl Default for Settings {
         Self {
             include: Vec::new(),
             exclude: Vec::new(),
+            declined: Vec::new(),
             refresh_minutes: default_refresh_minutes(),
             volume_refresh_minutes: BTreeMap::new(),
             theme: ThemeChoice::System,
@@ -79,6 +83,7 @@ impl Settings {
     pub fn set_indexed(&mut self, volume: &VolumeInfo, indexed: bool) {
         self.include.retain(|k| !names(k, volume));
         self.exclude.retain(|k| !names(k, volume));
+        self.declined.retain(|k| !names(k, volume));
         match (volume.opt_in(), indexed) {
             (true, true) => self.include.push(volume.identity.clone()),
             (false, false) => self.exclude.push(volume.identity.clone()),
@@ -86,11 +91,36 @@ impl Settings {
         }
     }
 
+    /// Remembers "Not now" for `volume`, so it is not offered again.
+    pub fn decline(&mut self, volume: &VolumeInfo) {
+        if !self.declined.contains(&volume.identity) {
+            self.declined.push(volume.identity.clone());
+        }
+    }
+
+    /// The Volumes in `now` that were not mounted `before` and are worth offering to index:
+    /// opt-in (removable or a network share), not indexed, not declined, and not already in the
+    /// Index (`in_index`, by identity: a returning Offline Volume catches up on its own).
+    pub fn index_offers(
+        &self,
+        before: &[VolumeInfo],
+        now: &[VolumeInfo],
+        in_index: impl Fn(&str) -> bool,
+    ) -> Vec<VolumeInfo> {
+        now.iter()
+            .filter(|v| v.opt_in() && !self.is_indexed(v))
+            .filter(|v| !before.iter().any(|b| b.identity == v.identity))
+            .filter(|v| !self.declined.contains(&v.identity) && !in_index(&v.identity))
+            .cloned()
+            .collect()
+    }
+
     /// Drops everything remembered about the Volume `identity`.
     pub fn forget(&mut self, identity: &str) {
         let is = |k: &String| k == identity;
         self.include.retain(|k| !is(k));
         self.exclude.retain(|k| !is(k));
+        self.declined.retain(|k| !is(k));
         self.volume_refresh_minutes.retain(|k, _| !is(k));
     }
 
@@ -247,5 +277,31 @@ mod tests {
         s.forget(&usb.identity);
         assert!(!s.is_indexed(&usb));
         assert!(s.include.is_empty() && s.volume_refresh_minutes.is_empty());
+    }
+
+    #[test]
+    fn a_new_removable_volume_is_offered_until_the_user_says_not_now() {
+        let (usb, disk) = (volume("/mnt/usb", true), volume("/mnt/data", false));
+        let mut s = Settings::default();
+        let offers = |s: &Settings, before: &[VolumeInfo], known: bool| {
+            s.index_offers(before, &[usb.clone(), disk.clone()], |_| known)
+        };
+        // Newly mounted, never seen: offered. A fixed Volume is indexed already, never offered.
+        assert_eq!(offers(&s, &[], false), vec![usb.clone()]);
+        // Already mounted before this change, or already in the Index (returning): no prompt.
+        assert!(offers(&s, std::slice::from_ref(&usb), false).is_empty());
+        assert!(offers(&s, &[], true).is_empty());
+        // "Not now" is remembered by identity, also across a save and at another mount path.
+        s.decline(&usb);
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert!(offers(&back, &[], false).is_empty());
+        let moved = VolumeInfo { mount: "/run/media/usb".into(), ..usb.clone() };
+        assert!(back.index_offers(&[], &[moved], |_| false).is_empty());
+        // Accepting later (Settings tick) clears the answer; Forget drops it too.
+        s.set_indexed(&usb, true);
+        assert!(s.declined.is_empty() && s.is_indexed(&usb));
+        s.decline(&usb);
+        s.forget(&usb.identity);
+        assert!(s.declined.is_empty());
     }
 }
