@@ -7,8 +7,17 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use ve_core::{Filter, Index, Remote};
 use ve_scan::{Progress, SharedIndex, remote};
+
+/// Tests that write a shell script and then run it hold this for their whole run. Otherwise a
+/// fork for another test's `ssh` can inherit the still-open write handle of a script being
+/// written here, and running that script fails with ETXTBSY ("Text file busy").
+fn serial() -> MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
@@ -34,6 +43,7 @@ fn names(index: &Index, dir: ve_core::EntryId) -> Vec<String> {
 
 #[test]
 fn captured_find_output_is_indexed_with_hard_links_counted_once() {
+    let _serial = serial();
     let dir = tempfile::tempdir().unwrap();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/find-output.bin");
     let ssh = script(dir.path(), "ssh", &format!("cat {}", fixture.display()));
@@ -62,6 +72,7 @@ fn captured_find_output_is_indexed_with_hard_links_counted_once() {
 
 #[test]
 fn a_real_find_is_indexed_and_a_refresh_applies_differences() {
+    let _serial = serial();
     let dir = tempfile::tempdir().unwrap();
     let tree = dir.path().join("tree");
     fs::create_dir_all(tree.join("a/b")).unwrap();
@@ -97,6 +108,7 @@ fn a_real_find_is_indexed_and_a_refresh_applies_differences() {
 
 #[test]
 fn failures_are_reported_and_leave_the_index_alone() {
+    let _serial = serial();
     let dir = tempfile::tempdir().unwrap();
     let index = SharedIndex::new(Index::new());
     let id = add(&index, "/data");
@@ -146,6 +158,7 @@ fn a_manual_remote_is_never_caught_up_and_one_with_an_interval_is() {
 
 #[test]
 fn a_flood_of_stderr_does_not_hang_the_sync() {
+    let _serial = serial();
     let dir = tempfile::tempdir().unwrap();
     let ssh = script(dir.path(), "ssh", "head -c 300000 /dev/zero | tr '\\0' 'e' >&2; exit 255");
     let index = SharedIndex::new(Index::new());
@@ -155,6 +168,7 @@ fn a_flood_of_stderr_does_not_hang_the_sync() {
 
 #[test]
 fn an_incomplete_listing_does_not_prune() {
+    let _serial = serial();
     let dir = tempfile::tempdir().unwrap();
     let tree = dir.path().join("tree");
     fs::create_dir_all(&tree).unwrap();
