@@ -3,6 +3,7 @@
 
 use crate::engine::{Engine, Phase, Repaint, last_synced_label};
 use crate::categories::CategoryPanel;
+use crate::dashboard::{Act, DashboardPage};
 use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
 use crate::format;
@@ -55,6 +56,7 @@ pub struct Shell {
     filters: Entity<FiltersPanel>,
     show_filters: bool,
     settings_page: Entity<SettingsPage>,
+    dashboard: Entity<DashboardPage>,
     trash: Trash,
     treemap: Entity<Treemap>,
     categories: Entity<CategoryPanel>,
@@ -91,12 +93,22 @@ impl Shell {
         let engine =
             Engine::start(repaint.clone(), volumes.clone(), indexed, settings.remotes.clone(), intervals, categories.clone());
 
-        let trash = Trash::new(engine.shared.clone(), repaint);
+        let trash = Trash::new(engine.shared.clone(), repaint.clone());
 
+        let dashboard = cx.new(|cx| {
+            let mut page =
+                DashboardPage::new(engine.shared.clone(), trash.clone(), categories.clone(), &settings, repaint, window, cx);
+            page.set_context(&settings, volumes.clone(), cx);
+            page
+        });
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
+        cx.subscribe_in(&dashboard, window, |this, _, act: &Act, window, cx| this.dashboard_act(act, window, cx))
+            .detach();
         cx.subscribe(&settings_page, |this, _, changed: &Changed, cx| {
             this.engine.set_volumes(changed.mounted.clone(), changed.indexed.clone(), changed.remotes.clone());
             this.engine.set_intervals(changed.intervals.clone());
+            let settings = this.settings_page.read(cx).settings().clone();
+            this.dashboard.update(cx, |d, cx| d.set_context(&settings, changed.mounted.clone(), cx));
             // Saved fine, so the settings file read at startup has been replaced.
             if !this.settings_page.read(cx).has_problem() {
                 this.startup_problems.retain(|p| !p.starts_with("Settings ignored"));
@@ -180,11 +192,14 @@ impl Shell {
         #[cfg(feature = "bench")]
         let page = match std::env::var("VE_PAGE").as_deref() {
             Ok("settings") => Page::Settings,
+            Ok("explorer") => Page::Explorer,
             Ok("dashboard") => Page::Dashboard,
-            _ => Page::Explorer,
+            // The scroll measurement needs the Explorer's list on screen.
+            _ if std::env::var_os("VE_BENCH").is_some() => Page::Explorer,
+            _ => Page::Dashboard,
         };
         #[cfg(not(feature = "bench"))]
-        let page = Page::Explorer;
+        let page = Page::Dashboard;
         #[cfg(feature = "bench")]
         if std::env::var_os("VE_OPEN_DIALOG").is_some() {
             cx.defer_in(window, |this, window, cx| {
@@ -240,6 +255,7 @@ impl Shell {
             filters,
             show_filters: false,
             settings_page,
+            dashboard,
             trash,
             treemap,
             categories: category_panel,
@@ -363,6 +379,33 @@ impl Shell {
             page.set_offline(offline, cx);
             page.set_remote_synced(synced, cx);
         });
+        self.dashboard.update(cx, |d, cx| d.poll(cx));
+        cx.notify();
+    }
+
+    /// What a click on the Dashboard asked for.
+    fn dashboard_act(&mut self, act: &Act, window: &mut Window, cx: &mut Context<Self>) {
+        match act {
+            Act::Explore(query) => {
+                if let Some(text) = query {
+                    self.query.update(cx, |q, cx| {
+                        q.set_value(text.as_str(), window, cx);
+                        // set_value is silent; Change recomputes the View.
+                        cx.emit(InputEvent::Change);
+                    });
+                }
+                self.page = Page::Explorer;
+            }
+            Act::Forget(identity, mount) => {
+                self.settings_page.update(cx, |page, cx| page.apply(|s| s.forget(identity, mount), cx));
+                self.engine.forget(identity.clone());
+            }
+            Act::Refresh => self.engine.refresh(),
+            Act::MoveToTrash(id) => self.trash.ask_trash(&[*id], &self.volumes, window, cx),
+            Act::SaveQuery(text) => {
+                self.settings_page.update(cx, |page, cx| page.apply(|s| s.recent_query = text.clone(), cx));
+            }
+        }
         cx.notify();
     }
 
@@ -853,34 +896,12 @@ impl Shell {
             )
             .child(self.status_bar(cx))
     }
-
-    fn dashboard(&self, cx: &App) -> impl IntoElement {
-        let index = self.engine.shared.index.read();
-        let volumes = index.volumes().count();
-        v_flex()
-            .size_full()
-            .p(px(32.))
-            .gap(px(6.))
-            .child(
-                div()
-                    .font_family(crate::theme::SERIF_FAMILY)
-                    .text_size(px(48.))
-                    .line_height(px(54.))
-                    .child("Dashboard"),
-            )
-            .child(div().text_color(palette(cx).muted).child(format!(
-                "{} Entries on {} Volume{}",
-                format::count(index.live_count() as u64),
-                volumes,
-                if volumes == 1 { "" } else { "s" }
-            )))
-    }
 }
 
 impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page = match self.page {
-            Page::Dashboard => self.dashboard(cx).into_any_element(),
+            Page::Dashboard => self.dashboard.clone().into_any_element(),
             Page::Explorer => self.explorer(cx).into_any_element(),
             Page::Settings => self.settings_page.clone().into_any_element(),
         };
