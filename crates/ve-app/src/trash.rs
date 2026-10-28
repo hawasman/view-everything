@@ -9,6 +9,7 @@ use gpui_kit::*;
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use ve_core::{EntryId, Index};
 use ve_scan::VolumeInfo;
 
@@ -287,6 +288,8 @@ pub struct Trash {
     shared: Arc<Shared>,
     repaint: Repaint,
     size: Arc<Mutex<Option<u64>>>,
+    /// Bumped per measurement so a slow, older one can't overwrite a newer result.
+    measures: Arc<AtomicU64>,
 }
 
 impl Trash {
@@ -295,6 +298,7 @@ impl Trash {
             shared,
             repaint,
             size: Arc::new(Mutex::new(None)),
+            measures: Arc::new(AtomicU64::new(0)),
         };
         trash.measure();
         trash
@@ -307,8 +311,12 @@ impl Trash {
 
     fn measure(&self) {
         let this = self.clone();
+        let ticket = this.measures.fetch_add(1, Ordering::SeqCst) + 1;
         std::thread::spawn(move || {
-            *this.size.lock() = trash_size();
+            let size = trash_size();
+            if this.measures.load(Ordering::SeqCst) == ticket {
+                *this.size.lock() = size;
+            }
             (this.repaint)();
         });
     }
@@ -462,7 +470,11 @@ impl Trash {
                     })
                     .await;
                 let (present, missing, result) = outcome;
-                let moved = if result.is_ok() { present } else { Vec::new() };
+                // A failed batch may still have moved some items: whatever left the disk is gone.
+                let moved: Vec<PathBuf> = present
+                    .into_iter()
+                    .filter(|p| std::fs::symlink_metadata(p).is_err())
+                    .collect();
                 {
                     let mut index = this.shared.index.write();
                     for path in moved.iter().chain(&missing) {
