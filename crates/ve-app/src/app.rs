@@ -10,7 +10,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::table::{DataTable, TableState};
+use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _, Theme, ThemeMode, h_flex, v_flex};
 use gpui_kit::*;
 use std::borrow::Cow;
@@ -97,6 +97,8 @@ impl Shell {
         let list = FlatList::new(engine.shared.clone());
         let table = cx.new(|cx| TableState::new(list, window, cx).col_resizable(true));
 
+        cx.subscribe(&table, |_, _, _: &TableEvent, cx| cx.notify()).detach();
+
         if std::env::var_os("VE_BENCH").is_some() {
             crate::bench::start(table.clone(), window);
         }
@@ -147,6 +149,8 @@ impl Shell {
             };
             if !same {
                 table.delegate_mut().view = latest;
+                // Row numbers mean something else in a new View.
+                table.clear_selection(cx);
                 table.refresh(cx);
             }
         });

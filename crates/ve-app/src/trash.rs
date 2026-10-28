@@ -101,10 +101,17 @@ mod platform {
 
     pub fn trash_size() -> Option<u64> {
         let folders = trash::os_limited::trash_folders().ok()?;
+        // The `files` folders' own blocks don't count: an empty Trash holds 0 bytes.
         Some(
             folders
                 .iter()
-                .map(|folder| on_disk_size(&folder.join("files")))
+                .flat_map(|folder| {
+                    std::fs::read_dir(folder.join("files"))
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                })
+                .map(|entry| on_disk_size(&entry.path()))
                 .sum(),
         )
     }
@@ -308,12 +315,21 @@ impl Trash {
 
     pub fn open(&self, window: &mut Window, cx: &mut App) {
         if let Err(e) = open_trash() {
-            window.push_notification(Notification::error(format!("Could not open the Trash: {e}")), cx);
+            window.push_notification(
+                Notification::error(format!("Could not open the Trash: {e}")),
+                cx,
+            );
         }
     }
 
     /// Asks before moving `ids` to the Trash. Says why instead when they can't go.
-    pub fn ask_trash(&self, ids: &[EntryId], volumes: &[VolumeInfo], window: &mut Window, cx: &mut App) {
+    pub fn ask_trash(
+        &self,
+        ids: &[EntryId],
+        volumes: &[VolumeInfo],
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let (items, total) = {
             let index = self.shared.index.read();
             let ids = top_level(&index, ids);
@@ -359,7 +375,9 @@ impl Trash {
     /// Asks before permanently deleting everything in the Trash.
     pub fn ask_empty(&self, window: &mut Window, cx: &mut App) {
         let this = self.clone();
-        let amount = self.size().map_or_else(|| "everything".to_owned(), format::size);
+        let amount = self
+            .size()
+            .map_or_else(|| "everything".to_owned(), format::size);
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let this = this.clone();
             dialog
@@ -400,15 +418,19 @@ impl Trash {
                     "These Trash items contain files your user may not delete, usually because \
                      something created them as root. Delete them as administrator?",
                 )
-                .child(list)
-                .child("You will be asked for your password once. Only this command runs as root:")
                 .child(
-                    div()
-                        .p_2()
-                        .rounded_md()
-                        .bg(cx.theme().muted)
-                        .font_family(mono)
-                        .child(command.clone()),
+                    v_flex()
+                        .gap_2()
+                        .child(list)
+                        .child("You will be asked for your password once. Only this command runs as root:")
+                        .child(
+                            div()
+                                .p_2()
+                                .rounded_md()
+                                .bg(cx.theme().muted)
+                                .font_family(mono)
+                                .child(command.clone()),
+                        ),
                 )
                 .ok_text("Delete as administrator")
                 .ok_variant(ButtonVariant::Danger)
@@ -463,7 +485,10 @@ impl Trash {
         let this = self.clone();
         window
             .spawn(cx, async move |cx| {
-                let result = cx.background_executor().spawn(async { empty_trash() }).await;
+                let result = cx
+                    .background_executor()
+                    .spawn(async { empty_trash() })
+                    .await;
                 this.measure();
                 cx.update(|window, cx| match result {
                     Err(e) => window.push_notification(
@@ -488,7 +513,10 @@ impl Trash {
                             ));
                         }
                         if !text.is_empty() {
-                            window.push_notification(Notification::info(text.trim_start().to_owned()), cx);
+                            window.push_notification(
+                                Notification::info(text.trim_start().to_owned()),
+                                cx,
+                            );
                         }
                         if !needs_admin.is_empty() {
                             this.ask_admin(needs_admin, window, cx);
@@ -511,7 +539,9 @@ impl Trash {
                 this.measure();
                 cx.update(|window, cx| {
                     let note = match result {
-                        Ok(()) => Notification::info("Deleted the remaining Trash items as administrator."),
+                        Ok(()) => Notification::info(
+                            "Deleted the remaining Trash items as administrator.",
+                        ),
                         Err(e) => Notification::warning(format!("Left in the Trash: {e}")),
                     };
                     window.push_notification(note, cx);
@@ -529,7 +559,9 @@ fn trashed_message(moved: &[PathBuf], missing: usize, error: Option<String>) -> 
         n => format!("Moved {n} items to the Trash."),
     };
     if missing > 0 {
-        text.push_str(&format!(" {missing} item(s) were already gone and left the Index."));
+        text.push_str(&format!(
+            " {missing} item(s) were already gone and left the Index."
+        ));
     }
     if let Some(error) = error {
         text.push_str(&format!(" Nothing was moved: {error}"));
@@ -590,8 +622,14 @@ mod tests {
 
     #[test]
     fn nested_selection_collapses_and_read_only_volumes_block() {
-        let dir = EntryMeta { is_dir: true, ..Default::default() };
-        let file = EntryMeta { on_disk: 4096, ..Default::default() };
+        let dir = EntryMeta {
+            is_dir: true,
+            ..Default::default()
+        };
+        let file = EntryMeta {
+            on_disk: 4096,
+            ..Default::default()
+        };
         let mut index = Index::new();
         let vol = index.add_volume(Path::new("/mnt/ro"), "ext4", dir, SyncState::Walk);
         let root = index.volume(vol).unwrap().root;
