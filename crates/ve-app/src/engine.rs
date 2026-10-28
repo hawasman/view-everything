@@ -2,10 +2,10 @@
 
 use crate::settings;
 use crate::view::View;
-use chrono::Local;
+use chrono::{Local, Utc};
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -22,6 +22,15 @@ const PROGRESS_NUDGE: Duration = Duration::from_millis(250);
 const VIEW_THROTTLE: Duration = Duration::from_millis(800);
 /// How often changes picked up by journal polls are saved; a full save rewrites the Index.
 const POLL_SAVE_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// Refresh interval of a Volume the settings do not know.
+const DEFAULT_REFRESH: Duration = Duration::from_secs(30 * 60);
+/// The indexer never sleeps less than this between checks for stale Volumes, so a Volume that
+/// keeps failing to sync is retried at a calm pace.
+const MIN_WAIT: Duration = Duration::from_secs(60);
+
+/// Per-Volume refresh interval by mount point.
+pub type Intervals = HashMap<PathBuf, Duration>;
 
 /// Tells whichever GUI is showing the Engine that it should draw again.
 pub type Repaint = Arc<dyn Fn() + Send + Sync>;
@@ -67,7 +76,7 @@ enum Command {
     SetVolumes(Vec<VolumeInfo>),
     #[allow(dead_code)]
     Refresh,
-    SetRefresh(Duration),
+    SetIntervals(Intervals),
     Shutdown,
 }
 
@@ -83,7 +92,7 @@ impl Engine {
     pub fn start(
         repaint: Repaint,
         volumes: Vec<VolumeInfo>,
-        refresh: Duration,
+        intervals: Intervals,
         categories: CategoryMap,
     ) -> Engine {
         let shared = Arc::new(Shared {
@@ -105,7 +114,7 @@ impl Engine {
             let shared = shared.clone();
             thread::Builder::new()
                 .name("ve-indexer".into())
-                .spawn(move || run_indexer(&shared, volumes, refresh, &command_rx))
+                .spawn(move || run_indexer(&shared, volumes, intervals, &command_rx))
                 .expect("spawn indexer thread")
         };
         {
@@ -132,8 +141,8 @@ impl Engine {
         let _ = self.commands.send(Command::SetVolumes(volumes));
     }
 
-    pub fn set_refresh(&self, every: Duration) {
-        let _ = self.commands.send(Command::SetRefresh(every));
+    pub fn set_intervals(&self, intervals: Intervals) {
+        let _ = self.commands.send(Command::SetIntervals(intervals));
     }
 
     // Rescan-now has no button yet; the Dashboard brings it.
@@ -196,7 +205,7 @@ impl Shared {
 fn run_indexer(
     shared: &Shared,
     mut wanted: Vec<VolumeInfo>,
-    mut refresh: Duration,
+    mut intervals: Intervals,
     commands: &Receiver<Command>,
 ) {
     let index_path = settings::index_path();
@@ -205,7 +214,7 @@ fn run_indexer(
             Ok(index) => *shared.index.write() = index,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => shared.report("save", format!(
-                "The saved Index could not be read ({e}); building a new one"
+                "The saved Index could not be used ({e}); building a new one"
             )),
         }
     }
@@ -213,21 +222,18 @@ fn run_indexer(
 
     let mut saved_generation = shared.index.read().generation();
     let mut last_save = Instant::now();
-    let mut last_walk: HashMap<VolumeId, Instant> = HashMap::new();
     reconcile_volumes(shared, &wanted);
-    let mut pending: Vec<VolumeId> = shared.index.read().volumes().map(|(id, _)| id).collect();
+    // The saved Index is already on screen; Catch-up runs only where it has gone stale.
+    let mut pending = stale_volumes(&shared.index.read(), &intervals, now_secs());
     // Journal polls run every few seconds; they neither show as busy nor save every time.
     let mut quiet = false;
     loop {
         if !pending.is_empty() {
             sync_volumes(shared, &pending, quiet);
-            let now = Instant::now();
-            if !quiet {
-                last_walk.extend(pending.iter().map(|&id| (id, now)));
-            }
             pending.clear();
             if !quiet || last_save.elapsed() >= POLL_SAVE_INTERVAL {
-                save_if_changed(shared, index_path.as_deref(), &mut saved_generation);
+                // Last Synced moved even when no Entry did, and a restart relies on it.
+                save_if_changed(shared, index_path.as_deref(), &mut saved_generation, !quiet);
                 last_save = Instant::now();
             }
         }
@@ -242,10 +248,13 @@ fn run_indexer(
             .filter(|(_, v)| matches!(v.sync, SyncState::Ntfs { .. }))
             .map(|(id, _)| id)
             .collect();
-        let timeout = if journaled.is_empty() {
-            refresh
-        } else {
-            JOURNAL_POLL.min(refresh)
+        let timeout = {
+            let wait = next_wait(&shared.index.read(), &intervals, now_secs());
+            if journaled.is_empty() {
+                wait
+            } else {
+                JOURNAL_POLL.min(wait)
+            }
         };
         quiet = false;
         match commands.recv_timeout(timeout) {
@@ -256,23 +265,16 @@ fn run_indexer(
             Ok(Command::Refresh) => {
                 pending = shared.index.read().volumes().map(|(id, _)| id).collect()
             }
-            Ok(Command::SetRefresh(every)) => {
-                refresh = every;
+            Ok(Command::SetIntervals(new)) => {
+                intervals = new;
                 pending = Vec::new();
             }
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
-                save_if_changed(shared, index_path.as_deref(), &mut saved_generation);
+                save_if_changed(shared, index_path.as_deref(), &mut saved_generation, true);
                 return;
             }
             Err(RecvTimeoutError::Timeout) => {
-                let due = |id: &VolumeId| last_walk.get(id).is_none_or(|t| t.elapsed() >= refresh);
-                pending = shared
-                    .index
-                    .read()
-                    .volumes()
-                    .map(|(id, _)| id)
-                    .filter(|id| journaled.contains(id) || due(id))
-                    .collect();
+                pending = stale_volumes(&shared.index.read(), &intervals, now_secs());
                 quiet = pending.iter().all(|id| journaled.contains(id));
             }
         }
@@ -280,6 +282,60 @@ fn run_indexer(
             shared.busy.store(true, Ordering::Relaxed);
         }
     }
+}
+
+fn now_secs() -> i64 {
+    Utc::now().timestamp()
+}
+
+fn interval_of(intervals: &Intervals, mount: &Path) -> Duration {
+    intervals.get(mount).copied().unwrap_or(DEFAULT_REFRESH)
+}
+
+/// The Volumes whose Last Synced is older than their refresh interval, plus NTFS Volumes.
+fn stale_volumes(index: &Index, intervals: &Intervals, now: i64) -> Vec<VolumeId> {
+    index
+        .volumes()
+        .filter(|(_, v)| v.needs_catch_up(now, interval_of(intervals, &v.mount)))
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// How long the indexer can sleep before some Volume next goes stale.
+fn next_wait(index: &Index, intervals: &Intervals, now: i64) -> Duration {
+    index
+        .volumes()
+        .map(|(_, v)| {
+            let interval = interval_of(intervals, &v.mount);
+            match v.last_synced {
+                Some(at) if at <= now => {
+                    let age = Duration::from_secs((now - at) as u64);
+                    interval.saturating_sub(age)
+                }
+                _ => interval,
+            }
+        })
+        .min()
+        .unwrap_or(DEFAULT_REFRESH)
+        .max(MIN_WAIT)
+}
+
+/// "Last synced 5 min ago" for the app's overall Last Synced (the oldest Volume's), if there
+/// are any Volumes.
+pub fn last_synced_label(oldest: Option<Option<i64>>, now: i64) -> Option<String> {
+    Some(match oldest? {
+        None => "Not synced yet".to_owned(),
+        Some(at) => {
+            let secs = (now - at).max(0);
+            let ago = match secs {
+                0..60 => "just now".to_owned(),
+                60..3600 => format!("{} min ago", secs / 60),
+                3600..86400 => format!("{} h ago", secs / 3600),
+                _ => format!("{} d ago", secs / 86400),
+            };
+            format!("Last synced {ago}")
+        }
+    })
 }
 
 /// Makes the Index hold exactly the `wanted` Volumes. Returns the ones newly added.
@@ -360,7 +416,11 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
                 scope.spawn(move || {
                     let cause = format!("volume {}", mount.display());
                     match ve_scan::sync(&shared.index, *id, &shared.progress) {
-                        Ok(_) => shared.resolve(&cause),
+                        Ok(_) => {
+                            shared.resolve(&cause);
+                            let capacity = ve_scan::capacity(mount);
+                            shared.index.write().mark_synced(*id, now_secs(), capacity);
+                        }
                         Err(e) => shared
                             .report(cause, format!("Could not read {}: {e}", mount.display())),
                     }
@@ -371,11 +431,17 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
     });
 }
 
-fn save_if_changed(shared: &Shared, path: Option<&std::path::Path>, saved_generation: &mut u64) {
+/// Saves the Index if an Entry changed since the last save, or always when `force`.
+fn save_if_changed(
+    shared: &Shared,
+    path: Option<&std::path::Path>,
+    saved_generation: &mut u64,
+    force: bool,
+) {
     let Some(path) = path else { return };
     let _saving = shared.saving.lock();
     let index = shared.index.read();
-    if index.generation() == *saved_generation {
+    if !force && index.generation() == *saved_generation {
         return;
     }
     match index.save(path) {
@@ -460,6 +526,51 @@ mod tests {
             saving: Mutex::new(()),
             repaint: Arc::new(|| {}),
         }
+    }
+
+    fn index_with_volumes(synced: &[Option<i64>]) -> Index {
+        let mut index = Index::new();
+        let root = ve_core::EntryMeta { is_dir: true, ..Default::default() };
+        for (i, at) in synced.iter().enumerate() {
+            let id = index.add_volume(Path::new(&format!("/v{i}")), "ext4", root, SyncState::Walk);
+            if let Some(at) = at {
+                index.mark_synced(id, *at, None);
+            }
+        }
+        index
+    }
+
+    #[::core::prelude::v1::test]
+    fn launch_catches_up_only_the_stale_volumes() {
+        let now = 100_000;
+        let index = index_with_volumes(&[Some(now - 60), Some(now - 3600), None]);
+        let hour = Duration::from_secs(3600);
+        let intervals: Intervals = [(PathBuf::from("/v0"), hour), (PathBuf::from("/v1"), hour / 2)]
+            .into_iter()
+            .collect();
+        // /v0 is fresh, /v1 is older than its half hour, /v2 never synced (default interval).
+        let stale = stale_volumes(&index, &intervals, now);
+        assert_eq!(stale, vec![VolumeId(1), VolumeId(2)]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_indexer_sleeps_until_the_next_volume_goes_stale() {
+        let now = 100_000;
+        let index = index_with_volumes(&[Some(now - 600)]);
+        let intervals: Intervals = [(PathBuf::from("/v0"), Duration::from_secs(1800))].into_iter().collect();
+        assert_eq!(next_wait(&index, &intervals, now), Duration::from_secs(1200));
+        // Already overdue: wait the floor rather than spinning.
+        let overdue = index_with_volumes(&[Some(now - 7200)]);
+        assert_eq!(next_wait(&overdue, &intervals, now), MIN_WAIT);
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_overall_last_synced_reads_as_age_of_the_oldest() {
+        let now = 1_000_000;
+        assert_eq!(last_synced_label(None, now), None);
+        assert_eq!(last_synced_label(Some(None), now).unwrap(), "Not synced yet");
+        assert_eq!(last_synced_label(Some(Some(now - 5 * 60)), now).unwrap(), "Last synced 5 min ago");
+        assert_eq!(last_synced_label(Some(Some(now - 3 * 3600)), now).unwrap(), "Last synced 3 h ago");
     }
 
     #[::core::prelude::v1::test]

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use ve_core::CategoryMap;
 use ve_scan::VolumeInfo;
 
@@ -15,9 +17,14 @@ pub struct Settings {
     /// Fixed Volumes the user asked not to index.
     #[serde(default)]
     pub exclude: Vec<PathBuf>,
-    /// How often a walked Volume is re-walked while the app runs, in minutes.
+    /// How often a walked Volume is re-walked while the app runs, in minutes, and how old its
+    /// Last Synced may be before launch Catch-up re-walks it. Applies to Volumes without a
+    /// refresh interval of their own.
     #[serde(default = "default_refresh_minutes")]
     pub refresh_minutes: u64,
+    /// Per-Volume refresh interval in minutes, by mount point.
+    #[serde(default)]
+    pub volume_refresh_minutes: BTreeMap<PathBuf, u64>,
     /// Light, Dark, or following the system.
     #[serde(default)]
     pub theme: ThemeChoice,
@@ -42,6 +49,7 @@ impl Default for Settings {
             include: Vec::new(),
             exclude: Vec::new(),
             refresh_minutes: default_refresh_minutes(),
+            volume_refresh_minutes: BTreeMap::new(),
             theme: ThemeChoice::System,
         }
     }
@@ -66,6 +74,25 @@ impl Settings {
             (false, false) => self.exclude.push(volume.mount.clone()),
             _ => {}
         }
+    }
+
+    /// The refresh interval of the Volume mounted at `mount`, in minutes.
+    pub fn refresh_minutes_for(&self, mount: &Path) -> u64 {
+        self.volume_refresh_minutes
+            .get(mount)
+            .copied()
+            .unwrap_or(self.refresh_minutes)
+    }
+
+    /// The refresh interval of each of `volumes`.
+    pub fn intervals(&self, volumes: &[VolumeInfo]) -> HashMap<PathBuf, Duration> {
+        volumes
+            .iter()
+            .map(|v| {
+                let minutes = self.refresh_minutes_for(&v.mount).max(1);
+                (v.mount.clone(), Duration::from_secs(minutes * 60))
+            })
+            .collect()
     }
 
     pub fn load() -> Result<Settings, String> {
@@ -139,10 +166,15 @@ mod tests {
         s.set_indexed(&fixed, false);
         s.set_indexed(&usb, true);
         s.refresh_minutes = 5;
+        s.volume_refresh_minutes.insert(usb.mount.clone(), 90);
         s.theme = ThemeChoice::Dark;
         let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
         assert_eq!(back, s);
         assert!(!back.is_indexed(&fixed) && back.is_indexed(&usb));
+        assert_eq!(back.refresh_minutes_for(&fixed.mount), 5);
+        assert_eq!(back.refresh_minutes_for(&usb.mount), 90);
+        let intervals = back.intervals(&[fixed.clone(), usb.clone()]);
+        assert_eq!(intervals[&usb.mount], Duration::from_secs(90 * 60));
         // Restoring the default leaves no override behind.
         s.set_indexed(&fixed, true);
         assert!(s.exclude.is_empty());

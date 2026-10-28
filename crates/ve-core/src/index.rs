@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 /// Source of Index generations, shared by every Index in the process.
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -48,6 +49,13 @@ pub enum SyncState {
     Ntfs { journal_id: u64, next_usn: i64 },
 }
 
+/// A Volume's total and free bytes, as measured at a sync.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Capacity {
+    pub total: u64,
+    pub free: u64,
+}
+
 /// An Indexed Volume.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Volume {
@@ -55,6 +63,25 @@ pub struct Volume {
     pub fs_type: String,
     pub root: EntryId,
     pub sync: SyncState,
+    /// Last Synced: wall-clock seconds since the Unix epoch, `None` until the first sync completes.
+    pub last_synced: Option<i64>,
+    /// Capacity measured at that sync.
+    pub capacity: Option<Capacity>,
+}
+
+impl Volume {
+    /// Whether Catch-up should run at `now` (seconds since the Unix epoch): the Last Synced is
+    /// older than `interval`, missing, or in the future (the clock moved back). NTFS Volumes
+    /// always catch up because reading the change journal is cheap (ADR-0003).
+    pub fn needs_catch_up(&self, now: i64, interval: Duration) -> bool {
+        if matches!(self.sync, SyncState::Ntfs { .. }) {
+            return true;
+        }
+        match self.last_synced {
+            Some(at) => at > now || now - at >= i64::try_from(interval.as_secs()).unwrap_or(i64::MAX),
+            None => true,
+        }
+    }
 }
 
 const DIR: u8 = 1;
@@ -64,7 +91,8 @@ const NO_PARENT: u32 = u32::MAX;
 const NO_SLOT: u32 = u32::MAX;
 
 const MAGIC: &[u8; 8] = b"VEINDEX\0";
-const FORMAT_VERSION: u32 = 1;
+/// v2 adds Last Synced and capacity per Volume.
+const FORMAT_VERSION: u32 = 2;
 
 /// The persistent record of every Entry on every Indexed Volume.
 ///
@@ -132,6 +160,8 @@ impl Index {
             fs_type: fs_type.to_owned(),
             root,
             sync,
+            last_synced: None,
+            capacity: None,
         };
         let id = VolumeId(self.volumes.len() as u32);
         self.volumes.push(Some(volume));
@@ -160,6 +190,21 @@ impl Index {
             volume.sync = sync;
             self.touch();
         }
+    }
+
+    /// Records that `id` was brought fully up to date at `at` (seconds since the Unix epoch).
+    /// Does not change [`Index::generation`]: no Entry moved, so derived data stays valid.
+    pub fn mark_synced(&mut self, id: VolumeId, at: i64, capacity: Option<Capacity>) {
+        if let Some(Some(volume)) = self.volumes.get_mut(id.0 as usize) {
+            volume.last_synced = Some(at);
+            volume.capacity = capacity.or(volume.capacity);
+        }
+    }
+
+    /// The Last Synced of the least recently synced Volume. The outer `None` means there are no
+    /// Volumes; the inner `None` means some Volume has never finished a sync.
+    pub fn oldest_synced(&self) -> Option<Option<i64>> {
+        self.volumes().map(|(_, v)| v.last_synced).min()
     }
 
     /// The Volume whose root is `root`.
@@ -500,11 +545,24 @@ impl Index {
         input.read_exact(&mut magic)?;
         let mut version = [0u8; 4];
         input.read_exact(&mut version)?;
-        if &magic != MAGIC || u32::from_le_bytes(version) != FORMAT_VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "not a saved Index of this version",
-            ));
+        if &magic != MAGIC {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "not a saved Index"));
+        }
+        match u32::from_le_bytes(version) {
+            FORMAT_VERSION => {}
+            // Older layouts are not migrated: the Index is cheap to rebuild by a scan.
+            v if v < FORMAT_VERSION => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("saved by an older version (format {v}); needs rebuild"),
+                ));
+            }
+            v => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("saved by a newer version (format {v})"),
+                ));
+            }
         }
         let mut index: Index = bincode::deserialize_from(input)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
