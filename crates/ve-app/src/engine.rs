@@ -16,6 +16,8 @@ use ve_scan::{Progress, SharedIndex, VolumeInfo};
 
 /// How often a Volume kept current by the NTFS change journal is polled while the app runs.
 const JOURNAL_POLL: Duration = Duration::from_secs(5);
+/// How often the GUI is told to redraw the progress of a running sync.
+const PROGRESS_NUDGE: Duration = Duration::from_millis(250);
 /// Minimum time between View recomputations while the Index is being filled.
 const VIEW_THROTTLE: Duration = Duration::from_millis(800);
 /// How often changes picked up by journal polls are saved; a full save rewrites the Index.
@@ -284,6 +286,7 @@ fn reconcile_volumes(shared: &Shared, wanted: &[VolumeInfo]) -> Vec<VolumeId> {
 
 fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
     // Measuring (examples/gen_index.rs): the synthetic Index's Volume does not exist on disk.
+    #[cfg(feature = "bench")]
     if std::env::var_os("VE_BENCH_MOUNT").is_some() {
         return;
     }
@@ -308,14 +311,27 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
             started: Instant::now(),
         });
     }
-    thread::scope(|scope| {
-        for (id, mount) in &mounts {
-            scope.spawn(move || {
-                if let Err(e) = ve_scan::sync(&shared.index, *id, &shared.progress) {
-                    shared.report(format!("Could not read {}: {e}", mount.display()));
+    let done = AtomicBool::new(false);
+    thread::scope(|outer| {
+        // The entry count moves without a notice, so the GUI is nudged while a sync runs.
+        if !quiet {
+            outer.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    (shared.repaint)();
+                    thread::sleep(PROGRESS_NUDGE);
                 }
             });
         }
+        thread::scope(|scope| {
+            for (id, mount) in &mounts {
+                scope.spawn(move || {
+                    if let Err(e) = ve_scan::sync(&shared.index, *id, &shared.progress) {
+                        shared.report(format!("Could not read {}: {e}", mount.display()));
+                    }
+                });
+            }
+        });
+        done.store(true, Ordering::Relaxed);
     });
 }
 
