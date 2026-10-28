@@ -7,14 +7,15 @@ use crate::format;
 use crate::settings::{Settings, ThemeChoice};
 use crate::settings_page::{Changed, SettingsPage, apply_theme};
 use crate::tree::TreeList;
+use crate::trash::{self, Trash};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::table::{DataTable, TableState};
-use gpui_kit::component::{ActiveTheme as _, IconName, Theme, h_flex, v_flex};
+use gpui_kit::component::table::{DataTable, TableEvent, TableState};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _, Theme, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::borrow::Cow;
@@ -55,6 +56,8 @@ pub struct Shell {
     filters: Entity<FiltersPanel>,
     show_filters: bool,
     settings_page: Entity<SettingsPage>,
+    trash: Trash,
+    volumes: Vec<VolumeInfo>,
     startup_problems: Vec<String>,
 }
 
@@ -78,9 +81,11 @@ impl Shell {
         let repaint: Repaint = Arc::new(move || {
             let _ = wake.try_send(());
         });
-        let engine = Engine::start(repaint, indexed, refresh, categories);
+        let engine = Engine::start(repaint.clone(), indexed, refresh, categories);
 
-        let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes, window, cx));
+        let trash = Trash::new(engine.shared.clone(), repaint);
+
+        let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
         cx.subscribe(&settings_page, |this, _, changed: &Changed, _| {
             this.engine.set_volumes(changed.indexed.clone());
             this.engine.set_refresh(changed.refresh);
@@ -110,6 +115,8 @@ impl Shell {
         let tree = cx.new(|cx| {
             TableState::new(TreeList::new(engine.shared.clone()), window, cx).col_resizable(true)
         });
+
+        cx.subscribe(&table, |_, _, _: &TableEvent, cx| cx.notify()).detach();
 
         #[cfg(feature = "bench")]
         if std::env::var_os("VE_BENCH").is_some() {
@@ -142,6 +149,8 @@ impl Shell {
             filters,
             show_filters: false,
             settings_page,
+            trash,
+            volumes,
             startup_problems,
         }
     }
@@ -152,6 +161,8 @@ impl Shell {
         self.table.update(cx, |table, cx| {
             if table.delegate_mut().set_view(latest.clone()) {
                 table.refresh(cx);
+                // Row numbers mean something else in a new View.
+                table.clear_selection(cx);
             }
         });
         self.tree.update(cx, |table, cx| {
@@ -231,6 +242,43 @@ impl Shell {
             .border_color(cx.theme().border)
             .text_sm()
             .left(left)
+            .right(self.trash_controls(cx))
+    }
+
+    fn trash_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let size = self.trash.size();
+        let label = size.map_or_else(|| "Trash".to_owned(), |s| format!("{} in Trash", format::size(s)));
+        let mut controls = h_flex().gap_2().child(
+            Button::new("open-trash")
+                .ghost()
+                .xsmall()
+                .label(label)
+                .tooltip("Trashed files still take up space until the Trash is emptied. Click to open the Trash.")
+                .on_click(cx.listener(|this, _, window, cx| this.trash.open(window, cx))),
+        );
+        if trash::CAN_EMPTY {
+            controls = controls.child(
+                Button::new("empty-trash")
+                    .ghost()
+                    .xsmall()
+                    .label("Empty Trash")
+                    .disabled(size == Some(0))
+                    .on_click(cx.listener(|this, _, window, cx| this.trash.ask_empty(window, cx))),
+            );
+        }
+        controls
+    }
+
+    /// The Entry under the flat list's selected row.
+    fn selected_entry(&self, cx: &App) -> Option<ve_core::EntryId> {
+        let row = self.table.read(cx).selected_row()?;
+        self.table.read(cx).delegate().view.as_ref()?.flat.get(row).copied()
+    }
+
+    fn ask_trash_selected(&self, window: &mut Window, cx: &mut App) {
+        if let Some(id) = self.selected_entry(cx) {
+            self.trash.ask_trash(&[id], &self.volumes, window, cx);
+        }
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -269,11 +317,24 @@ impl Shell {
             .size_full()
             .gap_2()
             .p_3()
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "delete" && this.table.focus_handle(cx).is_focused(window) {
+                    this.ask_trash_selected(window, cx);
+                }
+            }))
             .child(
                 h_flex()
                     .gap_2()
                     .child(div().flex_1().child(Input::new(&self.query).cleanable(true)))
-                    .child(if self.show_filters { toggle.primary() } else { toggle }),
+                    .child(if self.show_filters { toggle.primary() } else { toggle })
+                    .child(
+                        Button::new("trash")
+                            .icon(IconName::Delete)
+                            .label("Move to Trash")
+                            .danger()
+                            .disabled(self.selected_entry(cx).is_none())
+                            .on_click(cx.listener(|this, _, window, cx| this.ask_trash_selected(window, cx))),
+                    ),
             )
             .when(self.show_filters, |c| c.child(self.filters.clone()))
             .child(

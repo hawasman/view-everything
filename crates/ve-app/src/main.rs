@@ -14,6 +14,7 @@ mod format;
 mod settings;
 mod settings_page;
 mod tree;
+mod trash;
 mod view;
 
 use gpui_kit::*;
