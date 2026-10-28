@@ -21,6 +21,9 @@ const VIEW_THROTTLE: Duration = Duration::from_millis(800);
 /// How often changes picked up by journal polls are saved; a full save rewrites the Index.
 const POLL_SAVE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
+/// Tells whichever GUI is showing the Engine that it should draw again.
+pub type Repaint = Arc<dyn Fn() + Send + Sync>;
+
 /// State shared between the UI and the background threads.
 pub struct Shared {
     pub index: SharedIndex,
@@ -33,7 +36,8 @@ pub struct Shared {
     busy: AtomicBool,
     /// Held while the Index is written to disk, so two saves never share the temporary file.
     saving: Mutex<()>,
-    ctx: egui::Context,
+    /// Called from the background threads whenever something the GUI shows has changed.
+    repaint: Repaint,
 }
 
 #[derive(Clone, Debug)]
@@ -72,7 +76,7 @@ pub struct Engine {
 impl Engine {
     /// Starts loading the saved Index, then Catch-up or a first scan of `volumes`.
     pub fn start(
-        ctx: egui::Context,
+        repaint: Repaint,
         volumes: Vec<VolumeInfo>,
         refresh: Duration,
         categories: CategoryMap,
@@ -88,7 +92,7 @@ impl Engine {
             query_error: Mutex::new(None),
             busy: AtomicBool::new(true),
             saving: Mutex::new(()),
-            ctx,
+            repaint,
         });
         let (commands, command_rx) = mpsc::channel();
         let (queries, query_rx) = mpsc::channel();
@@ -153,12 +157,12 @@ impl Engine {
 impl Shared {
     fn set_phase(&self, phase: Phase) {
         self.status.lock().phase = phase;
-        self.ctx.request_repaint();
+        (self.repaint)();
     }
 
     fn report(&self, problem: String) {
         self.status.lock().problem = Some(problem);
-        self.ctx.request_repaint();
+        (self.repaint)();
     }
 }
 
@@ -178,7 +182,7 @@ fn run_indexer(
             )),
         }
     }
-    shared.ctx.request_repaint();
+    (shared.repaint)();
 
     let mut saved_generation = shared.index.read().generation();
     let mut last_save = Instant::now();
@@ -279,6 +283,10 @@ fn reconcile_volumes(shared: &Shared, wanted: &[VolumeInfo]) -> Vec<VolumeId> {
 }
 
 fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
+    // Measuring (examples/gen_index.rs): the synthetic Index's Volume does not exist on disk.
+    if std::env::var_os("VE_BENCH_MOUNT").is_some() {
+        return;
+    }
     let (mounts, catching_up) = {
         let index = shared.index.read();
         let mounts: Vec<(VolumeId, PathBuf)> = volumes
@@ -349,7 +357,7 @@ fn run_viewer(shared: &Shared, queries: &Receiver<String>, categories: &Category
                     }
                     Err(e) => {
                         *shared.query_error.lock() = Some(e.to_string());
-                        shared.ctx.request_repaint();
+                        (shared.repaint)();
                         continue;
                     }
                 }
@@ -375,6 +383,6 @@ fn run_viewer(shared: &Shared, queries: &Receiver<String>, categories: &Category
         *shared.view.lock() = Some(Arc::new(view));
         computed = Some((text.clone(), generation));
         last_compute = Instant::now();
-        shared.ctx.request_repaint();
+        (shared.repaint)();
     }
 }
