@@ -126,7 +126,7 @@ fn failures_are_reported_and_leave_the_index_alone() {
 fn a_remote_survives_a_save_and_is_not_swept_up_as_an_offline_volume() {
     let index = SharedIndex::new(Index::new());
     let remote = Remote::new("me@box", "/srv/backup/").unwrap();
-    assert_eq!(remote.path, "/srv/backup");
+    assert_eq!(remote.identity(), "ssh:me@box:/srv/backup");
     assert_eq!(ve_scan::reconcile_remotes(&index, std::slice::from_ref(&remote)).len(), 1);
     // Already known: nothing to add.
     assert!(ve_scan::reconcile_remotes(&index, std::slice::from_ref(&remote)).is_empty());

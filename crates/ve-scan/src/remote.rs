@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering;
-use ve_core::{EntryId, EntryMeta, Remote, SyncState, VolumeId};
+use ve_core::{EntryId, EntryMeta, Remote, SshRemote, SyncState, VolumeId};
 
 /// One record per Entry, NUL-terminated so a name may hold anything but NUL; the name is last
 /// so that a tab inside it stays inside it. Fields: inode, link count, size in bytes, 512-byte
@@ -85,13 +85,7 @@ fn command_line(root: &str) -> String {
 /// wanted. A Remote is always online. Returns the Remotes newly added, to sync now.
 pub fn reconcile_remotes(index: &SharedIndex, wanted: &[Remote]) -> Vec<VolumeId> {
     let mut index = index.write();
-    let known: Vec<_> = index
-        .volumes()
-        .filter_map(|(id, v)| match &v.sync {
-            SyncState::Ssh(r) => Some((id, r.clone())),
-            _ => None,
-        })
-        .collect();
+    let known: Vec<_> = index.volumes().filter_map(|(id, v)| Some((id, v.remote()?))).collect();
     for (id, remote) in &known {
         if wanted.contains(remote) {
             let mount = index.volume(*id).map(|v| v.mount.clone());
@@ -109,7 +103,8 @@ pub fn reconcile_remotes(index: &SharedIndex, wanted: &[Remote]) -> Vec<VolumeId
 
 /// Brings a Remote's Entries up to date with what its server lists now.
 pub fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::Result<()> {
-    sync_with("ssh", index, volume, progress)
+    let s3 = matches!(index.read().volume(volume).map(|v| &v.sync), Some(SyncState::S3(_)));
+    if s3 { crate::s3::sync(index, volume, progress) } else { sync_with("ssh", index, volume, progress) }
 }
 
 /// [`sync`] through the `ssh` program `program` (a test double, or the system one).
@@ -155,7 +150,7 @@ pub fn sync_with(program: &str, index: &SharedIndex, volume: VolumeId, progress:
                     buf.pop();
                 }
                 match Record::parse(&buf) {
-                    Some(record) => batch.push(record),
+                    Some(record) => batch.push((record.path.clone(), record.meta())),
                     None => malformed = true,
                 }
                 if batch.len() >= BATCH {
@@ -190,7 +185,7 @@ pub fn sync_with(program: &str, index: &SharedIndex, volume: VolumeId, progress:
 }
 
 /// Why the run failed, in words for the user, or `None` if it produced a listing.
-fn failure(remote: &Remote, code: Option<i32>, records: u64, stderr: &str) -> Option<io::Error> {
+fn failure(remote: &SshRemote, code: Option<i32>, records: u64, stderr: &str) -> Option<io::Error> {
     let message = stderr.trim().lines().last().unwrap_or("").trim();
     let host = &remote.host;
     let err = |kind, text: String| Some(io::Error::new(kind, text));
@@ -215,7 +210,7 @@ fn failure(remote: &Remote, code: Option<i32>, records: u64, stderr: &str) -> Op
 ///
 /// ponytail: a refresh maps every existing Entry by (parent, name) in memory; a stream-diff
 /// would need less but the Remotes this is for are one machine's folders.
-struct Applier<'a> {
+pub(crate) struct Applier<'a> {
     index: &'a SharedIndex,
     progress: &'a Progress,
     root: EntryId,
@@ -223,11 +218,11 @@ struct Applier<'a> {
     dirs: HashMap<String, EntryId>,
     /// Entries already in the Index that the listing has not mentioned yet.
     unseen: HashMap<(EntryId, String), EntryId>,
-    records: u64,
+    pub(crate) records: u64,
 }
 
 impl<'a> Applier<'a> {
-    fn new(index: &'a SharedIndex, root: EntryId, progress: &'a Progress) -> Self {
+    pub(crate) fn new(index: &'a SharedIndex, root: EntryId, progress: &'a Progress) -> Self {
         let mut dirs = HashMap::from([(String::new(), root)]);
         let mut unseen = HashMap::new();
         {
@@ -247,20 +242,19 @@ impl<'a> Applier<'a> {
         Applier { index, progress, root, dirs, unseen, records: 0 }
     }
 
-    fn apply(&mut self, batch: &mut Vec<Record>) {
+    pub(crate) fn apply(&mut self, batch: &mut Vec<(String, EntryMeta)>) {
         if batch.is_empty() {
             return;
         }
         let mut index = self.index.write();
-        for record in batch.drain(..) {
+        for (path, meta) in batch.drain(..) {
             self.records += 1;
             self.progress.entries.fetch_add(1, Ordering::Relaxed);
-            let meta = record.meta();
-            if record.path.is_empty() {
+            if path.is_empty() {
                 index.update(self.root, meta);
                 continue;
             }
-            let (parent_path, name) = record.path.rsplit_once('/').unwrap_or(("", &record.path));
+            let (parent_path, name) = path.rsplit_once('/').unwrap_or(("", &path));
             let Some(&parent) = self.dirs.get(parent_path) else { continue };
             let id = match self.unseen.get(&(parent, name.to_owned())) {
                 Some(&id) if index.is_dir(id) == meta.is_dir => {
@@ -272,13 +266,13 @@ impl<'a> Applier<'a> {
                 _ => index.insert(parent, name, meta),
             };
             if meta.is_dir {
-                self.dirs.insert(record.path, id);
+                self.dirs.insert(path, id);
             }
         }
     }
 
     /// Removes Entries the listing no longer has.
-    fn prune(self) {
+    pub(crate) fn prune(self) {
         let gone: std::collections::HashSet<EntryId> = self.unseen.values().copied().collect();
         let mut by_parent: HashMap<EntryId, Vec<EntryId>> = HashMap::new();
         let mut index = self.index.write();
@@ -328,7 +322,7 @@ mod tests {
 
     #[test]
     fn failures_read_as_what_to_do() {
-        let r = Remote::new("me@box", "/srv").unwrap();
+        let r = SshRemote { host: "me@box".into(), path: "/srv".into() };
         let why = |code, records, stderr: &str| failure(&r, code, records, stderr).map(|e| e.to_string());
         assert_eq!(why(Some(0), 3, ""), None);
         assert_eq!(why(Some(1), 3, "find: './x': Permission denied"), None);

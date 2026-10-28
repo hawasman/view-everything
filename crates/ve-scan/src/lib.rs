@@ -9,6 +9,7 @@ pub mod ntfs;
 mod platform;
 mod reconcile;
 pub mod remote;
+pub mod s3;
 mod volumes;
 mod walk;
 pub mod watch;
