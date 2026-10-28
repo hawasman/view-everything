@@ -4,12 +4,13 @@ use crate::engine::{Engine, Phase, Repaint};
 use crate::explorer::FlatList;
 use crate::format;
 use crate::settings::{Settings, ThemeChoice};
+use crate::settings_page::{Changed, SettingsPage, apply_theme};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::table::{DataTable, TableState};
-use gpui_kit::component::{ActiveTheme as _, IconName, Theme, ThemeMode, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, IconName, Theme, h_flex, v_flex};
 use gpui_kit::*;
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -39,11 +40,7 @@ pub fn init_theme(choice: ThemeChoice, cx: &mut App) {
     let theme = Theme::global_mut(cx);
     theme.font_family = "Geist".into();
     theme.mono_font_family = "Geist Mono".into();
-    match choice {
-        ThemeChoice::System => Theme::sync_system_appearance(None, cx),
-        ThemeChoice::Light => Theme::change(ThemeMode::Light, None, cx),
-        ThemeChoice::Dark => Theme::change(ThemeMode::Dark, None, cx),
-    }
+    apply_theme(choice, cx);
 }
 
 pub struct Shell {
@@ -53,8 +50,7 @@ pub struct Shell {
     table: Entity<TableState<FlatList>>,
     /// Set by the Engine's threads; cleared when the window has caught up.
     changed: Arc<AtomicBool>,
-    settings: Settings,
-    volumes: Vec<VolumeInfo>,
+    settings_page: Entity<SettingsPage>,
     startup_problems: Vec<String>,
 }
 
@@ -79,6 +75,13 @@ impl Shell {
             Arc::new(move || changed.store(true, Ordering::Relaxed))
         };
         let engine = Engine::start(repaint, indexed, refresh, categories);
+
+        let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes, window, cx));
+        cx.subscribe(&settings_page, |this, _, changed: &Changed, _| {
+            this.engine.set_volumes(changed.indexed.clone());
+            this.engine.set_refresh(changed.refresh);
+        })
+        .detach();
 
         let query = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Search names, or try size:>1gb type:video")
@@ -119,8 +122,7 @@ impl Shell {
             query,
             table,
             changed,
-            settings,
-            volumes,
+            settings_page,
             startup_problems,
         }
     }
@@ -256,13 +258,6 @@ impl Shell {
             volumes
         ))
     }
-
-    fn settings_page(&self) -> impl IntoElement {
-        v_flex().p_4().gap_2().children(self.volumes.iter().map(|v| {
-            let state = if self.settings.is_indexed(v) { "indexed" } else { "not indexed" };
-            format!("{} — {state}", v.mount.display())
-        }))
-    }
 }
 
 impl Render for Shell {
@@ -270,7 +265,7 @@ impl Render for Shell {
         let page = match self.page {
             Page::Dashboard => self.dashboard().into_any_element(),
             Page::Explorer => self.explorer().into_any_element(),
-            Page::Settings => self.settings_page().into_any_element(),
+            Page::Settings => self.settings_page.clone().into_any_element(),
         };
         v_flex()
             .size_full()
