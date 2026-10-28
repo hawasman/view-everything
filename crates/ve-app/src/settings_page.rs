@@ -3,7 +3,10 @@
 use crate::settings::{Settings, ThemeChoice};
 use crate::theme::{self, SERIF_FAMILY, palette};
 use crate::ui::{caption, panel, pill, tag, Tone};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
+use gpui_kit::component::IndexPath;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -12,7 +15,27 @@ use crate::engine::Intervals;
 use std::path::PathBuf;
 use ve_scan::VolumeInfo;
 
-const REFRESH_RANGE: std::ops::RangeInclusive<u64> = 1..=1440;
+/// The refresh choices, in minutes; 0 is Manual (never re-read while running).
+const REFRESH_CHOICES: [u64; 6] = [15, 30, 60, 120, 360, 0];
+
+#[derive(Clone)]
+struct Every(u64);
+
+impl SelectItem for Every {
+    type Value = u64;
+    fn value(&self) -> &u64 {
+        &self.0
+    }
+    fn title(&self) -> SharedString {
+        match self.0 {
+            0 => "Manual".into(),
+            m if m % 60 == 0 => format!("{} h", m / 60).into(),
+            m => format!("{m} min").into(),
+        }
+    }
+}
+
+type RefreshSelect = Entity<SelectState<Vec<Every>>>;
 
 /// What the Engine must be told after the user changes a setting.
 pub struct Changed {
@@ -29,9 +52,9 @@ pub struct SettingsPage {
     /// Offline Volumes as (identity, last mount path).
     offline: Vec<(String, PathBuf)>,
     volumes: Vec<VolumeInfo>,
-    refresh: Entity<InputState>,
-    /// One refresh-interval field per Volume, in `volumes` order.
-    volume_refresh: Vec<Entity<InputState>>,
+    refresh: RefreshSelect,
+    /// One refresh-interval select per Volume, in `volumes` order.
+    volume_refresh: Vec<RefreshSelect>,
     /// Set when the settings file could not be written.
     problem: Option<String>,
     /// Fields of the Add Remote dialog.
@@ -52,58 +75,11 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let minutes_input = |minutes: u64, window: &mut Window, cx: &mut Context<Self>| {
-            let input = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .step(1.0)
-                    .min(*REFRESH_RANGE.start() as f64)
-                    .max(*REFRESH_RANGE.end() as f64)
-            });
-            input.update(cx, |input, cx| input.set_value(minutes.to_string(), window, cx));
-            input
-        };
-        let refresh = minutes_input(settings.refresh_minutes, window, cx);
-        let volume_refresh: Vec<_> = volumes
+        let refresh = Self::refresh_select(settings.refresh_minutes, None, window, cx);
+        let volume_refresh = volumes
             .iter()
-            .map(|v| minutes_input(settings.refresh_minutes_for(v), window, cx))
+            .map(|v| Self::refresh_select(settings.refresh_minutes_for(v), Some(v.identity.clone()), window, cx))
             .collect();
-        for (ix, input) in volume_refresh.iter().enumerate() {
-            // Same rule as the default field: taken on Enter or when the field is left.
-            cx.subscribe_in(input, window, move |this, input, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } | InputEvent::Blur = event {
-                    let volume = this.volumes[ix].clone();
-                    let minutes = input.read(cx).value().trim().parse::<u64>().ok();
-                    if let Some(m) = minutes.filter(|m| REFRESH_RANGE.contains(m))
-                        && m != this.settings.refresh_minutes_for(&volume)
-                    {
-                        this.settings.volume_refresh_minutes.insert(volume.identity.clone(), m);
-                        this.commit(cx);
-                    }
-                    let text = this.settings.refresh_minutes_for(&volume).to_string();
-                    input.update(cx, |input, cx| input.set_value(text, window, cx));
-                }
-            })
-            .detach();
-        }
-        cx.subscribe_in(&refresh, window, |this, input, event: &InputEvent, window, cx| {
-            match event {
-                // Typing "15" must not apply 1 on the way, so the value is taken on Enter or when
-                // the field is left; junk puts the applied value back.
-                InputEvent::PressEnter { .. } | InputEvent::Blur => {
-                    let minutes = input.read(cx).value().trim().parse::<u64>().ok();
-                    if let Some(m) = minutes.filter(|m| REFRESH_RANGE.contains(m))
-                        && m != this.settings.refresh_minutes
-                    {
-                        this.settings.refresh_minutes = m;
-                        this.commit(cx);
-                    }
-                    let text = this.settings.refresh_minutes.to_string();
-                    input.update(cx, |input, cx| input.set_value(text, window, cx));
-                }
-                _ => {}
-            }
-        })
-        .detach();
         let remote_host = cx.new(|cx| InputState::new(window, cx).placeholder("user@host"));
         let remote_path = cx.new(|cx| InputState::new(window, cx).placeholder("/srv/backup"));
         Self {
@@ -116,6 +92,27 @@ impl SettingsPage {
             remote_host,
             remote_path,
         }
+    }
+
+    /// A select of refresh choices (plus the stored value if it is not one of them) that stores
+    /// the pick for the Volume `identity`, or as the default when there is none.
+    fn refresh_select(minutes: u64, identity: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> RefreshSelect {
+        let mut items: Vec<Every> = REFRESH_CHOICES.map(Every).into();
+        if !REFRESH_CHOICES.contains(&minutes) {
+            items.insert(items.len() - 1, Every(minutes));
+        }
+        let at = items.iter().position(|e| e.0 == minutes);
+        let select = cx.new(|cx| SelectState::new(items, at.map(IndexPath::new), window, cx));
+        cx.subscribe(&select, move |this, _, event: &SelectEvent<Vec<Every>>, cx| {
+            let SelectEvent::Confirm(Some(m)) = event else { return };
+            match &identity {
+                Some(id) => this.settings.volume_refresh_minutes.insert(id.clone(), *m),
+                None => std::mem::replace(&mut this.settings.refresh_minutes, *m).into(),
+            };
+            this.commit(cx);
+        })
+        .detach();
+        select
     }
 
     pub fn has_problem(&self) -> bool {
@@ -159,6 +156,7 @@ impl SettingsPage {
     fn offline_row(&self, ix: usize, first: bool, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
         let (identity, mount) = self.offline[ix].clone();
+        let forget_mount = mount.clone();
         h_flex()
             .min_h(px(62.))
             .py(px(8.))
@@ -179,7 +177,7 @@ impl SettingsPage {
                     )
                     .child(div().text_xs().text_color(p.muted).child("Searchable, not changeable")),
             )
-            .child(div().w(px(150.)).flex_none())
+            .child(self.static_field("On plug-in", cx))
             .child(div().w(px(36.)).flex_none())
             .child(
                 div()
@@ -191,7 +189,7 @@ impl SettingsPage {
                     .text_color(p.accent)
                     .child("Forget")
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings.forget(&identity);
+                        this.settings.forget(&identity, &forget_mount);
                         this.commit(cx);
                         cx.emit(Forget(identity.clone()));
                     })),
@@ -199,23 +197,24 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// A pill-shaped minutes field: the number, then its unit.
-    fn minutes_field(&self, input: &Entity<InputState>, cx: &App) -> Div {
+    fn refresh_field(&self, select: &RefreshSelect) -> Div {
+        div().w(px(150.)).flex_none().child(Select::new(select).w_full().small())
+    }
+
+    /// The read-only stand-in for a select, as an Offline Volume's refresh interval.
+    fn static_field(&self, text: &'static str, cx: &App) -> Div {
         let p = palette(cx);
         h_flex()
-            .h(px(36.))
+            .h(px(32.))
             .w(px(150.))
             .flex_none()
-            .pl(px(6.))
-            .pr(px(14.))
-            .gap(px(4.))
+            .px(px(14.))
             .items_center()
             .rounded_full()
             .border_1()
             .border_color(p.control)
-            .bg(p.ground)
-            .child(div().w(px(34.)).flex_none().child(Input::new(input).appearance(false).bordered(false)))
-            .child(div().text_color(p.muted).child("min"))
+            .text_color(p.muted)
+            .child(text)
     }
 
     fn volume_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -249,7 +248,7 @@ impl SettingsPage {
                     )
                     .child(div().text_xs().text_color(muted).truncate().child(notes.join(" · "))),
             )
-            .child(self.minutes_field(&self.volume_refresh[ix], cx))
+            .child(self.refresh_field(&self.volume_refresh[ix]))
             .child(
                 div().w(px(36.)).flex_none().child(
                     Switch::new(("volume", ix))
@@ -426,7 +425,7 @@ impl Render for SettingsPage {
                     div().text_xs().text_color(muted).child("For Volumes without their own interval, re-read while running"),
                 ),
             )
-            .child(self.minutes_field(&self.refresh, cx))
+            .child(self.refresh_field(&self.refresh))
             .child(div().w(px(36.)).flex_none())
             .child(div().w(px(64.)).flex_none());
         let locations = panel(cx)
@@ -487,34 +486,7 @@ impl SettingsPage {
     pub fn set_mounted(&mut self, volumes: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) {
         self.volume_refresh = volumes
             .iter()
-            .map(|v| {
-                let input = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .step(1.0)
-                        .min(*REFRESH_RANGE.start() as f64)
-                        .max(*REFRESH_RANGE.end() as f64)
-                });
-                let text = self.settings.refresh_minutes_for(v).to_string();
-                input.update(cx, |input, cx| input.set_value(text, window, cx));
-                let identity = v.identity.clone();
-                cx.subscribe_in(&input, window, move |this, input, event: &InputEvent, window, cx| {
-                    if let InputEvent::PressEnter { .. } | InputEvent::Blur = event
-                        && let Some(volume) = this.volumes.iter().find(|v| v.identity == identity).cloned()
-                    {
-                        let minutes = input.read(cx).value().trim().parse::<u64>().ok();
-                        if let Some(m) = minutes.filter(|m| REFRESH_RANGE.contains(m))
-                            && m != this.settings.refresh_minutes_for(&volume)
-                        {
-                            this.settings.volume_refresh_minutes.insert(identity.clone(), m);
-                            this.commit(cx);
-                        }
-                        let text = this.settings.refresh_minutes_for(&volume).to_string();
-                        input.update(cx, |input, cx| input.set_value(text, window, cx));
-                    }
-                })
-                .detach();
-                input
-            })
+            .map(|v| Self::refresh_select(self.settings.refresh_minutes_for(v), Some(v.identity.clone()), window, cx))
             .collect();
         self.volumes = volumes;
         // Nothing to save: only what is mounted changed (and a settings file that could not be

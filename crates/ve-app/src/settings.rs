@@ -99,7 +99,7 @@ impl Settings {
     }
 
     /// The Volumes in `now` that were not mounted `before` and are worth offering to index:
-    /// opt-in (removable or a network share), not indexed, not declined, and not already in the
+    /// removable (a network share is listed in Settings, not offered), not indexed, not declined, and not already in the
     /// Index (`in_index`, by identity: a returning Offline Volume catches up on its own).
     pub fn index_offers(
         &self,
@@ -108,16 +108,17 @@ impl Settings {
         in_index: impl Fn(&str) -> bool,
     ) -> Vec<VolumeInfo> {
         now.iter()
-            .filter(|v| v.opt_in() && !self.is_indexed(v))
+            .filter(|v| v.removable && !v.network && !self.is_indexed(v))
             .filter(|v| !before.iter().any(|b| b.identity == v.identity))
             .filter(|v| !self.declined.contains(&v.identity) && !in_index(&v.identity))
             .cloned()
             .collect()
     }
 
-    /// Drops everything remembered about the Volume `identity`.
-    pub fn forget(&mut self, identity: &str) {
-        let is = |k: &String| k == identity;
+    /// Drops everything remembered about the Volume `identity`, also under its older
+    /// mount-path key.
+    pub fn forget(&mut self, identity: &str, mount: &Path) {
+        let is = |k: &String| k == identity || Path::new(k) == mount;
         self.include.retain(|k| !is(k));
         self.exclude.retain(|k| !is(k));
         self.declined.retain(|k| !is(k));
@@ -140,8 +141,12 @@ impl Settings {
         volumes
             .iter()
             .map(|v| {
-                let minutes = self.refresh_minutes_for(v).max(1);
-                (v.mount.clone(), Duration::from_secs(minutes * 60))
+                // ponytail: Manual (0) is an interval too long to ever come due.
+                let secs = match self.refresh_minutes_for(v) {
+                    0 => u32::MAX as u64,
+                    m => m * 60,
+                };
+                (v.mount.clone(), Duration::from_secs(secs))
             })
             .collect()
     }
@@ -274,7 +279,7 @@ mod tests {
         let old: Settings = toml::from_str("include = [\"/run/media/me/usb\"]").unwrap();
         assert!(old.is_indexed(&usb));
 
-        s.forget(&usb.identity);
+        s.forget(&usb.identity, &usb.mount);
         assert!(!s.is_indexed(&usb));
         assert!(s.include.is_empty() && s.volume_refresh_minutes.is_empty());
     }
@@ -301,7 +306,7 @@ mod tests {
         s.set_indexed(&usb, true);
         assert!(s.declined.is_empty() && s.is_indexed(&usb));
         s.decline(&usb);
-        s.forget(&usb.identity);
+        s.forget(&usb.identity, &usb.mount);
         assert!(s.declined.is_empty());
     }
 }

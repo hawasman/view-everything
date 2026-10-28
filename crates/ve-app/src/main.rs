@@ -68,6 +68,20 @@ fn main() {
         volumes.retain(|v| list.split(',').any(|m| v.mount == std::path::Path::new(m)));
     }
 
+    // Screenshots: VE_FAKE_SHARE=/mnt/nas adds a network share that is not really there.
+    #[cfg(feature = "bench")]
+    if let Some(mount) = std::env::var_os("VE_FAKE_SHARE") {
+        volumes.push(ve_scan::VolumeInfo {
+            mount: mount.into(),
+            identity: "nfs:nas.local:/export".into(),
+            fs_type: "nfs4".into(),
+            label: "nas.local:/export".into(),
+            removable: false,
+            network: true,
+            read_only: false,
+        });
+    }
+
     gpui_kit::application()
         .with_assets(theme::Assets)
         .run(move |cx| {
