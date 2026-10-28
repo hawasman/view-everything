@@ -96,7 +96,7 @@ fn ntfs_volumes_always_catch_up() {
 
 #[test]
 fn the_overall_last_synced_is_the_oldest_volume() {
-    let mut index = Index::new();
+    let index = Index::new();
     assert_eq!(index.oldest_synced(), None);
     let mut index = index_with(&["/a", "/b"]);
     let ids: Vec<_> = index.volumes().map(|(id, _)| id).collect();
