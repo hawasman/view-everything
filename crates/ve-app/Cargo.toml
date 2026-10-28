@@ -9,7 +9,12 @@ license.workspace = true
 name = "view-everything"
 path = "src/main.rs"
 
+[features]
+# Measurement hooks: VE_BENCH (scroll timing) and VE_BENCH_MOUNT (synthetic Index; see examples/gen_index.rs).
+bench = []
+
 [dependencies]
+async-channel = "2.5.0"
 chrono = "0.4.45"
 dirs = "7.0.0"
 gpui-kit = "0.8.1"

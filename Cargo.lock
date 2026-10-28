@@ -6794,6 +6794,7 @@ dependencies = [
 name = "ve-app"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "chrono",
  "dirs 7.0.0",
  "gpui-kit",

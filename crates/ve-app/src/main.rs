@@ -5,12 +5,14 @@
 #![allow(dead_code)]
 
 mod app;
+#[cfg(feature = "bench")]
 mod bench;
 mod engine;
 mod explorer;
 mod format;
 mod settings;
 mod settings_page;
+mod tree;
 mod view;
 
 use gpui_kit::*;
@@ -40,8 +42,10 @@ fn main() {
         problems.push(format!("Category overrides ignored: {e}"));
         ve_core::CategoryMap::builtin()
     });
+    #[cfg_attr(not(feature = "bench"), allow(unused_mut))]
     let mut volumes = ve_scan::discover_volumes();
     // Measuring: index only the named Volume (see examples/gen_index.rs) instead of this machine's.
+    #[cfg(feature = "bench")]
     if let Some(mount) = std::env::var_os("VE_BENCH_MOUNT") {
         volumes = vec![ve_scan::VolumeInfo {
             mount: mount.into(),

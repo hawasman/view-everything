@@ -2,6 +2,7 @@
 
 use crate::engine::{Engine, Phase, Repaint};
 use crate::explorer::FlatList;
+use crate::tree::TreeList;
 use crate::format;
 use crate::settings::{Settings, ThemeChoice};
 use crate::settings_page::{Changed, SettingsPage, apply_theme};
@@ -9,18 +10,15 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::status_bar::StatusBar;
+use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::{ActiveTheme as _, IconName, Theme, h_flex, v_flex};
 use gpui_kit::*;
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use ve_core::CategoryMap;
 use ve_scan::VolumeInfo;
-
-/// How often the window looks for changes the Engine's threads have reported.
-const POLL: Duration = Duration::from_millis(50);
 
 const GEIST: &[u8] = include_bytes!("../assets/fonts/Geist-Variable.ttf");
 const GEIST_MONO: &[u8] = include_bytes!("../assets/fonts/GeistMono-Variable.ttf");
@@ -48,8 +46,9 @@ pub struct Shell {
     page: Page,
     query: Entity<InputState>,
     table: Entity<TableState<FlatList>>,
-    /// Set by the Engine's threads; cleared when the window has caught up.
-    changed: Arc<AtomicBool>,
+    tree: Entity<TableState<TreeList>>,
+    /// Whether the Explorer shows the tree rather than the flat list.
+    show_tree: bool,
     settings_page: Entity<SettingsPage>,
     startup_problems: Vec<String>,
 }
@@ -69,11 +68,11 @@ impl Shell {
             .cloned()
             .collect();
         let refresh = Duration::from_secs(settings.refresh_minutes.max(1) * 60);
-        let changed = Arc::new(AtomicBool::new(true));
-        let repaint: Repaint = {
-            let changed = changed.clone();
-            Arc::new(move || changed.store(true, Ordering::Relaxed))
-        };
+        // One pending wake-up is enough: the window then reads everything that changed.
+        let (wake, woken) = async_channel::bounded::<()>(1);
+        let repaint: Repaint = Arc::new(move || {
+            let _ = wake.try_send(());
+        });
         let engine = Engine::start(repaint, indexed, refresh, categories);
 
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes, window, cx));
@@ -95,13 +94,17 @@ impl Shell {
         let list = FlatList::new(engine.shared.clone());
         let table = cx.new(|cx| TableState::new(list, window, cx).col_resizable(true));
 
+        let tree = cx.new(|cx| {
+            TableState::new(TreeList::new(engine.shared.clone()), window, cx).col_resizable(true)
+        });
+
+        #[cfg(feature = "bench")]
         if std::env::var_os("VE_BENCH").is_some() {
             crate::bench::start(table.clone(), window);
         }
 
         cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(POLL).await;
+            while woken.recv().await.is_ok() {
                 if this.update(cx, |this, cx| this.poll(cx)).is_err() {
                     break;
                 }
@@ -121,7 +124,8 @@ impl Shell {
             page: Page::Explorer,
             query,
             table,
-            changed,
+            tree,
+            show_tree: true,
             settings_page,
             startup_problems,
         }
@@ -129,20 +133,14 @@ impl Shell {
 
     /// Picks up what the Engine's threads changed since the last look.
     fn poll(&mut self, cx: &mut Context<Self>) {
-        let busy = !matches!(self.engine.shared.status.lock().phase, Phase::Idle);
-        if !self.changed.swap(false, Ordering::Relaxed) && !busy {
-            return;
-        }
         let latest = self.engine.shared.view.lock().clone();
         self.table.update(cx, |table, cx| {
-            let current = &table.delegate().view;
-            let same = match (current, &latest) {
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                (None, None) => true,
-                _ => false,
-            };
-            if !same {
-                table.delegate_mut().view = latest;
+            if table.delegate_mut().set_view(latest.clone()) {
+                table.refresh(cx);
+            }
+        });
+        self.tree.update(cx, |table, cx| {
+            if table.delegate_mut().set_view(latest) {
                 table.refresh(cx);
             }
         });
@@ -240,13 +238,29 @@ impl Shell {
         )
     }
 
-    fn explorer(&self) -> impl IntoElement {
+    fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let list = if self.show_tree {
+            DataTable::new(&self.tree).into_any_element()
+        } else {
+            DataTable::new(&self.table).into_any_element()
+        };
         v_flex()
             .size_full()
             .gap_2()
             .p_3()
             .child(Input::new(&self.query).cleanable(true))
-            .child(div().flex_1().min_h_0().child(DataTable::new(&self.table)))
+            .child(
+                TabBar::new("explorer-lists")
+                    .segmented()
+                    .selected_index(if self.show_tree { 0 } else { 1 })
+                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                        this.show_tree = *ix == 0;
+                        cx.notify();
+                    }))
+                    .child(Tab::new().label("Tree"))
+                    .child(Tab::new().label("Flat list")),
+            )
+            .child(div().flex_1().min_h_0().child(list))
     }
 
     fn dashboard(&self) -> impl IntoElement {
@@ -264,7 +278,7 @@ impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page = match self.page {
             Page::Dashboard => self.dashboard().into_any_element(),
-            Page::Explorer => self.explorer().into_any_element(),
+            Page::Explorer => self.explorer(cx).into_any_element(),
             Page::Settings => self.settings_page.clone().into_any_element(),
         };
         v_flex()

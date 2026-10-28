@@ -11,6 +11,15 @@ const EXTENSIONS_PER_CATEGORY: usize = 12;
 
 static NEXT_VIEW_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Whether two optional Views are the very same computation.
+pub fn same(a: &Option<std::sync::Arc<View>>, b: &Option<std::sync::Arc<View>>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 pub struct View {
     /// Unique per computed View; caches of derived drawing data key on it.
     pub id: u64,
