@@ -225,12 +225,16 @@ fn run_indexer(
     reconcile_volumes(shared, &wanted);
     // The saved Index is already on screen; Catch-up runs only where it has gone stale.
     let mut pending = stale_volumes(&shared.index.read(), &intervals, now_secs());
+    // When each Volume was last tried, so one that keeps failing is not retried on every
+    // journal poll.
+    let mut last_attempt: HashMap<VolumeId, Instant> = HashMap::new();
     // Journal polls run every few seconds; they neither show as busy nor save every time.
     let mut quiet = false;
     loop {
         if !pending.is_empty() {
             sync_volumes(shared, &pending, quiet);
-            pending.clear();
+            let now = Instant::now();
+            last_attempt.extend(pending.drain(..).map(|id| (id, now)));
             if !quiet || last_save.elapsed() >= POLL_SAVE_INTERVAL {
                 // Last Synced moved even when no Entry did, and a restart relies on it.
                 save_if_changed(shared, index_path.as_deref(), &mut saved_generation, !quiet);
@@ -275,6 +279,10 @@ fn run_indexer(
             }
             Err(RecvTimeoutError::Timeout) => {
                 pending = stale_volumes(&shared.index.read(), &intervals, now_secs());
+                pending.retain(|id| {
+                    journaled.contains(id)
+                        || last_attempt.get(id).is_none_or(|t| t.elapsed() >= MIN_WAIT)
+                });
                 quiet = pending.iter().all(|id| journaled.contains(id));
             }
         }
@@ -309,7 +317,7 @@ fn next_wait(index: &Index, intervals: &Intervals, now: i64) -> Duration {
             let interval = interval_of(intervals, &v.mount);
             match v.last_synced {
                 Some(at) if at <= now => {
-                    let age = Duration::from_secs((now - at) as u64);
+                    let age = Duration::from_secs(u64::try_from(now.saturating_sub(at)).unwrap_or(0));
                     interval.saturating_sub(age)
                 }
                 _ => interval,
@@ -415,11 +423,13 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
             for (id, mount) in &mounts {
                 scope.spawn(move || {
                     let cause = format!("volume {}", mount.display());
+                    // Stamped before the walk: changes made while it runs are not covered.
+                    let started = now_secs();
                     match ve_scan::sync(&shared.index, *id, &shared.progress) {
                         Ok(_) => {
                             shared.resolve(&cause);
                             let capacity = ve_scan::capacity(mount);
-                            shared.index.write().mark_synced(*id, now_secs(), capacity);
+                            shared.index.write().mark_synced(*id, started, capacity);
                         }
                         Err(e) => shared
                             .report(cause, format!("Could not read {}: {e}", mount.display())),
@@ -434,7 +444,7 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
 /// Saves the Index if an Entry changed since the last save, or always when `force`.
 fn save_if_changed(
     shared: &Shared,
-    path: Option<&std::path::Path>,
+    path: Option<&Path>,
     saved_generation: &mut u64,
     force: bool,
 ) {

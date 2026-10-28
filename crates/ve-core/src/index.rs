@@ -197,7 +197,7 @@ impl Index {
     pub fn mark_synced(&mut self, id: VolumeId, at: i64, capacity: Option<Capacity>) {
         if let Some(Some(volume)) = self.volumes.get_mut(id.0 as usize) {
             volume.last_synced = Some(at);
-            volume.capacity = capacity.or(volume.capacity);
+            volume.capacity = capacity;
         }
     }
 
