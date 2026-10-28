@@ -2,10 +2,12 @@
 
 use crate::engine::{Engine, Phase, Repaint};
 use crate::explorer::FlatList;
-use crate::tree::TreeList;
+use crate::filters::FiltersPanel;
 use crate::format;
 use crate::settings::{Settings, ThemeChoice};
 use crate::settings_page::{Changed, SettingsPage, apply_theme};
+use crate::tree::TreeList;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
 use gpui_kit::component::spinner::Spinner;
@@ -13,6 +15,7 @@ use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::{ActiveTheme as _, IconName, Theme, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -49,6 +52,8 @@ pub struct Shell {
     tree: Entity<TableState<TreeList>>,
     /// Whether the Explorer shows the tree rather than the flat list.
     show_tree: bool,
+    filters: Entity<FiltersPanel>,
+    show_filters: bool,
     settings_page: Entity<SettingsPage>,
     startup_problems: Vec<String>,
 }
@@ -85,10 +90,18 @@ impl Shell {
         let query = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Search names, or try size:>1gb type:video")
         });
-        cx.subscribe(&query, |this, query, event: &InputEvent, cx| {
+        let filters = cx.new(|cx| FiltersPanel::new(window, cx));
+        cx.subscribe_in(&query, window, |this, query, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::Change) {
-                this.engine.set_query(query.read(cx).value().to_string());
+                let text = query.read(cx).value().to_string();
+                this.filters.update(cx, |f, cx| f.reload(&text, window, cx));
+                this.engine.set_query(text);
             }
+        })
+        .detach();
+        cx.subscribe_in(&filters, window, |this, _, text: &String, window, cx| {
+            this.query.update(cx, |q, cx| q.set_value(text.as_str(), window, cx));
+            this.engine.set_query(text.clone());
         })
         .detach();
         let list = FlatList::new(engine.shared.clone());
@@ -126,6 +139,8 @@ impl Shell {
             table,
             tree,
             show_tree: true,
+            filters,
+            show_filters: false,
             settings_page,
             startup_problems,
         }
@@ -244,11 +259,23 @@ impl Shell {
         } else {
             DataTable::new(&self.table).into_any_element()
         };
+        let active = self.filters.read(cx).active();
+        let label = if active > 0 { format!("Filters · {active}") } else { "Filters".into() };
+        let toggle = Button::new("filters").label(label).on_click(cx.listener(|this, _, _, cx| {
+            this.show_filters = !this.show_filters;
+            cx.notify();
+        }));
         v_flex()
             .size_full()
             .gap_2()
             .p_3()
-            .child(Input::new(&self.query).cleanable(true))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&self.query).cleanable(true)))
+                    .child(if self.show_filters { toggle.primary() } else { toggle }),
+            )
+            .when(self.show_filters, |c| c.child(self.filters.clone()))
             .child(
                 TabBar::new("explorer-lists")
                     .segmented()

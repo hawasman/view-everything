@@ -9,6 +9,7 @@ mod app;
 mod bench;
 mod engine;
 mod explorer;
+mod filters;
 mod format;
 mod settings;
 mod settings_page;
