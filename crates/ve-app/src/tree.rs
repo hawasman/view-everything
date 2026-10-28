@@ -7,7 +7,7 @@ use crate::ui::swatch;
 use crate::selection::Selection;
 use crate::view::{self, View};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex};
+use gpui_kit::component::{Icon, IconName, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
@@ -124,6 +124,17 @@ impl TreeList {
             self.selection.clear();
         }
         true
+    }
+
+    /// Screenshots (VE_DEMO): opens the first folder and selects the row after it.
+    #[cfg(feature = "bench")]
+    pub fn demo(&mut self) {
+        if let Some(id) = self.entry_at(0) {
+            self.toggle(id);
+            if let Some(next) = self.entry_at(2) {
+                self.selection.only(2, next);
+            }
+        }
     }
 
     fn toggle(&mut self, id: EntryId) {
@@ -302,7 +313,7 @@ impl TableDelegate for TreeList {
             }
         }
         let selected = self.entry_at(row).is_some_and(|id| self.selection.contains(id));
-        let accent = cx.theme().tokens.table_active;
+        let accent = crate::theme::palette(cx).active;
         div()
             .id(("row", row))
             .when(selected, |d| d.bg(accent).rounded(px(8.)))

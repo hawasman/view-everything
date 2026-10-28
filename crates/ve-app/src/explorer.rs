@@ -5,7 +5,7 @@ use crate::engine::Shared;
 use crate::selection::Selection;
 use crate::{format, view::View};
 use gpui_kit::component::table::{Column, TableDelegate, TableState};
-use gpui_kit::component::{ActiveTheme as _, h_flex};
+use gpui_kit::component::h_flex;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashMap;
@@ -141,7 +141,7 @@ impl TableDelegate for FlatList {
             }
         }
         let selected = self.entry_at(row).is_some_and(|id| self.selection.contains(id));
-        let accent = cx.theme().tokens.table_active;
+        let accent = crate::theme::palette(cx).active;
         div()
             .id(("row", row))
             .when(selected, |d| d.bg(accent).rounded(px(8.)))

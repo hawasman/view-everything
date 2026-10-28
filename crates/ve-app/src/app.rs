@@ -61,6 +61,8 @@ pub struct Shell {
     startup_problems: Vec<String>,
     /// The Explorer lists' width in pixels, as of the last paint.
     list_width: Rc<Cell<f32>>,
+    #[cfg(feature = "bench")]
+    demoed: bool,
 }
 
 impl Shell {
@@ -217,6 +219,8 @@ impl Shell {
             indexed: shown_volumes,
             startup_problems,
             list_width: Rc::default(),
+            #[cfg(feature = "bench")]
+            demoed: false,
         }
     }
 
@@ -236,6 +240,15 @@ impl Shell {
                 table.clear_selection(cx);
             }
         });
+        #[cfg(feature = "bench")]
+        if std::env::var_os("VE_DEMO").is_some() && !self.demoed && latest.as_ref().is_some_and(|v| !v.flat.is_empty()) {
+            self.demoed = true;
+            self.tree.update(cx, |t, cx| {
+                t.delegate_mut().demo();
+                t.refresh(cx);
+                cx.notify();
+            });
+        }
         self.categories.update(cx, |panel, cx| panel.set_view(latest, cx));
         cx.notify();
     }

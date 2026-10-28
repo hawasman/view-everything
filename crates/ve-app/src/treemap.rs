@@ -420,6 +420,15 @@ impl Treemap {
             self.tiles = Rc::new(tiles);
             self.tiles_key = Some(key);
             self.hovered = None;
+            // Screenshots (VE_DEMO): rest the pointer on the second tile.
+            #[cfg(feature = "bench")]
+            if std::env::var_os("VE_DEMO").is_some() {
+                self.hovered = self
+                    .tiles
+                    .iter()
+                    .find(|t| !t.subdivided && t.rect.width() > 60. && t.rect.height() > 50.)
+                    .map(|t| (t.id, point(px(t.rect.x0 + 20.), px(t.rect.y0 + 40.))));
+            }
             cx.notify();
         }
     }
@@ -611,9 +620,10 @@ impl Render for Treemap {
                     .text_xs()
                     .line_height(px(16.))
                     .text_color(ink)
-                    .children(parent.map(|name| div().text_size(px(11.)).opacity(0.8).child(name)))
+                    .children(parent.map(|name| div().flex_none().text_size(px(11.)).opacity(0.8).child(name)))
                     .child(
                         div()
+                            .flex_none()
                             .w_full()
                             .text_size(px(13.))
                             .font_weight(FontWeight::MEDIUM)
@@ -621,7 +631,7 @@ impl Render for Treemap {
                             .truncate()
                             .child(index.name(tile.id).to_owned()),
                     )
-                    .child(format::size(on_disk)),
+                    .child(div().flex_none().child(format::size(on_disk))),
             );
         }
 
