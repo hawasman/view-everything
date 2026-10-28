@@ -21,7 +21,12 @@ const POLL: Duration = Duration::from_secs(3);
 pub fn watch(initial: Vec<VolumeInfo>, on_change: impl FnMut(Vec<VolumeInfo>) + Send + 'static) {
     let spawned = thread::Builder::new()
         .name("ve-watch".into())
-        .spawn(move || run(initial, mount_waiter(), discover_volumes, on_change));
+        .spawn(move || {
+            let mut wait = mount_waiter();
+            // One look as soon as the wait is armed, for a mount between `initial` and now.
+            let mut armed = false;
+            run(initial, move || std::mem::replace(&mut armed, true).then(&mut wait).unwrap_or(true), discover_volumes, on_change)
+        });
     if let Err(e) = spawned {
         eprintln!("Cannot watch for new Volumes: {e}");
     }

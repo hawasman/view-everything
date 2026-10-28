@@ -293,7 +293,9 @@ fn run_indexer(
                 drop(index);
                 save_if_changed(shared, index_path.as_deref(), &mut saved_generation, false);
                 (shared.repaint)();
-                pending = Vec::new();
+                // Others queued for catch-up stay queued.
+                let index = shared.index.read();
+                pending.retain(|&id| index.volume(id).is_some());
             }
             Ok(Command::Refresh) => {
                 pending = shared
