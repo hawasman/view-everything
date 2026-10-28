@@ -10,6 +10,7 @@ mod platform;
 mod reconcile;
 mod volumes;
 mod walk;
+pub mod watch;
 
 #[cfg(windows)]
 pub use platform::windows::{is_elevated, relaunch_elevated};
