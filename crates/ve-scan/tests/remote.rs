@@ -143,3 +143,32 @@ fn a_manual_remote_is_never_caught_up_and_one_with_an_interval_is() {
     index.mark_synced(id, 999_000, None);
     assert!(!index.volume(id).unwrap().needs_catch_up(1_000_000, Duration::from_secs(3600)));
 }
+
+#[test]
+fn a_flood_of_stderr_does_not_hang_the_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let ssh = script(dir.path(), "ssh", "head -c 300000 /dev/zero | tr '\\0' 'e' >&2; exit 255");
+    let index = SharedIndex::new(Index::new());
+    let id = add(&index, "/data");
+    assert!(remote::sync_with(ssh.to_str().unwrap(), &index, id, &Progress::default()).is_err());
+}
+
+#[test]
+fn an_incomplete_listing_does_not_prune() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    fs::create_dir_all(&tree).unwrap();
+    fs::write(tree.join("a.txt"), "a").unwrap();
+    fs::write(tree.join("b.txt"), "b").unwrap();
+    let ssh = script(dir.path(), "ssh", LOCAL);
+    let ssh = ssh.to_str().unwrap();
+    let index = SharedIndex::new(Index::new());
+    let id = add(&index, tree.to_str().unwrap());
+    remote::sync_with(ssh, &index, id, &Progress::default()).unwrap();
+    // find exits 1 (unreadable folder) with a partial listing: b.txt is not mentioned.
+    let partial = script(dir.path(), "ssh-partial", "printf '1\\t1\\t1\\t8\\t1.0\\tf\\ta.txt\\0'; echo 'find: x: Permission denied' >&2; exit 1");
+    remote::sync_with(partial.to_str().unwrap(), &index, id, &Progress::default()).unwrap();
+    let index = index.read();
+    let root = index.volume(id).unwrap().root;
+    assert_eq!(names(&index, root), ["a.txt", "b.txt"]);
+}

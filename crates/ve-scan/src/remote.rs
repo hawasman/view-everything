@@ -65,10 +65,11 @@ impl Record {
 /// `1700000000.1234567890` (GNU find prints ten fraction digits) as nanoseconds.
 fn parse_time(text: &str) -> Option<i64> {
     let (secs, frac) = text.split_once('.').unwrap_or((text, ""));
+    let negative = secs.starts_with('-');
     let secs: i64 = secs.parse().ok()?;
     let digits: String = frac.chars().take(9).collect();
     let nanos: i64 = if digits.is_empty() { 0 } else { digits.parse::<i64>().ok()? * 10i64.pow(9 - digits.len() as u32) };
-    secs.checked_mul(1_000_000_000)?.checked_add(if secs < 0 { -nanos } else { nanos })
+    secs.checked_mul(1_000_000_000)?.checked_add(if negative { -nanos } else { nanos })
 }
 
 /// `'...'` for a POSIX shell, which is what the server runs the command line through.
@@ -137,12 +138,14 @@ pub fn sync_with(program: &str, index: &SharedIndex, volume: VolumeId, progress:
     let stderr = std::thread::spawn(move || {
         let mut text = String::new();
         let _ = (&mut stderr).take(64 * 1024).read_to_string(&mut text);
+        // Keep draining: a full pipe would block find and ssh, and the sync with them.
+        let _ = io::copy(&mut stderr, &mut io::sink());
         text
     });
     let mut applier = Applier::new(index, root, progress);
     let mut input = BufReader::new(child.stdout.take().expect("piped"));
     let (mut buf, mut batch) = (Vec::new(), Vec::new());
-    let mut read_error = None;
+    let (mut read_error, mut malformed) = (None, false);
     loop {
         buf.clear();
         match input.read_until(0, &mut buf) {
@@ -151,8 +154,9 @@ pub fn sync_with(program: &str, index: &SharedIndex, volume: VolumeId, progress:
                 if buf.last() == Some(&0) {
                     buf.pop();
                 }
-                if let Some(record) = Record::parse(&buf) {
-                    batch.push(record);
+                match Record::parse(&buf) {
+                    Some(record) => batch.push(record),
+                    None => malformed = true,
                 }
                 if batch.len() >= BATCH {
                     applier.apply(&mut batch);
@@ -177,7 +181,11 @@ pub fn sync_with(program: &str, index: &SharedIndex, volume: VolumeId, progress:
     // Exit 1 from find with output means some folders were unreadable.
     let unreadable = stderr.lines().filter(|l| l.contains("Permission denied")).count();
     progress.unreadable.fetch_add(unreadable as u64, Ordering::Relaxed);
-    applier.prune();
+    // Pruning needs a complete listing: after find reported unreadable folders (exit 1) or a
+    // record was unreadable to us, what is missing may only be unseen, so stale Entries stay.
+    if status.code() == Some(0) && !malformed {
+        applier.prune();
+    }
     Ok(())
 }
 
@@ -195,7 +203,7 @@ fn failure(remote: &Remote, code: Option<i32>, records: u64, stderr: &str) -> Op
             format!("{host} needs a key or ssh-agent login; password login is not used ({message})"),
         ),
         Some(255) => err(io::ErrorKind::ConnectionRefused, format!("ssh to {host} failed: {message}")),
-        _ if stderr.contains("printf") => err(
+        _ if stderr.contains("-printf") => err(
             io::ErrorKind::Unsupported,
             format!("{host} has no GNU find -printf: needs SFTP fallback (issue 16)"),
         ),
@@ -307,6 +315,7 @@ mod tests {
         );
         assert!(Record::parse(b"1\t1\tx\t0\t0\tf\ta").is_none());
         assert_eq!(parse_time("-1.5"), Some(-1_500_000_000));
+        assert_eq!(parse_time("-0.5"), Some(-500_000_000));
     }
 
     #[test]
