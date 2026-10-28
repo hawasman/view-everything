@@ -10,10 +10,15 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 use gpui_kit::*;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
 use ve_core::Category;
 
-const POLL: Duration = Duration::from_millis(50);
+/// Digits of equal width (OpenType `tnum`), so sizes line up down the panel.
+fn tabular_figures() -> FontFeatures {
+    FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
+}
+
+/// Every Category's bar has this height; small Categories are kept visible by a minimum length.
+const BAR_HEIGHT: Pixels = px(6.);
 
 pub struct CategoryPanel {
     shared: Arc<Shared>,
@@ -24,16 +29,7 @@ pub struct CategoryPanel {
 
 impl CategoryPanel {
     /// `query` is the Query input that clicking a Category or extension adds a term to.
-    pub fn new(shared: Arc<Shared>, query: Entity<InputState>, cx: &mut Context<Self>) -> Self {
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(POLL).await;
-                if this.update(cx, |this, cx| this.poll(cx)).is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
+    pub fn new(shared: Arc<Shared>, query: Entity<InputState>) -> Self {
         Self {
             shared,
             query,
@@ -42,15 +38,9 @@ impl CategoryPanel {
         }
     }
 
-    fn poll(&mut self, cx: &mut Context<Self>) {
-        let latest = self.shared.view.lock().clone();
-        let same = match (&self.view, &latest) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same {
-            self.view = latest;
+    pub fn set_view(&mut self, view: Option<Arc<View>>, cx: &mut Context<Self>) {
+        if !crate::view::same(&self.view, &view) {
+            self.view = view;
             cx.notify();
         }
     }
@@ -79,11 +69,12 @@ impl CategoryPanel {
 impl Render for CategoryPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (border, muted, hover, dark) = (
+        let (border, muted, hover, dark, track) = (
             theme.border,
             theme.muted_foreground,
             theme.accent,
             theme.is_dark(),
+            theme.muted,
         );
         let panel = v_flex()
             .size_full()
@@ -136,16 +127,17 @@ impl Render for CategoryPanel {
                         .child(div().flex_1().child(category.name()))
                         .child(
                             div()
-                                .font_family("Geist Mono")
                                 .text_sm()
+                                .font_features(tabular_figures())
                                 .child(format::size(row.totals.on_disk)),
                         ),
                 )
                 .child(
-                    div().mt_1().h(px(3.)).rounded_full().bg(border).child(
+                    div().mt_1().h(BAR_HEIGHT).rounded_full().bg(track).child(
                         div()
                             .h_full()
                             .w(relative(share.clamp(0.0, 1.0)))
+                            .min_w(px(6.))
                             .rounded_full()
                             .bg(color),
                     ),
@@ -196,7 +188,7 @@ impl Render for CategoryPanel {
                         .child(div().flex_1().child(label))
                         .child(
                             div()
-                                .font_family("Geist Mono")
+                                .font_features(tabular_figures())
                                 .text_color(muted)
                                 .child(format::size(totals.on_disk)),
                         );
