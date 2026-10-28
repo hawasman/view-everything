@@ -11,7 +11,7 @@ const APP_DIR: &str = "view-everything";
 /// User choices that outlive a session, stored as `settings.toml`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Settings {
-    /// Removable Volumes the user asked to index, by identity. A mount path from an older
+    /// Removable Volumes and network shares the user asked to index, by identity. A mount path from an older
     /// settings file still matches the Volume mounted there.
     #[serde(default)]
     pub include: Vec<String>,
@@ -44,6 +44,9 @@ fn default_refresh_minutes() -> u64 {
     30
 }
 
+/// Slow, shared links make a re-walk expensive, so network shares are re-read less often.
+const NETWORK_REFRESH_MINUTES: u64 = 120;
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -62,12 +65,13 @@ fn names(key: &str, volume: &VolumeInfo) -> bool {
 }
 
 impl Settings {
-    /// Local fixed Volumes are indexed unless excluded; removable ones only when included.
+    /// Local fixed Volumes are indexed unless excluded; removable ones and network shares only
+    /// when included.
     pub fn is_indexed(&self, volume: &VolumeInfo) -> bool {
         if self.exclude.iter().any(|k| names(k, volume)) {
             false
         } else {
-            !volume.removable || self.include.iter().any(|k| names(k, volume))
+            !volume.opt_in() || self.include.iter().any(|k| names(k, volume))
         }
     }
 
@@ -75,7 +79,7 @@ impl Settings {
     pub fn set_indexed(&mut self, volume: &VolumeInfo, indexed: bool) {
         self.include.retain(|k| !names(k, volume));
         self.exclude.retain(|k| !names(k, volume));
-        match (volume.removable, indexed) {
+        match (volume.opt_in(), indexed) {
             (true, true) => self.include.push(volume.identity.clone()),
             (false, false) => self.exclude.push(volume.identity.clone()),
             _ => {}
@@ -95,7 +99,10 @@ impl Settings {
         self.volume_refresh_minutes
             .iter()
             .find(|(k, _)| names(k, volume))
-            .map_or(self.refresh_minutes, |(_, m)| *m)
+            .map_or_else(
+                || if volume.network { NETWORK_REFRESH_MINUTES } else { self.refresh_minutes },
+                |(_, m)| *m,
+            )
     }
 
     /// The refresh interval of each of `volumes`, by mount point.
@@ -169,8 +176,36 @@ mod tests {
             fs_type: "ext4".into(),
             label: String::new(),
             removable,
+            network: false,
             read_only: false,
         }
+    }
+
+    fn share() -> VolumeInfo {
+        VolumeInfo {
+            identity: "share:nas.lan:/volume1/media".into(),
+            fs_type: "nfs4".into(),
+            network: true,
+            ..volume("/mnt/nas", false)
+        }
+    }
+
+    #[test]
+    fn a_network_share_is_opt_in_and_refreshes_every_two_hours() {
+        let (nas, fixed) = (share(), volume("/", false));
+        let mut s = Settings::default();
+        assert!(!s.is_indexed(&nas));
+        s.set_indexed(&nas, true);
+        assert!(s.is_indexed(&nas) && s.exclude.is_empty());
+        // Mounted elsewhere, it is the same share; its interval ignores the general default.
+        let moved = VolumeInfo { mount: "/media/nas".into(), ..nas.clone() };
+        assert!(s.is_indexed(&moved));
+        assert_eq!(s.refresh_minutes_for(&moved), 120);
+        assert_eq!(s.refresh_minutes_for(&fixed), 30);
+        s.volume_refresh_minutes.insert(nas.identity.clone(), 10);
+        assert_eq!(s.refresh_minutes_for(&nas), 10);
+        s.set_indexed(&nas, false);
+        assert!(s.include.is_empty() && !s.is_indexed(&nas));
     }
 
     #[test]

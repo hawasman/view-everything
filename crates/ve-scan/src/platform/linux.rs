@@ -1,13 +1,16 @@
-use crate::volumes::VolumeInfo;
+use crate::volumes::{VolumeInfo, share_identity};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Filesystems backed by local storage. Everything else (network, pseudo, overlay and image
-/// filesystems such as squashfs) is never indexed.
+/// Filesystems backed by local storage. Everything else (pseudo, overlay and image filesystems
+/// such as squashfs) is never indexed, except the network ones below.
 const LOCAL_FILESYSTEMS: &[&str] = &[
     "ext2", "ext3", "ext4", "btrfs", "xfs", "f2fs", "zfs", "bcachefs", "jfs", "reiserfs", "nilfs2",
     "ntfs", "ntfs3", "fuseblk", "vfat", "exfat", "hfsplus",
 ];
+
+/// Network filesystems, offered as Volumes the user can opt into.
+const NETWORK_FILESYSTEMS: &[&str] = &["nfs", "nfs4", "cifs", "smb3", "fuse.sshfs"];
 
 struct Mount {
     device: String,
@@ -19,23 +22,38 @@ struct Mount {
     read_only: bool,
 }
 
+impl Mount {
+    fn is_network(&self) -> bool {
+        NETWORK_FILESYSTEMS.contains(&self.fs_type.as_str())
+    }
+}
+
 pub fn discover_volumes() -> Vec<VolumeInfo> {
     let Ok(text) = fs::read_to_string("/proc/self/mountinfo") else {
         return Vec::new();
     };
+    volumes_in(&text)
+}
+
+fn volumes_in(text: &str) -> Vec<VolumeInfo> {
     let mut mounts: Vec<Mount> = text
         .lines()
         .filter_map(parse_line)
-        .filter(|m| LOCAL_FILESYSTEMS.contains(&m.fs_type.as_str()))
+        .filter(|m| LOCAL_FILESYSTEMS.contains(&m.fs_type.as_str()) || m.is_network())
         .collect();
     // Shortest mount paths first, so the first mount of a filesystem tree wins.
     mounts.sort_by_key(|m| m.mount.as_os_str().len());
 
     let mut kept: Vec<Mount> = Vec::new();
     for mount in mounts {
-        let repeats_kept = kept
-            .iter()
-            .any(|k| k.device == mount.device && is_within(&mount.root, &k.root));
+        // A network share is one Volume however often it is mounted; it has no device to compare.
+        let repeats_kept = kept.iter().any(|k| {
+            if mount.is_network() {
+                k.is_network() && k.source == mount.source
+            } else {
+                k.device == mount.device && is_within(&mount.root, &k.root)
+            }
+        });
         if !repeats_kept {
             kept.push(mount);
         }
@@ -43,8 +61,9 @@ pub fn discover_volumes() -> Vec<VolumeInfo> {
     let uuids = Path::new("/dev/disk/by-uuid");
     kept.into_iter()
         .map(|m| VolumeInfo {
-            removable: is_removable(&m.device),
-            identity: identity(&m, uuids),
+            removable: !m.is_network() && is_removable(&m.device),
+            network: m.is_network(),
+            identity: if m.is_network() { share_identity(&m.source) } else { identity(&m, uuids) },
             label: m.source,
             mount: m.mount,
             fs_type: m.fs_type,
@@ -149,6 +168,39 @@ mod tests {
         assert_eq!(uuid_of("sdb1".as_ref(), dir.path()).as_deref(), Some("1234-ABCD"));
         assert_eq!(uuid_of("dm-0".as_ref(), dir.path()).as_deref(), Some("f00-ba4"));
         assert_eq!(uuid_of("sdc1".as_ref(), dir.path()), None);
+    }
+
+    #[test]
+    fn network_mounts_are_found_and_pseudo_ones_are_not() {
+        let mounts: Vec<Mount> = [
+            "40 29 0:35 / /mnt/nas rw,relatime shared:1 - nfs4 nas.lan:/volume1/media rw,vers=4.2",
+            "41 29 0:36 / /mnt/win\\040share rw - cifs //server/my\\040share rw",
+            "42 29 0:37 / /mnt/ssh rw - fuse.sshfs me@host:/srv rw",
+            "43 29 0:38 / /proc rw - proc proc rw",
+            "44 29 0:39 / /mnt/fuse rw - fuse.portal portal rw",
+        ]
+        .iter()
+        .filter_map(|l| parse_line(l))
+        .filter(|m| m.is_network())
+        .collect();
+        let sources: Vec<_> = mounts.iter().map(|m| m.source.as_str()).collect();
+        assert_eq!(sources, ["nas.lan:/volume1/media", "//server/my share", "me@host:/srv"]);
+        assert_eq!(mounts[1].mount, PathBuf::from("/mnt/win share"));
+    }
+
+    #[test]
+    fn a_share_mounted_twice_is_one_opt_in_volume_with_the_share_as_identity() {
+        let text = "40 29 0:35 / /mnt/nas rw - nfs4 nas.lan:/volume1/media rw\n\
+                    41 29 0:36 / /mnt/nas2 rw - nfs4 nas.lan:/volume1/media rw\n\
+                    42 29 0:37 / /mnt/other rw - cifs //server/share rw\n\
+                    43 29 0:38 / /proc rw - proc proc rw";
+        let volumes = volumes_in(text);
+        assert_eq!(volumes.len(), 2);
+        let nas = &volumes[0];
+        assert_eq!(nas.mount, PathBuf::from("/mnt/nas"));
+        assert_eq!(nas.identity, "share:nas.lan:/volume1/media");
+        assert!(nas.network && !nas.removable && nas.opt_in());
+        assert_eq!(volumes[1].identity, "share://server/share");
     }
 
     #[test]

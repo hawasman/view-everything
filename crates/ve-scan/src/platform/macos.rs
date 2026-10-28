@@ -1,6 +1,9 @@
-use crate::volumes::VolumeInfo;
+use crate::volumes::{VolumeInfo, share_identity};
 use std::ffi::CStr;
 use std::path::PathBuf;
+
+/// Mounts the OS does not mark local that are not shares: automount triggers.
+const NOT_SHARES: &[&str] = &["autofs"];
 
 const LOCAL_FILESYSTEMS: &[&str] = &["apfs", "hfs", "msdos", "exfat", "ntfs"];
 
@@ -27,18 +30,26 @@ pub fn discover_volumes() -> Vec<VolumeInfo> {
     let mounts = unsafe { std::slice::from_raw_parts(mounts, count as usize) };
     mounts
         .iter()
-        .filter(|m| m.f_flags & libc::MNT_LOCAL as u32 != 0)
         .filter_map(|m| {
             let fs_type = c_text(&m.f_fstypename);
             let mount = c_text(&m.f_mntonname);
-            if !LOCAL_FILESYSTEMS.contains(&fs_type.as_str())
-                || SYSTEM_VOLUMES.contains(&mount.as_str())
-            {
+            let network = m.f_flags & libc::MNT_LOCAL as u32 == 0;
+            let wanted = if network {
+                !NOT_SHARES.contains(&fs_type.as_str())
+            } else {
+                LOCAL_FILESYSTEMS.contains(&fs_type.as_str())
+            };
+            if !wanted || SYSTEM_VOLUMES.contains(&mount.as_str()) {
                 return None;
             }
             Some(VolumeInfo {
-                identity: identity(&mount, &c_text(&m.f_mntfromname)),
-                removable: mount.starts_with("/Volumes/"),
+                identity: if network {
+                    share_identity(&c_text(&m.f_mntfromname))
+                } else {
+                    identity(&mount, &c_text(&m.f_mntfromname))
+                },
+                network,
+                removable: !network && mount.starts_with("/Volumes/"),
                 read_only: m.f_flags & libc::MNT_RDONLY as u32 != 0,
                 label: c_text(&m.f_mntfromname),
                 mount: PathBuf::from(mount),

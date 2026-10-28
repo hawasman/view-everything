@@ -180,6 +180,9 @@ impl SettingsPage {
         if volume.removable {
             notes.push("removable".into());
         }
+        if volume.network {
+            notes.push("Network share".into());
+        }
         if volume.read_only {
             notes.push("read-only".into());
         }
@@ -261,7 +264,7 @@ impl Render for SettingsPage {
             .gap_6()
             .child(section(
                 "Indexed Volumes",
-                "Local fixed Volumes are indexed by default; removable ones only when ticked.",
+                "Local fixed Volumes are indexed by default; removable ones and network shares only when ticked.",
                 volumes,
                 muted,
             ))

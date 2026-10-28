@@ -666,6 +666,7 @@ mod tests {
             fs_type: "ext4".into(),
             label: String::new(),
             removable: false,
+            network: false,
             read_only: true,
         };
         assert!(blocker(&index, std::slice::from_ref(&info), inner).is_some());

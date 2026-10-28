@@ -10,6 +10,7 @@ fn info(mount: &Path, identity: &str) -> VolumeInfo {
         fs_type: "test".into(),
         label: String::new(),
         removable: true,
+        network: false,
         read_only: false,
     }
 }
