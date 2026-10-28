@@ -117,7 +117,8 @@ fn failures_are_reported_and_leave_the_index_alone() {
         remote::sync_with(ssh.to_str().unwrap(), &index, id, &Progress::default()).unwrap_err().to_string()
     };
     assert!(fail("echo 'me@box: Permission denied (publickey,password).' >&2; exit 255").contains("key or ssh-agent"));
-    assert!(fail("echo \"find: unknown predicate \\`-printf'\" >&2; exit 1").contains("SFTP fallback (issue 16)"));
+    // No GNU find, and the server then has no SFTP either: the fallback's failure is reported.
+    assert!(fail("echo \"find: unknown predicate \\`-printf'\" >&2; exit 1").contains("SFTP on me@box failed"));
     assert!(remote::sync_with("/nonexistent/ssh", &index, id, &Progress::default()).unwrap_err().to_string().contains("not found"));
     assert_eq!(index.read().live_count(), 1);
 }
@@ -185,4 +186,139 @@ fn an_incomplete_listing_does_not_prune() {
     let index = index.read();
     let root = index.volume(id).unwrap().root;
     assert_eq!(names(&index, root), ["a.txt", "b.txt"]);
+}
+
+/// The system's `sftp-server`, if installed; the tests below are skipped without it.
+fn sftp_server() -> Option<&'static str> {
+    ["/usr/lib/ssh/sftp-server", "/usr/lib/openssh/sftp-server", "/usr/libexec/openssh/sftp-server", "/usr/libexec/sftp-server"]
+        .into_iter()
+        .find(|p| Path::new(p).exists())
+}
+
+/// A server with BusyBox's `find` (no -printf) and an SFTP subsystem that is the real
+/// `sftp-server`; each find attempt is logged to `$LOG`.
+fn busybox_ssh(dir: &Path, server: &str) -> PathBuf {
+    let log = dir.join("find.log");
+    script(
+        dir,
+        "ssh",
+        &format!(
+            "for a; do [ \"$a\" = -s ] && exec {server}; done\necho find >> {log}\necho 'find: unrecognized: -printf' >&2; exit 1",
+            log = log.display()
+        ),
+    )
+}
+
+#[test]
+fn a_server_without_gnu_find_is_indexed_over_sftp_and_remembered() {
+    let _serial = serial();
+    let Some(server) = sftp_server() else {
+        eprintln!("skipped: no sftp-server installed");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    fs::create_dir_all(tree.join("a/b")).unwrap();
+    fs::create_dir_all(tree.join("many")).unwrap();
+    fs::write(tree.join("a/b/f.txt"), vec![b'x'; 3000]).unwrap();
+    fs::write(tree.join("keep.txt"), "k").unwrap();
+    fs::write(tree.join("gone.txt"), "g").unwrap();
+    fs::write(tree.join("a/odd 'name\".txt"), "q").unwrap();
+    std::os::unix::fs::symlink("/etc", tree.join("link")).unwrap();
+    // More folders than the request window and more files than one READDIR reply holds.
+    for i in 0..40 {
+        fs::create_dir(tree.join(format!("many/d{i}"))).unwrap();
+        fs::write(tree.join(format!("many/d{i}/f")), "z").unwrap();
+    }
+    for i in 0..2500 {
+        fs::write(tree.join(format!("many/file-{i:04}-with-a-longish-name-to-fill-the-reply")), "").unwrap();
+    }
+    let ssh = busybox_ssh(dir.path(), server);
+    let ssh = ssh.to_str().unwrap();
+    let index = SharedIndex::new(Index::new());
+    let id = index.write().add_remote(&Remote::new("sftp@box", tree.to_str().unwrap()).unwrap());
+    let progress = Progress::default();
+    remote::sync_with(ssh, &index, id, &progress).unwrap();
+    {
+        let index = index.read();
+        let root = index.volume(id).unwrap().root;
+        // Symlinks are skipped; folders are walked.
+        assert_eq!(names(&index, root), ["a", "gone.txt", "keep.txt", "many"]);
+        let a = index.child_named(root, "a").unwrap();
+        assert_eq!(names(&index, a), ["b", "odd 'name\".txt"]);
+        let f = index.child_named(index.child_named(a, "b").unwrap(), "f.txt").unwrap();
+        // No allocation from SFTP: On-disk Size is the Logical Size.
+        assert_eq!((index.logical(f), index.on_disk(f)), (3000, 3000));
+        let mtime = fs::metadata(tree.join("a/b/f.txt")).unwrap().modified().unwrap();
+        let secs = mtime.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        assert_eq!(index.modified(f), secs * 1_000_000_000);
+        let many = index.child_named(root, "many").unwrap();
+        assert_eq!(index.children(many).len(), 2540);
+        assert_eq!(Filter::compute(&index, None).totals(&index, root).logical, 3000 + 1 + 1 + 1 + 40);
+        assert_eq!(progress.entries(), 1 + 4 + 2 + 1 + 2540 + 40);
+    }
+    assert_eq!(fs::read_to_string(dir.path().join("find.log")).unwrap().lines().count(), 1);
+
+    // A refresh goes straight to SFTP (find is not tried again) and prunes what is gone.
+    fs::remove_file(tree.join("gone.txt")).unwrap();
+    fs::remove_dir_all(tree.join("a/b")).unwrap();
+    remote::sync_with(ssh, &index, id, &Progress::default()).unwrap();
+    assert_eq!(fs::read_to_string(dir.path().join("find.log")).unwrap().lines().count(), 1);
+    let index = index.read();
+    let root = index.volume(id).unwrap().root;
+    assert_eq!(names(&index, root), ["a", "keep.txt", "many"]);
+    assert_eq!(names(&index, index.child_named(root, "a").unwrap()), ["odd 'name\".txt"]);
+}
+
+#[test]
+fn an_unreadable_folder_over_sftp_keeps_stale_entries() {
+    let _serial = serial();
+    let Some(server) = sftp_server() else {
+        eprintln!("skipped: no sftp-server installed");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    fs::create_dir_all(tree.join("locked")).unwrap();
+    fs::write(tree.join("locked/secret"), "s").unwrap();
+    fs::write(tree.join("a.txt"), "a").unwrap();
+    let ssh = busybox_ssh(dir.path(), server);
+    let ssh = ssh.to_str().unwrap();
+    let index = SharedIndex::new(Index::new());
+    let id = index.write().add_remote(&Remote::new("sftp-locked@box", tree.to_str().unwrap()).unwrap());
+    remote::sync_with(ssh, &index, id, &Progress::default()).unwrap();
+    fs::set_permissions(tree.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+    let progress = Progress::default();
+    let result = remote::sync_with(ssh, &index, id, &progress);
+    fs::set_permissions(tree.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
+    result.unwrap();
+    let index = index.read();
+    let root = index.volume(id).unwrap().root;
+    if progress.unreadable() == 0 {
+        return; // running as root: nothing is unreadable
+    }
+    assert_eq!(progress.unreadable(), 1);
+    // The folder's contents were not listed, so they are not pruned.
+    assert_eq!(names(&index, index.child_named(root, "locked").unwrap()), ["secret"]);
+}
+
+#[test]
+fn sftp_failures_are_reported_and_a_file_root_is_refused() {
+    let _serial = serial();
+    let Some(server) = sftp_server() else {
+        eprintln!("skipped: no sftp-server installed");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("file"), "f").unwrap();
+    let ssh = busybox_ssh(dir.path(), server);
+    let ssh = ssh.to_str().unwrap();
+    let index = SharedIndex::new(Index::new());
+    let missing = index.write().add_remote(&Remote::new("sftp-missing@box", "/no/such/folder").unwrap());
+    let err = remote::sync_with(ssh, &index, missing, &Progress::default()).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
+    let file = index.write().add_remote(&Remote::new("sftp-file@box", dir.path().join("file").to_str().unwrap()).unwrap());
+    let err = remote::sync_with(ssh, &index, file, &Progress::default()).unwrap_err();
+    assert!(err.to_string().contains("not a folder"), "{err}");
+    assert_eq!(index.read().live_count(), 2);
 }
