@@ -252,8 +252,6 @@ fn run_summary(
     repaint: &crate::engine::Repaint,
 ) {
     let mut text = String::new();
-    let mut query: Option<Query> = None;
-    let mut error: Option<String> = None;
     let mut computed: Option<(String, u64)> = None;
     let mut last = Instant::now();
     let mut gap = MIN_GAP;
@@ -261,11 +259,6 @@ fn run_summary(
         match requests.recv_timeout(Duration::from_millis(250)) {
             Ok(first) => {
                 text = requests.try_iter().last().unwrap_or(first);
-                let context = QueryContext::new(categories.clone(), Local::now());
-                (query, error) = match Query::parse(&text, &context) {
-                    Ok(q) => (Some(q), None),
-                    Err(e) => (None, Some(e.to_string())),
-                };
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
@@ -279,6 +272,12 @@ fn run_summary(
         if same_query && last.elapsed() < gap {
             continue;
         }
+        // Parsed per computation: a relative date such as `dm:today` means today.
+        let context = QueryContext::new(categories.clone(), Local::now());
+        let (query, error) = match Query::parse(&text, &context) {
+            Ok(q) => (Some(q), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
         let summary = {
             let index = shared.index.read();
             summarize(&index, categories, query.as_ref(), error.clone())
@@ -289,6 +288,11 @@ fn run_summary(
         last = Instant::now();
         repaint();
     }
+}
+
+/// The stroke of the Unindexed Space hatch (`--hatch` in ve.css).
+fn hatch(cx: &App) -> Rgba {
+    if cx.theme().is_dark() { rgb(0x666866) } else { rgb(0xa9acab) }
 }
 
 /// "Today 21:58", "Yesterday 22:05", or the date.
@@ -315,7 +319,7 @@ fn tilde(folder: &str) -> String {
 }
 
 impl Render for DashboardPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let now = chrono::Utc::now().timestamp();
         let locations = self.locations();
@@ -381,7 +385,7 @@ impl Render for DashboardPage {
                     .gap(px(16.))
                     .mt(px(16.))
                     .child(self.largest_panel(&locations, cx))
-                    .child(self.recent_panel(&locations, window, cx)),
+                    .child(self.recent_panel(&locations, cx)),
             );
         div()
             .id("dashboard")
@@ -486,7 +490,7 @@ impl DashboardPage {
         let p = palette(cx);
         let capacity: u64 = locations.iter().filter_map(|l| l.capacity).map(|c| c.total).sum();
         let free: u64 = locations.iter().filter_map(|l| l.capacity).map(|c| c.free).sum();
-        let hatch = if cx.theme().is_dark() { rgb(0x666866) } else { rgb(0xa9acab) };
+        let hatch = hatch(cx);
         let outlined = move |d: Div| d.border_1().border_color(p.control);
         let mut legend = h_flex().flex_wrap().gap_x(px(14.)).gap_y(px(4.)).mb(px(14.)).text_xs().text_color(p.muted);
         for category in Category::ALL {
@@ -529,7 +533,7 @@ impl DashboardPage {
     /// when it was last synced.
     fn lane(&self, ix: usize, l: &Location, now: i64, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let hatch = if cx.theme().is_dark() { rgb(0x666866) } else { rgb(0xa9acab) };
+        let hatch = hatch(cx);
         let total = l.lane.total().max(1) as f64;
         let wide = |bytes: u64| bytes as f64 / total >= SLIVER;
         let seg = |bytes: u64| div().h_full().min_w_0().flex_grow(bytes as f32).flex_basis(relative(0.));
@@ -807,8 +811,7 @@ impl DashboardPage {
             .child(table)
     }
 
-    fn recent_panel(&self, locations: &[Location], window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let _ = window;
+    fn recent_panel(&self, locations: &[Location], cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let rows = self.shown.as_ref().map(|s| s.recent.clone()).unwrap_or_default();
         let error = self.shown.as_ref().and_then(|s| s.recent_error.clone());

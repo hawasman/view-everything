@@ -145,11 +145,11 @@ fn summarize_with(
                 let modified = index.modified(child);
                 // A hard link to a file already counted adds nothing.
                 let repeated = index.is_hardlinked(child) && !seen_links.insert(index.key(child));
-                if newest.wants(modified) {
-                    newest.push(modified, child);
-                }
                 if repeated {
                     continue;
+                }
+                if newest.wants(modified) {
+                    newest.push(modified, child);
                 }
                 let size = index.on_disk(child);
                 let category = categories.of_name(index.name(child));
