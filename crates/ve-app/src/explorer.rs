@@ -58,7 +58,12 @@ impl TableDelegate for FlatList {
         if !index.is_live(id) {
             return div().into_any_element();
         }
-        let totals = view.filter.totals(&index, id);
+        // Only the size columns need totals; computing them is the costly part of a cell.
+        let totals = if (2..=4).contains(&col) {
+            view.filter.totals(&index, id)
+        } else {
+            Default::default()
+        };
         let is_dir = index.is_dir(id);
         let muted = cx.theme().muted_foreground;
         let text = match col {
