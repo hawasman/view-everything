@@ -7,7 +7,7 @@ use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
 use crate::format;
 use crate::settings::Settings;
-use crate::settings_page::{Changed, Forget, SettingsPage};
+use crate::settings_page::{Changed, Forget, Refresh, SettingsPage};
 use crate::theme::{palette, tabular};
 use crate::ui::{caption, dot, pill};
 use crate::tree::TreeList;
@@ -88,13 +88,14 @@ impl Shell {
         let repaint: Repaint = Arc::new(move || {
             let _ = wake.try_send(());
         });
-        let engine = Engine::start(repaint.clone(), volumes.clone(), indexed, intervals, categories.clone());
+        let engine =
+            Engine::start(repaint.clone(), volumes.clone(), indexed, settings.remotes.clone(), intervals, categories.clone());
 
         let trash = Trash::new(engine.shared.clone(), repaint);
 
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
         cx.subscribe(&settings_page, |this, _, changed: &Changed, cx| {
-            this.engine.set_volumes(changed.mounted.clone(), changed.indexed.clone());
+            this.engine.set_volumes(changed.mounted.clone(), changed.indexed.clone(), changed.remotes.clone());
             this.engine.set_intervals(changed.intervals.clone());
             // Saved fine, so the settings file read at startup has been replaced.
             if !this.settings_page.read(cx).has_problem() {
@@ -104,6 +105,8 @@ impl Shell {
         })
         .detach();
         cx.subscribe(&settings_page, |this, _, forget: &Forget, _| this.engine.forget(forget.0.clone()))
+            .detach();
+        cx.subscribe(&settings_page, |this, _, refresh: &Refresh, _| this.engine.refresh_location(refresh.0.clone()))
             .detach();
 
         let query = cx.new(|cx| {
@@ -347,7 +350,19 @@ impl Shell {
             .filter(|(_, v)| !v.online)
             .map(|(_, v)| (v.identity.clone(), v.mount.clone()))
             .collect();
-        self.settings_page.update(cx, |page, cx| page.set_offline(offline, cx));
+        let synced = self
+            .engine
+            .shared
+            .index
+            .read()
+            .volumes()
+            .filter(|(_, v)| v.is_remote())
+            .map(|(_, v)| (v.identity.clone(), v.last_synced))
+            .collect();
+        self.settings_page.update(cx, |page, cx| {
+            page.set_offline(offline, cx);
+            page.set_remote_synced(synced, cx);
+        });
         cx.notify();
     }
 
@@ -545,9 +560,10 @@ impl Shell {
             .read()
             .volumes()
             .map(|(_, v)| {
-                let name = match self.volumes.iter().find(|m| m.identity == v.identity) {
-                    Some(m) => volume_name(m),
-                    None => v.mount.display().to_string(),
+                let name = match (v.remote(), self.volumes.iter().find(|m| m.identity == v.identity)) {
+                    (Some(remote), _) => remote.label(),
+                    (None, Some(m)) => volume_name(m),
+                    (None, None) => v.mount.display().to_string(),
                 };
                 let state = if !v.online {
                     muted

@@ -117,6 +117,14 @@ pub struct Volume {
 }
 
 impl Volume {
+    /// The Remote this Location is, if it is one.
+    pub fn remote(&self) -> Option<&Remote> {
+        match &self.sync {
+            SyncState::Ssh(remote) => Some(remote),
+            _ => None,
+        }
+    }
+
     /// A read-only Remote rather than a mounted Volume.
     pub fn is_remote(&self) -> bool {
         matches!(self.sync, SyncState::Ssh(_))
