@@ -2,14 +2,17 @@
 
 use crate::engine::{Engine, Phase, Repaint};
 use crate::explorer::FlatList;
+use crate::filters::FiltersPanel;
 use crate::format;
 use crate::settings::{Settings, ThemeChoice};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::{ActiveTheme as _, IconName, Theme, ThemeMode, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -51,6 +54,8 @@ pub struct Shell {
     page: Page,
     query: Entity<InputState>,
     table: Entity<TableState<FlatList>>,
+    filters: Entity<FiltersPanel>,
+    show_filters: bool,
     /// Set by the Engine's threads; cleared when the window has caught up.
     changed: Arc<AtomicBool>,
     settings: Settings,
@@ -83,10 +88,18 @@ impl Shell {
         let query = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Search names, or try size:>1gb type:video")
         });
-        cx.subscribe(&query, |this, query, event: &InputEvent, cx| {
+        let filters = cx.new(|cx| FiltersPanel::new(window, cx));
+        cx.subscribe_in(&query, window, |this, query, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::Change) {
-                this.engine.set_query(query.read(cx).value().to_string());
+                let text = query.read(cx).value().to_string();
+                this.filters.update(cx, |f, cx| f.reload(&text, window, cx));
+                this.engine.set_query(text);
             }
+        })
+        .detach();
+        cx.subscribe_in(&filters, window, |this, _, text: &String, window, cx| {
+            this.query.update(cx, |q, cx| q.set_value(text.as_str(), window, cx));
+            this.engine.set_query(text.clone());
         })
         .detach();
         let list = FlatList::new(engine.shared.clone());
@@ -118,6 +131,8 @@ impl Shell {
             page: Page::Explorer,
             query,
             table,
+            filters,
+            show_filters: false,
             changed,
             settings,
             volumes,
@@ -238,12 +253,24 @@ impl Shell {
         )
     }
 
-    fn explorer(&self) -> impl IntoElement {
+    fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.filters.read(cx).active();
+        let label = if active > 0 { format!("Filters · {active}") } else { "Filters".into() };
+        let toggle = Button::new("filters").label(label).on_click(cx.listener(|this, _, _, cx| {
+            this.show_filters = !this.show_filters;
+            cx.notify();
+        }));
         v_flex()
             .size_full()
             .gap_2()
             .p_3()
-            .child(Input::new(&self.query).cleanable(true))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&self.query).cleanable(true)))
+                    .child(if self.show_filters { toggle.primary() } else { toggle }),
+            )
+            .when(self.show_filters, |c| c.child(self.filters.clone()))
             .child(div().flex_1().min_h_0().child(DataTable::new(&self.table)))
     }
 
@@ -269,7 +296,7 @@ impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page = match self.page {
             Page::Dashboard => self.dashboard().into_any_element(),
-            Page::Explorer => self.explorer().into_any_element(),
+            Page::Explorer => self.explorer(cx).into_any_element(),
             Page::Settings => self.settings_page().into_any_element(),
         };
         v_flex()
