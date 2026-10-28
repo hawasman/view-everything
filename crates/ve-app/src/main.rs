@@ -10,6 +10,7 @@ mod engine;
 mod explorer;
 mod format;
 mod settings;
+mod settings_page;
 mod view;
 
 use gpui_kit::*;

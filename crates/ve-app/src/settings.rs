@@ -116,3 +116,35 @@ pub fn load_categories() -> Result<CategoryMap, String> {
         Err(e) => Err(format!("{}: {e}", path.display())),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn volume(mount: &str, removable: bool) -> VolumeInfo {
+        VolumeInfo {
+            mount: mount.into(),
+            fs_type: "ext4".into(),
+            label: String::new(),
+            removable,
+            read_only: false,
+        }
+    }
+
+    #[test]
+    fn volume_choices_and_other_settings_survive_a_save() {
+        let (fixed, usb) = (volume("/", false), volume("/mnt/usb", true));
+        let mut s = Settings::default();
+        assert!(s.is_indexed(&fixed) && !s.is_indexed(&usb));
+        s.set_indexed(&fixed, false);
+        s.set_indexed(&usb, true);
+        s.refresh_minutes = 5;
+        s.theme = ThemeChoice::Dark;
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+        assert!(!back.is_indexed(&fixed) && back.is_indexed(&usb));
+        // Restoring the default leaves no override behind.
+        s.set_indexed(&fixed, true);
+        assert!(s.exclude.is_empty());
+    }
+}

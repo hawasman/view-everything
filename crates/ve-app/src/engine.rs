@@ -63,6 +63,7 @@ pub enum Phase {
 enum Command {
     SetVolumes(Vec<VolumeInfo>),
     Refresh,
+    SetRefresh(Duration),
     Shutdown,
 }
 
@@ -127,6 +128,10 @@ impl Engine {
         let _ = self.commands.send(Command::SetVolumes(volumes));
     }
 
+    pub fn set_refresh(&self, every: Duration) {
+        let _ = self.commands.send(Command::SetRefresh(every));
+    }
+
     pub fn refresh(&self) {
         let _ = self.commands.send(Command::Refresh);
     }
@@ -169,7 +174,7 @@ impl Shared {
 fn run_indexer(
     shared: &Shared,
     mut wanted: Vec<VolumeInfo>,
-    refresh: Duration,
+    mut refresh: Duration,
     commands: &Receiver<Command>,
 ) {
     let index_path = settings::index_path();
@@ -228,6 +233,10 @@ fn run_indexer(
             }
             Ok(Command::Refresh) => {
                 pending = shared.index.read().volumes().map(|(id, _)| id).collect()
+            }
+            Ok(Command::SetRefresh(every)) => {
+                refresh = every;
+                pending = Vec::new();
             }
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
                 save_if_changed(shared, index_path.as_deref(), &mut saved_generation);
