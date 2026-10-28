@@ -278,3 +278,55 @@ impl Render for SettingsPage {
         page
     }
 }
+
+/// Hot-plug: the window hands the Settings page the Volumes mounted now and changes settings
+/// through it, so the page stays the one owner (and writer) of the settings.
+impl SettingsPage {
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// Takes the Volumes mounted now, with a refresh field for each, and tells the window to
+    /// apply the result.
+    pub fn set_mounted(&mut self, volumes: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) {
+        self.volume_refresh = volumes
+            .iter()
+            .map(|v| {
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .step(1.0)
+                        .min(*REFRESH_RANGE.start() as f64)
+                        .max(*REFRESH_RANGE.end() as f64)
+                });
+                let text = self.settings.refresh_minutes_for(v).to_string();
+                input.update(cx, |input, cx| input.set_value(text, window, cx));
+                let identity = v.identity.clone();
+                cx.subscribe_in(&input, window, move |this, input, event: &InputEvent, window, cx| {
+                    if let InputEvent::PressEnter { .. } | InputEvent::Blur = event
+                        && let Some(volume) = this.volumes.iter().find(|v| v.identity == identity).cloned()
+                    {
+                        let minutes = input.read(cx).value().trim().parse::<u64>().ok();
+                        if let Some(m) = minutes.filter(|m| REFRESH_RANGE.contains(m))
+                            && m != this.settings.refresh_minutes_for(&volume)
+                        {
+                            this.settings.volume_refresh_minutes.insert(identity.clone(), m);
+                            this.commit(cx);
+                        }
+                        let text = this.settings.refresh_minutes_for(&volume).to_string();
+                        input.update(cx, |input, cx| input.set_value(text, window, cx));
+                    }
+                })
+                .detach();
+                input
+            })
+            .collect();
+        self.volumes = volumes;
+        self.commit(cx);
+    }
+
+    /// Changes the settings with `change`, saves them and tells the window.
+    pub fn apply(&mut self, change: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
+        change(&mut self.settings);
+        self.commit(cx);
+    }
+}

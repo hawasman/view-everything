@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 /// Changes arrive in bursts (a disk with several partitions); wait for the burst to end.
+#[cfg(target_os = "linux")]
 const SETTLE: Duration = Duration::from_millis(300);
 /// How often platforms without a change notification look again.
 #[cfg(not(target_os = "linux"))]
@@ -113,6 +114,30 @@ mod tests {
             |now| seen.push(now.len()),
         );
         assert_eq!(seen, vec![2, 1]);
+    }
+
+    #[test]
+    fn a_returning_offline_volume_is_queued_for_catch_up_by_the_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let usb = VolumeInfo { mount: dir.path().into(), ..volume("/x") };
+        let index = crate::SharedIndex::new(ve_core::Index::new());
+        crate::reconcile(&index, std::slice::from_ref(&usb), std::slice::from_ref(&usb));
+        let mut looks = vec![vec![usb.clone()], vec![], vec![usb.clone()]].into_iter();
+        let (mut wakes, mut caught_up) = (2, Vec::new());
+        run(
+            || {
+                wakes -= 1;
+                wakes >= 0
+            },
+            || looks.next().unwrap(),
+            |now| {
+                // What the window does: the Volume is wanted whenever it is mounted.
+                let (added, _) = crate::reconcile(&index, &now, &now);
+                caught_up.push((now.len(), added.len(), index.read().volumes().all(|(_, v)| v.online)));
+            },
+        );
+        // Unplugged: offline, nothing to sync. Back: online again and queued to catch up.
+        assert_eq!(caught_up, vec![(0, 0, false), (1, 1, true)]);
     }
 
     /// The Linux wait really is woken by the kernel: a mount in a private mount namespace
