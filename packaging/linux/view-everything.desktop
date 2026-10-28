@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=View Everything
+GenericName=File Search and Disk Usage
+Comment=Find files by name and find what is consuming disk space
+Exec=view-everything
+Icon=view-everything
+Terminal=false
+Categories=System;Utility;FileTools;
+Keywords=search;find;files;disk;usage;treemap;

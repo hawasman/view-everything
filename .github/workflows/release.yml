@@ -1,0 +1,68 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked -p ve-app --target x86_64-pc-windows-msvc
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/view-everything.exe `
+            -DestinationPath dist/view-everything-windows-x86_64-portable.zip
+      - name: Install WiX 3 and cargo-wix
+        shell: pwsh
+        run: |
+          choco install wixtoolset --no-progress -y
+          "C:\Program Files (x86)\WiX Toolset v3.14\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          cargo install cargo-wix --locked
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          # main.wxs expects the exe at target\release; mirror the msvc output there.
+          New-Item -ItemType Directory -Force target/release | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/view-everything.exe target/release/
+          cargo wix -p ve-app --include packaging/windows/main.wxs --no-build --nocapture `
+            --output dist/view-everything-windows-x86_64.msi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+      - name: Build AppImage
+        run: packaging/linux/build-appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

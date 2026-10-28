@@ -1,0 +1,354 @@
+//! Background work: loading, syncing and saving the Index, and computing Views for the UI.
+
+use crate::settings;
+use crate::view::View;
+use chrono::Local;
+use parking_lot::{Mutex, RwLock};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+use ve_core::{CategoryMap, Index, Query, QueryContext, SyncState, VolumeId};
+use ve_scan::{Progress, VolumeInfo};
+
+/// How often a Volume kept current by the NTFS change journal is polled while the app runs.
+const JOURNAL_POLL: Duration = Duration::from_secs(5);
+/// Minimum time between View recomputations while the Index is being filled.
+const VIEW_THROTTLE: Duration = Duration::from_millis(800);
+
+/// State shared between the UI and the background threads.
+pub struct Shared {
+    pub index: RwLock<Index>,
+    pub progress: Progress,
+    pub status: Mutex<Status>,
+    /// The latest View; replaced whole when recomputed.
+    pub view: Mutex<Option<Arc<View>>>,
+    /// Why the current Query text could not be parsed.
+    pub query_error: Mutex<Option<String>>,
+    busy: AtomicBool,
+    ctx: egui::Context,
+}
+
+#[derive(Clone, Debug)]
+pub struct Status {
+    pub phase: Phase,
+    /// The last problem worth telling the user about.
+    pub problem: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum Phase {
+    LoadingIndex,
+    /// Reading Volumes. `catching_up` when a saved Index is being brought up to date rather
+    /// than built from nothing.
+    Syncing {
+        volumes: Vec<PathBuf>,
+        catching_up: bool,
+        started: Instant,
+    },
+    Idle,
+}
+
+enum Command {
+    SetVolumes(Vec<VolumeInfo>),
+    Refresh,
+    Shutdown,
+}
+
+pub struct Engine {
+    pub shared: Arc<Shared>,
+    commands: Sender<Command>,
+    queries: Sender<String>,
+    indexer: Option<JoinHandle<()>>,
+}
+
+impl Engine {
+    /// Starts loading the saved Index, then Catch-up or a first scan of `volumes`.
+    pub fn start(
+        ctx: egui::Context,
+        volumes: Vec<VolumeInfo>,
+        refresh: Duration,
+        categories: CategoryMap,
+    ) -> Engine {
+        let shared = Arc::new(Shared {
+            index: RwLock::new(Index::new()),
+            progress: Progress::default(),
+            status: Mutex::new(Status {
+                phase: Phase::LoadingIndex,
+                problem: None,
+            }),
+            view: Mutex::new(None),
+            query_error: Mutex::new(None),
+            busy: AtomicBool::new(true),
+            ctx,
+        });
+        let (commands, command_rx) = mpsc::channel();
+        let (queries, query_rx) = mpsc::channel();
+        let indexer = {
+            let shared = shared.clone();
+            thread::Builder::new()
+                .name("ve-indexer".into())
+                .spawn(move || run_indexer(&shared, volumes, refresh, &command_rx))
+                .expect("spawn indexer thread")
+        };
+        {
+            let shared = shared.clone();
+            thread::Builder::new()
+                .name("ve-view".into())
+                .spawn(move || run_viewer(&shared, &query_rx, &categories))
+                .expect("spawn view thread");
+        }
+        let _ = queries.send(String::new());
+        Engine {
+            shared,
+            commands,
+            queries,
+            indexer: Some(indexer),
+        }
+    }
+
+    pub fn set_query(&self, text: String) {
+        let _ = self.queries.send(text);
+    }
+
+    pub fn set_volumes(&self, volumes: Vec<VolumeInfo>) {
+        let _ = self.commands.send(Command::SetVolumes(volumes));
+    }
+
+    pub fn refresh(&self) {
+        let _ = self.commands.send(Command::Refresh);
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.shared.busy.load(Ordering::Relaxed)
+    }
+
+    /// Saves the Index and stops. If a sync is still running the app exits without waiting:
+    /// the previously saved Index stays valid and the next launch catches up from it.
+    pub fn shutdown(&mut self) {
+        if self.is_busy() {
+            return;
+        }
+        let _ = self.commands.send(Command::Shutdown);
+        if let Some(indexer) = self.indexer.take() {
+            let _ = indexer.join();
+        }
+    }
+}
+
+impl Shared {
+    fn set_phase(&self, phase: Phase) {
+        self.status.lock().phase = phase;
+        self.ctx.request_repaint();
+    }
+
+    fn report(&self, problem: String) {
+        self.status.lock().problem = Some(problem);
+        self.ctx.request_repaint();
+    }
+}
+
+fn run_indexer(
+    shared: &Shared,
+    mut wanted: Vec<VolumeInfo>,
+    refresh: Duration,
+    commands: &Receiver<Command>,
+) {
+    let index_path = settings::index_path();
+    if let Some(path) = &index_path {
+        match Index::load(path) {
+            Ok(index) => *shared.index.write() = index,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => shared.report(format!(
+                "The saved Index could not be read ({e}); building a new one"
+            )),
+        }
+    }
+    shared.ctx.request_repaint();
+
+    let mut saved_generation = shared.index.read().generation();
+    let mut last_walk: HashMap<VolumeId, Instant> = HashMap::new();
+    reconcile_volumes(shared, &wanted);
+    let mut pending: Vec<VolumeId> = shared.index.read().volumes().map(|(id, _)| id).collect();
+    loop {
+        if !pending.is_empty() {
+            sync_volumes(shared, &pending);
+            let now = Instant::now();
+            last_walk.extend(pending.drain(..).map(|id| (id, now)));
+            save_if_changed(shared, index_path.as_deref(), &mut saved_generation);
+        }
+        shared.busy.store(false, Ordering::Relaxed);
+        shared.set_phase(Phase::Idle);
+
+        let journaled: Vec<VolumeId> = shared
+            .index
+            .read()
+            .volumes()
+            .filter(|(_, v)| matches!(v.sync, SyncState::Ntfs { .. }))
+            .map(|(id, _)| id)
+            .collect();
+        let timeout = if journaled.is_empty() {
+            refresh
+        } else {
+            JOURNAL_POLL.min(refresh)
+        };
+        match commands.recv_timeout(timeout) {
+            Ok(Command::SetVolumes(volumes)) => {
+                wanted = volumes;
+                pending = reconcile_volumes(shared, &wanted);
+            }
+            Ok(Command::Refresh) => {
+                pending = shared.index.read().volumes().map(|(id, _)| id).collect()
+            }
+            Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
+                save_if_changed(shared, index_path.as_deref(), &mut saved_generation);
+                return;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                let due = |id: &VolumeId| last_walk.get(id).is_none_or(|t| t.elapsed() >= refresh);
+                pending = shared
+                    .index
+                    .read()
+                    .volumes()
+                    .map(|(id, _)| id)
+                    .filter(|id| journaled.contains(id) || due(id))
+                    .collect();
+            }
+        }
+        if !pending.is_empty() {
+            shared.busy.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Makes the Index hold exactly the `wanted` Volumes. Returns the ones newly added.
+fn reconcile_volumes(shared: &Shared, wanted: &[VolumeInfo]) -> Vec<VolumeId> {
+    {
+        let mut index = shared.index.write();
+        let unwanted: Vec<VolumeId> = index
+            .volumes()
+            .filter(|(_, v)| !wanted.iter().any(|w| w.mount == v.mount))
+            .map(|(id, _)| id)
+            .collect();
+        for id in unwanted {
+            index.remove_volume(id);
+        }
+    }
+    let mut added = Vec::new();
+    for volume in wanted {
+        let present = shared
+            .index
+            .read()
+            .volumes()
+            .any(|(_, v)| v.mount == volume.mount);
+        if present {
+            continue;
+        }
+        match ve_scan::add_volume(&shared.index, &volume.mount, &volume.fs_type) {
+            Ok(id) => added.push(id),
+            Err(e) => shared.report(format!("Cannot index {}: {e}", volume.mount.display())),
+        }
+    }
+    added
+}
+
+fn sync_volumes(shared: &Shared, volumes: &[VolumeId]) {
+    let (mounts, catching_up) = {
+        let index = shared.index.read();
+        let mounts: Vec<(VolumeId, PathBuf)> = volumes
+            .iter()
+            .filter_map(|&id| Some((id, index.volume(id)?.mount.clone())))
+            .collect();
+        let catching_up = volumes
+            .iter()
+            .filter_map(|&id| index.volume(id))
+            .any(|v| !index.children(v.root).is_empty());
+        (mounts, catching_up)
+    };
+    shared.progress.entries.store(0, Ordering::Relaxed);
+    shared.progress.unreadable.store(0, Ordering::Relaxed);
+    shared.set_phase(Phase::Syncing {
+        volumes: mounts.iter().map(|(_, m)| m.clone()).collect(),
+        catching_up,
+        started: Instant::now(),
+    });
+    thread::scope(|scope| {
+        for (id, mount) in &mounts {
+            scope.spawn(move || {
+                if let Err(e) = ve_scan::sync(&shared.index, *id, &shared.progress) {
+                    shared.report(format!("Could not read {}: {e}", mount.display()));
+                }
+            });
+        }
+    });
+}
+
+fn save_if_changed(shared: &Shared, path: Option<&std::path::Path>, saved_generation: &mut u64) {
+    let Some(path) = path else { return };
+    let index = shared.index.read();
+    if index.generation() == *saved_generation {
+        return;
+    }
+    match index.save(path) {
+        Ok(()) => *saved_generation = index.generation(),
+        Err(e) => shared.report(format!(
+            "Could not save the Index to {}: {e}",
+            path.display()
+        )),
+    }
+}
+
+fn run_viewer(shared: &Shared, queries: &Receiver<String>, categories: &CategoryMap) {
+    let mut text = String::new();
+    let mut query: Option<Query> = None;
+    let mut computed: Option<(String, u64)> = None;
+    let mut last_compute = Instant::now() - VIEW_THROTTLE;
+    loop {
+        match queries.recv_timeout(Duration::from_millis(200)) {
+            Ok(latest) => {
+                text = queries.try_iter().last().unwrap_or(latest);
+                let parsed = if text.trim().is_empty() {
+                    Ok(None)
+                } else {
+                    Query::parse(&text, &QueryContext::new(categories.clone(), Local::now()))
+                        .map(Some)
+                };
+                match parsed {
+                    Ok(parsed) => {
+                        query = parsed;
+                        *shared.query_error.lock() = None;
+                    }
+                    Err(e) => {
+                        *shared.query_error.lock() = Some(e.to_string());
+                        shared.ctx.request_repaint();
+                        continue;
+                    }
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+        if shared.query_error.lock().is_some() {
+            continue;
+        }
+        let generation = shared.index.read().generation();
+        let up_to_date = computed
+            .as_ref()
+            .is_some_and(|(t, g)| *t == text && *g == generation);
+        let only_index_moved = computed.as_ref().is_some_and(|(t, _)| *t == text);
+        if up_to_date || (only_index_moved && last_compute.elapsed() < VIEW_THROTTLE) {
+            continue;
+        }
+        let view = {
+            let index = shared.index.read();
+            View::compute(&index, &text, query.as_ref(), categories)
+        };
+        *shared.view.lock() = Some(Arc::new(view));
+        computed = Some((text.clone(), generation));
+        last_compute = Instant::now();
+        shared.ctx.request_repaint();
+    }
+}

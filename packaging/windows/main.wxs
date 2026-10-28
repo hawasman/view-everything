@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="View Everything" Language="1033" Version="$(var.Version)"
+           Manufacturer="view-everything contributors"
+           UpgradeCode="6F1B0C58-3D2E-4A7B-9C41-8E5A2D7F9B13">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"
+             Description="Find files by name and find what is consuming disk space" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of View Everything is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <WixVariable Id="WixUILicenseRtf" Value="packaging\windows\License.rtf" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="APPLICATIONFOLDER" Name="View Everything" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+    </Directory>
+
+    <DirectoryRef Id="APPLICATIONFOLDER">
+      <Component Id="MainExecutable" Guid="2A9D4E71-5B3C-4F86-A0D2-7C14E9B8F305" Win64="yes">
+        <File Id="ViewEverythingExe" Name="view-everything.exe"
+              Source="target\release\view-everything.exe" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="B7C3E2F4-9A1D-4D58-8E06-3F5A7B2C1D94" Win64="yes">
+        <Shortcut Id="StartMenuShortcutLnk" Name="View Everything"
+                  Description="Find files by name and find what is consuming disk space"
+                  Target="[APPLICATIONFOLDER]view-everything.exe"
+                  WorkingDirectory="APPLICATIONFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\view-everything" Name="StartMenuShortcut"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Complete" Title="View Everything" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+    <UIRef Id="WixUI_Minimal" />
+  </Product>
+</Wix>

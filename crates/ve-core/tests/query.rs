@@ -1,0 +1,304 @@
+use chrono::{Local, TimeZone};
+use ve_core::{Candidate, CategoryMap, Query, QueryContext};
+
+fn context() -> QueryContext {
+    QueryContext::new(
+        CategoryMap::builtin(),
+        Local.with_ymd_and_hms(2025, 3, 14, 12, 0, 0).unwrap(),
+    )
+}
+
+fn file(name: &str) -> Candidate<'_> {
+    Candidate {
+        name,
+        path: None,
+        is_dir: false,
+        logical: 0,
+        modified: 0,
+    }
+}
+
+fn matches(query: &str, candidate: &Candidate) -> bool {
+    Query::parse(query, &context()).unwrap().matches(candidate)
+}
+
+#[test]
+fn plain_text_matches_part_of_a_name_ignoring_case() {
+    assert!(matches("report", &file("Annual-REPORT-2024.pdf")));
+    assert!(!matches("report", &file("summary.pdf")));
+}
+
+#[test]
+fn space_separated_terms_must_all_match() {
+    assert!(matches("tax 2024", &file("tax-return-2024.pdf")));
+    assert!(!matches("tax 2024", &file("tax-return-2023.pdf")));
+}
+
+#[test]
+fn bar_matches_either_side_and_binds_tighter_than_space() {
+    assert!(matches("jpg|png", &file("cat.png")));
+    assert!(!matches("jpg|png", &file("cat.gif")));
+    // `cat dog|bird` means cat AND (dog OR bird).
+    assert!(matches("cat dog|bird", &file("cat-bird.txt")));
+    assert!(!matches("cat dog|bird", &file("dog.txt")));
+}
+
+#[test]
+fn exclamation_excludes_matching_names() {
+    assert!(matches("!tmp", &file("notes.txt")));
+    assert!(!matches("!tmp", &file("notes.tmp")));
+    assert!(matches("notes !backup", &file("notes.txt")));
+    assert!(!matches("notes !backup", &file("notes-backup.txt")));
+}
+
+#[test]
+fn quotes_keep_spaces_inside_one_term() {
+    assert!(matches("\"my file\"", &file("my file.txt")));
+    assert!(!matches("\"my file\"", &file("file my.txt")));
+}
+
+#[test]
+fn empty_query_matches_everything() {
+    assert!(matches("", &file("anything")));
+    assert!(matches("   ", &file("anything")));
+}
+
+fn at(path: &str) -> Candidate<'_> {
+    let name = path.rsplit('/').next().unwrap();
+    Candidate {
+        name,
+        path: Some(path),
+        is_dir: false,
+        logical: 0,
+        modified: 0,
+    }
+}
+
+#[test]
+fn wildcards_match_the_whole_name() {
+    assert!(matches("*.log", &file("Server.LOG")));
+    assert!(!matches("*.log", &file("server.log.gz")));
+    assert!(matches("img_????.jpg", &file("IMG_0042.jpg")));
+    assert!(!matches("img_????.jpg", &file("IMG_00042.jpg")));
+}
+
+#[test]
+fn a_slash_or_backslash_matches_against_the_full_path() {
+    let query = Query::parse("node_modules/", &context()).unwrap();
+    assert!(query.needs_path());
+    assert!(query.matches(&at("/home/me/app/node_modules/react/index.js")));
+    assert!(!query.matches(&at("/home/me/app/src/node_modules.txt")));
+    assert!(matches("users\\me", &at("C:/Users/Me/notes.txt")));
+    assert!(matches(
+        "/home/*/downloads/*.iso",
+        &at("/home/me/Downloads/arch.iso")
+    ));
+    // `*` also spans folder separators, as in Everything.
+    assert!(matches(
+        "/home/*/downloads/*.iso",
+        &at("/home/me/Downloads/old/arch.iso")
+    ));
+    assert!(!matches(
+        "/home/*/downloads/*.iso",
+        &at("/home/me/Downloads/arch.iso.part")
+    ));
+}
+
+#[test]
+fn plain_terms_do_not_need_the_path() {
+    assert!(
+        !Query::parse("report *.pdf", &context())
+            .unwrap()
+            .needs_path()
+    );
+}
+
+fn folder(name: &str) -> Candidate<'_> {
+    Candidate {
+        name,
+        path: None,
+        is_dir: true,
+        logical: 0,
+        modified: 0,
+    }
+}
+
+#[test]
+fn ext_matches_any_listed_extension_of_files_only() {
+    assert!(matches("ext:mp4", &file("Holiday.MP4")));
+    assert!(matches("ext:mp4;mkv", &file("film.mkv")));
+    assert!(!matches("ext:mp4", &file("mp4.txt")));
+    assert!(!matches("ext:mp4", &folder("archive.mp4")));
+}
+
+#[test]
+fn type_matches_files_of_a_category() {
+    assert!(matches("type:video", &file("clip.webm")));
+    assert!(!matches("type:video", &file("song.flac")));
+    assert!(matches("type:other", &file("README")));
+    assert!(!matches("type:image", &folder("photos.png")));
+}
+
+#[test]
+fn type_follows_category_overrides() {
+    let categories =
+        CategoryMap::from_toml("[extensions]\nblend = \"Image\"\nflac = \"Other\"\n").unwrap();
+    let context = QueryContext::new(categories, context().now);
+    assert!(
+        Query::parse("type:image", &context)
+            .unwrap()
+            .matches(&file("scene.blend"))
+    );
+    assert!(
+        Query::parse("type:other", &context)
+            .unwrap()
+            .matches(&file("song.flac"))
+    );
+}
+
+#[test]
+fn unknown_prefixes_are_plain_text() {
+    // Drive letters look like modifiers but are text.
+    assert!(matches("c:\\users", &at("C:/Users/me")));
+    assert!(matches("note:", &file("note: draft.txt")));
+}
+
+#[test]
+fn quoted_modifier_names_are_plain_text() {
+    assert!(matches("\"ext:\"", &file("ext: notes")));
+}
+
+fn sized(logical: u64) -> Candidate<'static> {
+    Candidate {
+        name: "blob.bin",
+        path: None,
+        is_dir: false,
+        logical,
+        modified: 0,
+    }
+}
+
+const MB: u64 = 1024 * 1024;
+
+#[test]
+fn size_compares_logical_size_with_binary_units() {
+    assert!(matches("size:>1gb", &sized(1024 * MB + 1)));
+    assert!(!matches("size:>1gb", &sized(1024 * MB)));
+    assert!(matches("size:>=1gb", &sized(1024 * MB)));
+    assert!(matches("size:<10kb", &sized(10 * 1024 - 1)));
+    assert!(!matches("size:<10kb", &sized(10 * 1024)));
+    assert!(matches("size:<=1.5mb", &sized(MB + MB / 2)));
+    assert!(matches("size:2mb", &sized(2 * MB)));
+    assert!(!matches("size:2mb", &sized(2 * MB + 1)));
+}
+
+#[test]
+fn size_range_includes_both_ends() {
+    assert!(matches("size:1mb..2mb", &sized(MB)));
+    assert!(matches("size:1mb..2mb", &sized(2 * MB)));
+    assert!(!matches("size:1mb..2mb", &sized(2 * MB + 1)));
+}
+
+#[test]
+fn size_never_matches_folders() {
+    assert!(!matches("size:<1kb", &folder("empty")));
+}
+
+fn modified_at(y: i32, mo: u32, d: u32, h: u32) -> Candidate<'static> {
+    let modified = Local
+        .with_ymd_and_hms(y, mo, d, h, 0, 0)
+        .unwrap()
+        .timestamp_nanos_opt()
+        .unwrap();
+    Candidate {
+        name: "doc.txt",
+        path: None,
+        is_dir: false,
+        logical: 0,
+        modified,
+    }
+}
+
+#[test]
+fn dm_matches_a_year_month_or_day_in_local_time() {
+    assert!(matches("dm:2025", &modified_at(2025, 1, 1, 0)));
+    assert!(matches("dm:2025", &modified_at(2025, 12, 31, 23)));
+    assert!(!matches("dm:2025", &modified_at(2024, 12, 31, 23)));
+    assert!(matches("dm:2024-02", &modified_at(2024, 2, 29, 10)));
+    assert!(!matches("dm:2024-02", &modified_at(2024, 3, 1, 0)));
+    assert!(matches("dm:2024-02-29", &modified_at(2024, 2, 29, 23)));
+}
+
+#[test]
+fn dm_comparisons_and_ranges() {
+    assert!(matches("dm:>2024", &modified_at(2025, 1, 1, 0)));
+    assert!(!matches("dm:>2024", &modified_at(2024, 6, 1, 0)));
+    assert!(matches("dm:>=2024", &modified_at(2024, 6, 1, 0)));
+    assert!(matches("dm:<2024-06", &modified_at(2024, 5, 31, 23)));
+    assert!(!matches("dm:<2024-06", &modified_at(2024, 6, 1, 0)));
+    assert!(matches("dm:<=2024-06", &modified_at(2024, 6, 30, 23)));
+    assert!(matches("dm:2023..2024-03", &modified_at(2024, 3, 31, 23)));
+    assert!(!matches("dm:2023..2024-03", &modified_at(2024, 4, 1, 0)));
+}
+
+#[test]
+fn dm_today_and_yesterday_follow_the_context_clock() {
+    // The context clock reads 2025-03-14 12:00 local time.
+    assert!(matches("dm:today", &modified_at(2025, 3, 14, 1)));
+    assert!(!matches("dm:today", &modified_at(2025, 3, 13, 23)));
+    assert!(matches("dm:yesterday", &modified_at(2025, 3, 13, 23)));
+}
+
+#[test]
+fn dm_never_matches_folders() {
+    let mut candidate = modified_at(2025, 3, 14, 1);
+    candidate.is_dir = true;
+    assert!(
+        !Query::parse("dm:2025", &context())
+            .unwrap()
+            .matches(&candidate)
+    );
+}
+
+#[test]
+fn regex_matches_names_ignoring_case() {
+    assert!(matches(
+        "regex:^img_\\d{4}\\.jpe?g$",
+        &file("IMG_2024.JPEG")
+    ));
+    assert!(!matches(
+        "regex:^img_\\d{4}\\.jpe?g$",
+        &file("my_img_2024.jpg")
+    ));
+}
+
+#[test]
+fn invalid_modifier_values_are_errors_naming_the_modifier() {
+    for query in [
+        "size:huge",
+        "size:5zb",
+        "dm:2025-13",
+        "dm:soon",
+        "type:movies",
+        "regex:(",
+        "ext:",
+    ] {
+        let error = Query::parse(query, &context()).expect_err(query);
+        let modifier = query.split(':').next().unwrap();
+        assert!(error.0.contains(modifier), "{query}: {error}");
+    }
+}
+
+#[test]
+fn exclusions_are_the_stand_alone_negated_terms() {
+    let query = Query::parse("node_modules !*.map !ext:log|ext:tmp", &context()).unwrap();
+    assert!(query.passes_exclusions(&file("index.js")));
+    assert!(!query.passes_exclusions(&file("index.js.map")));
+    // A negation inside an OR group is not a stand-alone exclusion.
+    assert!(query.passes_exclusions(&file("debug.log")));
+    assert!(
+        Query::parse("report", &context())
+            .unwrap()
+            .passes_exclusions(&file("anything"))
+    );
+}

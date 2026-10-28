@@ -1,0 +1,31 @@
+[package]
+name = "ve-scan"
+description = "Volume discovery, scanning and Catch-up for view-everything"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+parking_lot = "0.13.0"
+rayon = "1.12.0"
+ve-core = { path = "../ve-core" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+flate2 = "1.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
