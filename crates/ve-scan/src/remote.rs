@@ -240,8 +240,8 @@ fn sync_sftp(program: &str, index: &SharedIndex, root: EntryId, remote: &Remote,
         }
     });
     applier.apply(&mut batch);
-    // The walk dropped ssh's stdin and stdout, so it ends; a failed walk may leave it running.
-    let _ = child.kill();
+    // The walk dropped ssh's stdin and stdout, so ssh ends on its own; its exit code says why a
+    // failed walk failed (killing it here would race with that).
     let status = child.wait()?;
     let stderr = stderr.join().unwrap_or_default();
     let walked = walked.map_err(|e| match status.code() {
