@@ -6,10 +6,12 @@
 
 mod app;
 mod bench;
+mod categories;
 mod engine;
 mod explorer;
 mod format;
 mod settings;
+mod treemap;
 mod view;
 
 use gpui_kit::*;

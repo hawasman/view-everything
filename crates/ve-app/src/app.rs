@@ -1,7 +1,9 @@
 //! The window: sidebar, Query bar, Explorer flat list and status bar.
 
 use crate::engine::{Engine, Phase, Repaint};
+use crate::categories::CategoryPanel;
 use crate::explorer::FlatList;
+use crate::treemap::Treemap;
 use crate::format;
 use crate::settings::{Settings, ThemeChoice};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -51,6 +53,8 @@ pub struct Shell {
     page: Page,
     query: Entity<InputState>,
     table: Entity<TableState<FlatList>>,
+    treemap: Entity<Treemap>,
+    categories: Entity<CategoryPanel>,
     /// Set by the Engine's threads; cleared when the window has caught up.
     changed: Arc<AtomicBool>,
     settings: Settings,
@@ -78,7 +82,7 @@ impl Shell {
             let changed = changed.clone();
             Arc::new(move || changed.store(true, Ordering::Relaxed))
         };
-        let engine = Engine::start(repaint, indexed, refresh, categories);
+        let engine = Engine::start(repaint, indexed, refresh, categories.clone());
 
         let query = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Search names, or try size:>1gb type:video")
@@ -91,6 +95,8 @@ impl Shell {
         .detach();
         let list = FlatList::new(engine.shared.clone());
         let table = cx.new(|cx| TableState::new(list, window, cx).col_resizable(true));
+        let treemap = cx.new(|cx| Treemap::new(engine.shared.clone(), categories.clone(), cx));
+        let category_panel = cx.new(|cx| CategoryPanel::new(engine.shared.clone(), query.clone(), cx));
 
         if std::env::var_os("VE_BENCH").is_some() {
             crate::bench::start(table.clone(), window);
@@ -118,6 +124,8 @@ impl Shell {
             page: Page::Explorer,
             query,
             table,
+            treemap,
+            categories: category_panel,
             changed,
             settings,
             volumes,
@@ -244,7 +252,14 @@ impl Shell {
             .gap_2()
             .p_3()
             .child(Input::new(&self.query).cleanable(true))
-            .child(div().flex_1().min_h_0().child(DataTable::new(&self.table)))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(div().flex_1().min_w_0().h_full().child(DataTable::new(&self.table)))
+                    .child(div().w(px(280.)).h_full().child(self.categories.clone())),
+            )
+            .child(div().h(px(340.)).child(self.treemap.clone()))
     }
 
     fn dashboard(&self) -> impl IntoElement {
