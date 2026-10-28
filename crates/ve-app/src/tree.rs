@@ -47,7 +47,6 @@ struct Sort {
 struct Cells {
     depth: usize,
     name: String,
-    is_dir: bool,
     expandable: bool,
     open: bool,
     /// Shown only for what it contains, so drawn muted.
@@ -280,7 +279,6 @@ impl TableDelegate for TreeList {
                 Some(Cells {
                     depth,
                     name: index.name(id).to_owned(),
-                    is_dir,
                     expandable: index.children(id).iter().any(|&c| view.filter.is_shown(c)),
                     open: self.expanded.contains(&id),
                     muted: !view.query.trim().is_empty() && !view.filter.is_matched(id),

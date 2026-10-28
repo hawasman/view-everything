@@ -26,8 +26,10 @@ fn hx(v: u32) -> Hsla {
     rgb(v).into()
 }
 
-/// Every colour token of `ve.css`.
+/// Every colour token of `ve.css`, ported whole; the positive and negative pills wait for
+/// the screens that use them.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub struct Palette {
     pub ground: Hsla,
     pub surface: Hsla,

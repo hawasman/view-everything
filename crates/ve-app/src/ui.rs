@@ -133,7 +133,9 @@ impl Pill {
     }
 }
 
+/// Accent and Warning tag the Catch-up and Offline states of Locations (Offline Volumes).
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub enum Tone {
     Neutral,
     Accent,

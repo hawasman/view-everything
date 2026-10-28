@@ -208,7 +208,8 @@ impl Shell {
             query,
             table,
             tree,
-            show_tree: true,
+            // The 10M-Entry measurement scrolls the flat list, so it must be the one on screen.
+            show_tree: !cfg!(feature = "bench") || std::env::var_os("VE_BENCH").is_none(),
             filters,
             show_filters: false,
             settings_page,

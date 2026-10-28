@@ -578,7 +578,7 @@ impl Render for Treemap {
                     let fill = if tile.subdivided { free } else { cats[tile.category as usize] };
                     // 1px seams in the panel colour separate tiles; tiny ones have no room.
                     let big = tile.rect.width() > 3.0 && tile.rect.height() > 3.0;
-                    let radius = if big && !tile.subdivided { 4. } else { 0. };
+                    let radius = if big && !tile.subdivided && tile.rect.width() > 40.0 && tile.rect.height() > 40.0 { 4. } else { 0. };
                     window.paint_quad(quad(
                         at(tile.rect),
                         radius,
