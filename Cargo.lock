@@ -4383,6 +4383,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "opener"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c826edd923022c3907477383fc77708fa68807170754fe7be1fd3496c57a1f1c"
+dependencies = [
+ "normpath",
+ "url",
+ "windows-sys 0.61.2",
+ "zbus",
+]
+
+[[package]]
 name = "openssl-probe"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6568,6 +6580,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "trash"
+version = "5.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be89b3fe156965d29ac4f8522f3a640c655affdd9f21cb4f36857f0c92c00317"
+dependencies = [
+ "chrono",
+ "libc",
+ "log",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+ "once_cell",
+ "percent-encoding",
+ "scopeguard",
+ "urlencoding",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "triomphe"
 version = "0.1.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6698,7 +6728,14 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
+
+[[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "usvg"
@@ -6797,9 +6834,11 @@ dependencies = [
  "chrono",
  "dirs 7.0.0",
  "gpui-kit",
+ "opener",
  "parking_lot 0.13.0",
  "serde",
  "toml 1.1.8+spec-1.1.0",
+ "trash",
  "ve-core",
  "ve-scan",
  "windows-sys 0.61.2",
@@ -8437,6 +8476,7 @@ dependencies = [
  "enumflags2",
  "serde",
  "serde_bytes",
+ "url",
  "winnow 1.0.4",
  "zcheapstr",
  "zvariant_derive",

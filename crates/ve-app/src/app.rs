@@ -4,12 +4,14 @@ use crate::engine::{Engine, Phase, Repaint};
 use crate::explorer::FlatList;
 use crate::format;
 use crate::settings::{Settings, ThemeChoice};
+use crate::trash::{self, Trash};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::table::{DataTable, TableState};
-use gpui_kit::component::{ActiveTheme as _, IconName, Theme, ThemeMode, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _, Theme, ThemeMode, h_flex, v_flex};
 use gpui_kit::*;
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -54,6 +56,7 @@ pub struct Shell {
     /// Set by the Engine's threads; cleared when the window has caught up.
     changed: Arc<AtomicBool>,
     settings: Settings,
+    trash: Trash,
     volumes: Vec<VolumeInfo>,
     startup_problems: Vec<String>,
 }
@@ -78,7 +81,9 @@ impl Shell {
             let changed = changed.clone();
             Arc::new(move || changed.store(true, Ordering::Relaxed))
         };
-        let engine = Engine::start(repaint, indexed, refresh, categories);
+        let engine = Engine::start(repaint.clone(), indexed, refresh, categories);
+
+        let trash = Trash::new(engine.shared.clone(), repaint);
 
         let query = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Search names, or try size:>1gb type:video")
@@ -120,6 +125,7 @@ impl Shell {
             table,
             changed,
             settings,
+            trash,
             volumes,
             startup_problems,
         }
@@ -216,6 +222,43 @@ impl Shell {
             .border_color(cx.theme().border)
             .text_sm()
             .left(left)
+            .right(self.trash_controls(cx))
+    }
+
+    fn trash_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let size = self.trash.size();
+        let label = size.map_or_else(|| "Trash".to_owned(), |s| format!("{} in Trash", format::size(s)));
+        let mut controls = h_flex().gap_2().child(
+            Button::new("open-trash")
+                .ghost()
+                .xsmall()
+                .label(label)
+                .tooltip("Trashed files still take up space until the Trash is emptied. Click to open the Trash.")
+                .on_click(cx.listener(|this, _, window, cx| this.trash.open(window, cx))),
+        );
+        if trash::CAN_EMPTY {
+            controls = controls.child(
+                Button::new("empty-trash")
+                    .ghost()
+                    .xsmall()
+                    .label("Empty Trash")
+                    .disabled(size == Some(0))
+                    .on_click(cx.listener(|this, _, window, cx| this.trash.ask_empty(window, cx))),
+            );
+        }
+        controls
+    }
+
+    /// The Entry under the flat list's selected row.
+    fn selected_entry(&self, cx: &App) -> Option<ve_core::EntryId> {
+        let row = self.table.read(cx).selected_row()?;
+        self.table.read(cx).delegate().view.as_ref()?.flat.get(row).copied()
+    }
+
+    fn ask_trash_selected(&self, window: &mut Window, cx: &mut App) {
+        if let Some(id) = self.selected_entry(cx) {
+            self.trash.ask_trash(&[id], &self.volumes, window, cx);
+        }
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -238,12 +281,29 @@ impl Shell {
         )
     }
 
-    fn explorer(&self) -> impl IntoElement {
+    fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
             .gap_2()
             .p_3()
-            .child(Input::new(&self.query).cleanable(true))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "delete" && this.table.focus_handle(cx).is_focused(window) {
+                    this.ask_trash_selected(window, cx);
+                }
+            }))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&self.query).cleanable(true)))
+                    .child(
+                        Button::new("trash")
+                            .icon(IconName::Delete)
+                            .label("Move to Trash")
+                            .danger()
+                            .disabled(self.selected_entry(cx).is_none())
+                            .on_click(cx.listener(|this, _, window, cx| this.ask_trash_selected(window, cx))),
+                    ),
+            )
             .child(div().flex_1().min_h_0().child(DataTable::new(&self.table)))
     }
 
@@ -269,7 +329,7 @@ impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page = match self.page {
             Page::Dashboard => self.dashboard().into_any_element(),
-            Page::Explorer => self.explorer().into_any_element(),
+            Page::Explorer => self.explorer(cx).into_any_element(),
             Page::Settings => self.settings_page().into_any_element(),
         };
         v_flex()

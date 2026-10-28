@@ -3,7 +3,6 @@
 use crate::engine::{Repaint, Shared};
 use crate::format;
 use gpui_kit::component::button::ButtonVariant;
-use gpui_kit::component::dialog::AlertDialog;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, v_flex};
 use gpui_kit::*;
