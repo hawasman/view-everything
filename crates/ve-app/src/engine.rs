@@ -45,8 +45,9 @@ pub struct Shared {
 #[derive(Clone, Debug)]
 pub struct Status {
     pub phase: Phase,
-    /// The last problem worth telling the user about.
-    pub problem: Option<String>,
+    /// Problems worth telling the user about, as (cause, message). A cause is reported once and
+    /// dropped when the condition that raised it resolves.
+    pub problems: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -89,7 +90,7 @@ impl Engine {
             progress: Progress::default(),
             status: Mutex::new(Status {
                 phase: Phase::LoadingIndex,
-                problem: None,
+                problems: Vec::new(),
             }),
             view: Mutex::new(None),
             query_error: Mutex::new(None),
@@ -167,9 +168,25 @@ impl Shared {
         (self.repaint)();
     }
 
-    fn report(&self, problem: String) {
-        self.status.lock().problem = Some(problem);
+    fn report(&self, cause: impl Into<String>, problem: String) {
+        let cause = cause.into();
+        let mut status = self.status.lock();
+        status.problems.retain(|(c, _)| *c != cause);
+        status.problems.push((cause, problem));
+        drop(status);
         (self.repaint)();
+    }
+
+    /// Forgets the problem raised for `cause`, now that it no longer holds.
+    fn resolve(&self, cause: &str) {
+        let mut status = self.status.lock();
+        let before = status.problems.len();
+        status.problems.retain(|(c, _)| c != cause);
+        let changed = status.problems.len() != before;
+        drop(status);
+        if changed {
+            (self.repaint)();
+        }
     }
 }
 
@@ -184,7 +201,7 @@ fn run_indexer(
         match Index::load(path) {
             Ok(index) => *shared.index.write() = index,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => shared.report(format!(
+            Err(e) => shared.report("save", format!(
                 "The saved Index could not be read ({e}); building a new one"
             )),
         }
@@ -285,9 +302,13 @@ fn reconcile_volumes(shared: &Shared, wanted: &[VolumeInfo]) -> Vec<VolumeId> {
         if present {
             continue;
         }
+        let cause = format!("volume {}", volume.mount.display());
         match ve_scan::add_volume(&shared.index, &volume.mount, &volume.fs_type) {
-            Ok(id) => added.push(id),
-            Err(e) => shared.report(format!("Cannot index {}: {e}", volume.mount.display())),
+            Ok(id) => {
+                shared.resolve(&cause);
+                added.push(id);
+            }
+            Err(e) => shared.report(cause, format!("Cannot index {}: {e}", volume.mount.display())),
         }
     }
     added
@@ -334,8 +355,11 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
         thread::scope(|scope| {
             for (id, mount) in &mounts {
                 scope.spawn(move || {
-                    if let Err(e) = ve_scan::sync(&shared.index, *id, &shared.progress) {
-                        shared.report(format!("Could not read {}: {e}", mount.display()));
+                    let cause = format!("volume {}", mount.display());
+                    match ve_scan::sync(&shared.index, *id, &shared.progress) {
+                        Ok(_) => shared.resolve(&cause),
+                        Err(e) => shared
+                            .report(cause, format!("Could not read {}: {e}", mount.display())),
                     }
                 });
             }
@@ -352,8 +376,11 @@ fn save_if_changed(shared: &Shared, path: Option<&std::path::Path>, saved_genera
         return;
     }
     match index.save(path) {
-        Ok(()) => *saved_generation = index.generation(),
-        Err(e) => shared.report(format!(
+        Ok(()) => {
+            *saved_generation = index.generation();
+            shared.resolve("save");
+        }
+        Err(e) => shared.report("save", format!(
             "Could not save the Index to {}: {e}",
             path.display()
         )),
