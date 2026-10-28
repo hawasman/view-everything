@@ -63,8 +63,11 @@ struct Tile {
     rect: Rect,
     id: EntryId,
     is_dir: bool,
-    /// Meaningful for files only.
+    /// A file's Category; for a folder shown as one block (see `layout`), the Category holding
+    /// most of its size. Meaningless for a folder that is subdivided.
     category: Category,
+    /// A folder whose children are laid out inside it.
+    subdivided: bool,
 }
 
 /// A Category's colour, tuned per theme mode.
@@ -171,11 +174,15 @@ fn layout(
     root: EntryId,
     rect: Rect,
 ) -> Vec<Tile> {
-    let mut tiles = Vec::new();
-    let mut folders = vec![(root, rect)];
+    let mut tiles: Vec<Tile> = Vec::new();
+    // A folder to subdivide: the folder, its area and the tile that stands for it.
+    let mut folders = vec![(root, rect, None::<usize>)];
     let mut queue = BinaryHeap::from([(area_key(rect), 0usize)]);
-    while let Some((_, slot)) = queue.pop() {
-        let (dir, area) = folders[slot];
+    'layout: while let Some((_, slot)) = queue.pop() {
+        let (dir, area, tile) = folders[slot];
+        if let Some(tile) = tile {
+            tiles[tile].subdivided = true;
+        }
         let mut items: Vec<(f64, EntryId)> = index
             .children(dir)
             .iter()
@@ -186,7 +193,7 @@ fn layout(
         items.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
         for (rect, id) in squarify(&items, area) {
             if tiles.len() >= MAX_TILES {
-                return tiles;
+                break 'layout;
             }
             let is_dir = index.is_dir(id);
             let category = if is_dir {
@@ -199,15 +206,56 @@ fn layout(
                 id,
                 is_dir,
                 category,
+                subdivided: false,
             });
             if is_dir && rect.width() >= MIN_FOLDER_SIDE && rect.height() >= MIN_FOLDER_SIDE {
                 let inner = rect.shrink(1.0);
                 queue.push((area_key(inner), folders.len()));
-                folders.push((id, inner));
+                folders.push((id, inner, Some(tiles.len() - 1)));
             }
         }
     }
+    // Folders left as one block (too small, or the tile budget ran out before their turn) take
+    // the colour of what is inside them rather than showing as empty space.
+    for tile in tiles.iter_mut().filter(|t| t.is_dir && !t.subdivided) {
+        tile.category = dominant_category(index, filter, categories, tile.id);
+    }
     tiles
+}
+
+/// How many Entries under a folder are looked at to pick its colour.
+const SAMPLE: usize = 200;
+
+/// The Category with the most On-disk Size among the first files found under `dir`.
+fn dominant_category(
+    index: &Index,
+    filter: &Filter,
+    categories: &CategoryMap,
+    dir: EntryId,
+) -> Category {
+    let mut bytes = [0u64; Category::ALL.len()];
+    let mut stack = vec![dir];
+    let mut seen = 0;
+    while let Some(id) = stack.pop() {
+        for &child in index.children(id) {
+            if !filter.is_shown(child) {
+                continue;
+            }
+            seen += 1;
+            if index.is_dir(child) {
+                stack.push(child);
+            } else {
+                let category = categories.of_name(index.name(child));
+                bytes[category as usize] += index.on_disk(child);
+            }
+            if seen >= SAMPLE {
+                stack.clear();
+                break;
+            }
+        }
+    }
+    let best = (0..bytes.len()).max_by_key(|&i| bytes[i]).unwrap_or(0);
+    Category::ALL[best]
 }
 
 fn area_key(rect: Rect) -> u64 {
@@ -313,6 +361,8 @@ pub struct Treemap {
     tiles: Rc<Vec<Tile>>,
     /// What `tiles` were laid out for; hit-testing is off while it trails the request.
     tiles_key: Option<LayoutKey>,
+    /// The View, zoom and size last turned into a layout request.
+    asked: Option<(Option<u64>, Option<EntryId>, [i32; 2])>,
     /// The drawing area in window coordinates, as of the last paint.
     bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The tile under the pointer, with the pointer's position inside the drawing area.
@@ -339,6 +389,7 @@ impl Treemap {
             selected: None,
             tiles: Rc::new(Vec::new()),
             tiles_key: None,
+            asked: None,
             bounds: Rc::default(),
             hovered: None,
         }
@@ -360,21 +411,20 @@ impl Treemap {
 
     fn poll(&mut self, cx: &mut Context<Self>) {
         let latest = self.shared.view.lock().clone();
-        let same = match (&self.view, &latest) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same {
+        if !crate::view::same(&self.view, &latest) {
             self.view = latest;
             cx.notify();
         }
         let size = self.bounds.get().size;
         let (w, h) = (f32::from(size.width), f32::from(size.height));
+        // Looking up the root locks the Index, so only do it when something it depends on moved.
+        let asked = (self.view.as_ref().map(|v| v.id), self.zoom, [w.round() as i32, h.round() as i32]);
         if let Some(view) = &self.view
             && w > 0.0
             && h > 0.0
+            && self.asked != Some(asked)
         {
+            self.asked = Some(asked);
             let root = self.root(&self.shared.index.read(), view);
             if let Some(root) = root {
                 self.layouter.request(view, root, (w, h));
@@ -516,7 +566,7 @@ impl Render for Treemap {
                     )
                 };
                 for tile in tiles.iter() {
-                    let fill = if tile.is_dir {
+                    let fill = if tile.subdivided {
                         folder
                     } else {
                         category_color(tile.category, dark)
@@ -648,6 +698,7 @@ mod tests {
             id: EntryId(id),
             is_dir,
             category: Category::Other,
+            subdivided: is_dir,
         };
         let tiles = vec![tile(1, outer, true), tile(2, outer.shrink(10.0), false)];
         assert_eq!(hit(&tiles, 50.0, 50.0).unwrap().id, EntryId(2));
