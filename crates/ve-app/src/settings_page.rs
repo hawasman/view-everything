@@ -222,7 +222,13 @@ impl SettingsPage {
         let (rule, muted) = (p.rule, p.muted);
         let volume = &self.volumes[ix];
         let name = crate::app::volume_name(volume);
-        let kind = if volume.removable { "Removable" } else { "Local Volume" };
+        let kind = if volume.network {
+            "Network share"
+        } else if volume.removable {
+            "Removable"
+        } else {
+            "Local Volume"
+        };
         let mut notes = vec![volume.mount.display().to_string(), volume.fs_type.clone()];
         if volume.read_only {
             notes.push("read-only".into());
@@ -243,8 +249,7 @@ impl SettingsPage {
                             .gap(px(8.))
                             .items_center()
                             .child(div().font_weight(FontWeight::MEDIUM).child(name))
-                            .child(tag(kind, Tone::Neutral, cx))
-                            .when(volume.network, |d| d.child(tag("Network share", Tone::Neutral, cx))),
+                            .child(tag(kind, Tone::Neutral, cx)),
                     )
                     .child(div().text_xs().text_color(muted).truncate().child(notes.join(" · "))),
             )

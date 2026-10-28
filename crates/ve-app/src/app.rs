@@ -201,7 +201,7 @@ impl Shell {
         // Volumes mounted while running: a returning Offline Volume catches up at once, a new
         // removable one is offered for indexing.
         #[cfg(feature = "bench")]
-        let watching = std::env::var_os("VE_BENCH_MOUNT").is_none();
+        let watching = std::env::var_os("VE_BENCH_MOUNT").is_none() && std::env::var_os("VE_FAKE_SHARE").is_none();
         #[cfg(not(feature = "bench"))]
         let watching = true;
         if watching {
