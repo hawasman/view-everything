@@ -1,15 +1,17 @@
 //! The Explorer's tree: folders that expand on demand, each level sorted by Filtered Size.
 
 use crate::engine::Shared;
-use crate::view::{self, View};
 use crate::format;
+use crate::view::{self, View};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex};
 use gpui_kit::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use ve_core::{EntryId, Index};
 
+/// Rows kept in `TreeList::cells` before it starts over.
+const CACHED_ROWS: usize = 512;
 const INDENT: f32 = 16.;
 
 const COLUMNS: [(&str, f32, bool); 6] = [
@@ -36,7 +38,6 @@ struct Sort {
 
 /// Everything one visible row shows, read under a single lock of the Index.
 struct Cells {
-    row: usize,
     depth: usize,
     name: String,
     is_dir: bool,
@@ -53,7 +54,8 @@ pub struct TreeList {
     expanded: HashSet<EntryId>,
     rows: Vec<Row>,
     sort: Sort,
-    cells: Option<Cells>,
+    /// Rows drawn recently; see `FlatList::rows`. Dropped when the rows change.
+    cells: HashMap<usize, Cells>,
 }
 
 impl TreeList {
@@ -67,7 +69,7 @@ impl TreeList {
                 on_disk: true,
                 descending: true,
             },
-            cells: None,
+            cells: HashMap::new(),
         }
     }
 
@@ -92,7 +94,10 @@ impl TreeList {
     /// never read.
     fn rebuild(&mut self) {
         self.rows.clear();
-        let Some(view) = self.view.clone() else { return };
+        self.cells.clear();
+        let Some(view) = self.view.clone() else {
+            return;
+        };
         let index = self.shared.index.read();
         let roots: Vec<EntryId> = index.volumes().map(|(_, v)| v.root).collect();
         let mut stack = self.shown(&index, &view, roots, 0);
@@ -180,36 +185,51 @@ impl TableDelegate for TreeList {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
-        self.cells = self.view.clone().and_then(|view| {
-            let index = self.shared.index.read();
-            let Row { id, depth } = *self.rows.get(row)?;
-            if !index.is_live(id) {
-                return None;
+        if self.cells.len() > CACHED_ROWS {
+            self.cells.clear();
+        }
+        if let (false, Some(view)) = (self.cells.contains_key(&row), self.view.clone()) {
+            let cells = (|| {
+                let index = self.shared.index.read();
+                let Row { id, depth } = *self.rows.get(row)?;
+                if !index.is_live(id) {
+                    return None;
+                }
+                let totals = view.filter.totals(&index, id);
+                let parent = match index.parent(id) {
+                    Some(p) => view.filter.totals(&index, p).on_disk,
+                    None => view.total.on_disk,
+                };
+                let share = if parent > 0 {
+                    totals.on_disk as f64 / parent as f64
+                } else {
+                    1.0
+                };
+                let is_dir = index.is_dir(id);
+                Some(Cells {
+                    depth,
+                    name: index.name(id).to_owned(),
+                    is_dir,
+                    expandable: index.children(id).iter().any(|&c| view.filter.is_shown(c)),
+                    open: self.expanded.contains(&id),
+                    muted: !view.query.trim().is_empty() && !view.filter.is_matched(id),
+                    texts: [
+                        format::size(totals.on_disk),
+                        format::size(totals.logical),
+                        format!("{:.1}%", share * 100.0),
+                        if is_dir {
+                            format::count(totals.files)
+                        } else {
+                            String::new()
+                        },
+                        format::time(index.modified(id)),
+                    ],
+                })
+            })();
+            if let Some(cells) = cells {
+                self.cells.insert(row, cells);
             }
-            let totals = view.filter.totals(&index, id);
-            let parent = match index.parent(id) {
-                Some(p) => view.filter.totals(&index, p).on_disk,
-                None => view.total.on_disk,
-            };
-            let share = if parent > 0 { totals.on_disk as f64 / parent as f64 } else { 1.0 };
-            let is_dir = index.is_dir(id);
-            Some(Cells {
-                row,
-                depth,
-                name: index.name(id).to_owned(),
-                is_dir,
-                expandable: index.children(id).iter().any(|&c| view.filter.is_shown(c)),
-                open: self.expanded.contains(&id),
-                muted: !view.query.trim().is_empty() && !view.filter.is_matched(id),
-                texts: [
-                    format::size(totals.on_disk),
-                    format::size(totals.logical),
-                    format!("{:.1}%", share * 100.0),
-                    if is_dir { format::count(totals.files) } else { String::new() },
-                    format::time(index.modified(id)),
-                ],
-            })
-        });
+        }
         div().id(("row", row))
     }
 
@@ -220,18 +240,29 @@ impl TableDelegate for TreeList {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let Some(c) = self.cells.as_ref().filter(|c| c.row == row) else {
+        let Some(c) = self.cells.get(&row) else {
             return div().into_any_element();
         };
         let theme = cx.theme();
         let cell = h_flex().size_full().overflow_hidden().whitespace_nowrap();
         if col > 0 {
-            let cell = if col == 1 { cell } else { cell.text_color(theme.muted_foreground) };
-            return cell.justify_end().child(c.texts[col - 1].clone()).into_any_element();
+            let cell = if col == 1 {
+                cell
+            } else {
+                cell.text_color(theme.muted_foreground)
+            };
+            return cell
+                .justify_end()
+                .child(c.texts[col - 1].clone())
+                .into_any_element();
         }
         let id = self.rows[row].id;
         let chevron = if c.expandable {
-            let icon = if c.open { IconName::ChevronDown } else { IconName::ChevronRight };
+            let icon = if c.open {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            };
             div()
                 .id(("toggle", row))
                 .w_4()
@@ -246,14 +277,22 @@ impl TableDelegate for TreeList {
         } else {
             div().id(("toggle", row)).w_4().flex_shrink_0()
         };
-        let icon = if c.is_dir { IconName::Folder } else { IconName::File };
+        let icon = if c.is_dir {
+            IconName::Folder
+        } else {
+            IconName::File
+        };
         let name = h_flex()
             .gap_1()
             .child(Icon::new(icon).size_4().text_color(theme.muted_foreground))
             .child(c.name.clone());
         cell.pl(px(c.depth as f32 * INDENT))
             .child(chevron)
-            .child(if c.muted { name.text_color(theme.muted_foreground) } else { name })
+            .child(if c.muted {
+                name.text_color(theme.muted_foreground)
+            } else {
+                name
+            })
             .into_any_element()
     }
 }

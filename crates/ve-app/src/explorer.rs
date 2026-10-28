@@ -6,6 +6,7 @@ use crate::{format, view::View};
 use gpui_kit::component::table::{Column, TableDelegate, TableState};
 use gpui_kit::component::{ActiveTheme as _, h_flex};
 use gpui_kit::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 const COLUMNS: [(&str, f32, bool); 6] = [
@@ -17,11 +18,15 @@ const COLUMNS: [(&str, f32, bool); 6] = [
     ("Modified", 140., true),
 ];
 
+/// Rows kept in `FlatList::rows` before it starts over.
+const CACHED_ROWS: usize = 512;
+
 pub struct FlatList {
     shared: Arc<Shared>,
     pub view: Option<Arc<View>>,
-    /// The visible row's cell texts, filled by `render_tr` so the Index is locked once per row.
-    row: Option<(usize, [String; 6])>,
+    /// Cell texts of rows drawn recently, filled by `render_tr` so the Index is locked once per
+    /// row rather than once per cell. Dropped when the View changes.
+    rows: HashMap<usize, [String; 6]>,
 }
 
 impl FlatList {
@@ -29,7 +34,7 @@ impl FlatList {
         Self {
             shared,
             view: None,
-            row: None,
+            rows: HashMap::new(),
         }
     }
 
@@ -39,6 +44,7 @@ impl FlatList {
             return false;
         }
         self.view = view;
+        self.rows.clear();
         true
     }
 }
@@ -64,27 +70,35 @@ impl TableDelegate for FlatList {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
-        self.row = self.view.clone().and_then(|view| {
+        if self.rows.len() > CACHED_ROWS {
+            self.rows.clear();
+        }
+        if let (false, Some(view)) = (self.rows.contains_key(&row), self.view.clone()) {
             let index = self.shared.index.read();
-            let id = *view.flat.get(row)?;
-            if !index.is_live(id) {
-                return None;
+            let id = view.flat.get(row).copied().filter(|&id| index.is_live(id));
+            if let Some(id) = id {
+                let totals = view.filter.totals(&index, id);
+                let files = if index.is_dir(id) {
+                    format::count(totals.files)
+                } else {
+                    String::new()
+                };
+                let folder = index
+                    .parent(id)
+                    .map(|p| index.path(p).display().to_string());
+                self.rows.insert(
+                    row,
+                    [
+                        index.name(id).to_owned(),
+                        folder.unwrap_or_default(),
+                        format::size(totals.on_disk),
+                        format::size(totals.logical),
+                        files,
+                        format::time(index.modified(id)),
+                    ],
+                );
             }
-            let totals = view.filter.totals(&index, id);
-            let files = if index.is_dir(id) { format::count(totals.files) } else { String::new() };
-            let folder = index.parent(id).map(|p| index.path(p).display().to_string());
-            Some((
-                row,
-                [
-                    index.name(id).to_owned(),
-                    folder.unwrap_or_default(),
-                    format::size(totals.on_disk),
-                    format::size(totals.logical),
-                    files,
-                    format::time(index.modified(id)),
-                ],
-            ))
-        });
+        }
         div().id(("row", row))
     }
 
@@ -103,9 +117,8 @@ impl TableDelegate for FlatList {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let text = match &self.row {
-            Some((r, cells)) if *r == row => cells[col].clone(),
-            _ => return div().into_any_element(),
+        let Some(text) = self.rows.get(&row).map(|cells| cells[col].clone()) else {
+            return div().into_any_element();
         };
         let muted = cx.theme().muted_foreground;
         let cell = h_flex().size_full().overflow_hidden().whitespace_nowrap();
