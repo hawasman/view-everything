@@ -8,8 +8,9 @@ pkgrel=1
 pkgdesc='Find files by name and find what is consuming disk space'
 arch=('x86_64')
 license=('MIT' 'Apache-2.0' 'OFL-1.1')
-depends=('gcc-libs' 'glibc' 'libglvnd' 'libxkbcommon' 'libx11' 'libxcursor'
-         'libxi' 'libxrandr' 'wayland')
+depends=('gcc-libs' 'glibc' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'vulkan-icd-loader'
+         'wayland' 'libglvnd')
+optdepends=('vulkan-driver: GPU rendering (any Vulkan ICD: mesa, nvidia-utils, ...)')
 makedepends=('cargo' 'git')
 provides=('view-everything')
 conflicts=('view-everything')
