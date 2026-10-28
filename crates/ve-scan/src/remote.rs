@@ -1,12 +1,14 @@
 //! SSH Remotes (ADR-0005): run the system `ssh` binary with `find <root> -xdev -printf ...` on
 //! the server, stream its output and apply it to the Index as it arrives. Nothing is installed
-//! on the server. `BatchMode` means keys and the agent only: a password-only host reports an error
+//! on the server, or, where that `find` is not GNU's, walk the tree over SFTP through the same
+//! `ssh` ([`crate::sftp`]). `BatchMode` means keys and the agent only: a password-only host reports an error
 //! instead of prompting.
 
-use crate::{Progress, SharedIndex};
+use crate::{Progress, SharedIndex, sftp};
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
 use ve_core::{EntryId, EntryMeta, Remote, SyncState, VolumeId};
 
@@ -25,7 +27,8 @@ pub struct Record {
     pub inode: u64,
     pub links: u64,
     pub size: u64,
-    pub blocks: u64,
+    /// Bytes allocated (find: 512-byte blocks; SFTP: the Logical Size, as it reports no allocation).
+    pub on_disk: u64,
     /// Nanoseconds since the Unix epoch.
     pub modified: i64,
     pub is_dir: bool,
@@ -44,7 +47,7 @@ impl Record {
         let modified = parse_time(std::str::from_utf8(fields.next()?).ok()?)?;
         let kind = fields.next()?;
         let path = String::from_utf8_lossy(fields.next()?).into_owned();
-        Some(Record { inode, links, size, blocks, modified, is_dir: kind == b"d", path })
+        Some(Record { inode, links, size, on_disk: blocks * 512, modified, is_dir: kind == b"d", path })
     }
 
     fn meta(&self) -> EntryMeta {
@@ -53,7 +56,7 @@ impl Record {
         EntryMeta {
             is_dir: self.is_dir,
             logical: if file { self.size } else { 0 },
-            on_disk: if file { self.blocks * 512 } else { 0 },
+            on_disk: if file { self.on_disk } else { 0 },
             modified: self.modified,
             key: self.inode,
             // Names sharing an inode (find lists each) are one file, counted once by the Index.
@@ -112,7 +115,13 @@ pub fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::R
     sync_with("ssh", index, volume, progress)
 }
 
-/// [`sync`] through the `ssh` program `program` (a test double, or the system one).
+/// Remotes known to lack GNU `find -printf`, so the next sync goes straight to SFTP.
+///
+/// ponytail: remembered for the session only; persisting it needs a field on `Remote` in ve-core.
+static SFTP_ONLY: Mutex<Vec<Remote>> = Mutex::new(Vec::new());
+
+/// [`sync`] through the `ssh` program `program` (a test double, or the system one): over remote
+/// `find`, or over SFTP when the server has no GNU `find -printf` (remembered per Remote).
 pub fn sync_with(program: &str, index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::Result<()> {
     let (root, remote) = {
         let index = index.read();
@@ -122,26 +131,53 @@ pub fn sync_with(program: &str, index: &SharedIndex, volume: VolumeId, progress:
             _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a Remote")),
         }
     };
-    let mut child = Command::new(program)
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "--"])
-        .arg(&remote.host)
-        .arg(command_line(&remote.path))
-        .stdin(Stdio::null())
+    if !SFTP_ONLY.lock().contains(&remote) {
+        match sync_find(program, index, root, &remote, progress) {
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => {}
+            done => return done,
+        }
+    }
+    sync_sftp(program, index, root, &remote, progress)?;
+    let mut only = SFTP_ONLY.lock();
+    if !only.contains(&remote) {
+        only.push(remote);
+    }
+    Ok(())
+}
+
+/// Starts `program` (ssh) with the options every run shares; `command` runs on the server, or
+/// with `subsystem` names the subsystem to request.
+fn spawn(program: &str, remote: &Remote, subsystem: bool, command: &str, stdin: Stdio) -> io::Result<Child> {
+    let mut ssh = Command::new(program);
+    ssh.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15"]);
+    if subsystem {
+        ssh.arg("-s");
+    }
+    ssh.args(["--", &remote.host, command])
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => io::Error::new(io::ErrorKind::NotFound, "the ssh program was not found"),
             _ => e,
-        })?;
+        })
+}
+
+/// Collects ssh's stderr on a thread: a full pipe would block ssh, and the sync with it.
+fn drain_stderr(child: &mut Child) -> std::thread::JoinHandle<String> {
     let mut stderr = child.stderr.take().expect("piped");
-    let stderr = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let mut text = String::new();
         let _ = (&mut stderr).take(64 * 1024).read_to_string(&mut text);
-        // Keep draining: a full pipe would block find and ssh, and the sync with them.
         let _ = io::copy(&mut stderr, &mut io::sink());
         text
-    });
+    })
+}
+
+fn sync_find(program: &str, index: &SharedIndex, root: EntryId, remote: &Remote, progress: &Progress) -> io::Result<()> {
+    let mut child = spawn(program, remote, false, &command_line(&remote.path), Stdio::null())?;
+    let stderr = drain_stderr(&mut child);
     let mut applier = Applier::new(index, root, progress);
     let mut input = BufReader::new(child.stdout.take().expect("piped"));
     let (mut buf, mut batch) = (Vec::new(), Vec::new());
@@ -175,7 +211,7 @@ pub fn sync_with(program: &str, index: &SharedIndex, volume: VolumeId, progress:
     if let Some(e) = read_error {
         return Err(e);
     }
-    if let Some(e) = failure(&remote, status.code(), applier.records, &stderr) {
+    if let Some(e) = failure(remote, status.code(), applier.records, &stderr) {
         return Err(e);
     }
     // Exit 1 from find with output means some folders were unreadable.
@@ -184,6 +220,36 @@ pub fn sync_with(program: &str, index: &SharedIndex, volume: VolumeId, progress:
     // Pruning needs a complete listing: after find reported unreadable folders (exit 1) or a
     // record was unreadable to us, what is missing may only be unseen, so stale Entries stay.
     if status.code() == Some(0) && !malformed {
+        applier.prune();
+    }
+    Ok(())
+}
+
+/// Indexes a Remote over `ssh -s host sftp`. As with find, Entries are pruned only after a
+/// listing that reached every folder.
+fn sync_sftp(program: &str, index: &SharedIndex, root: EntryId, remote: &Remote, progress: &Progress) -> io::Result<()> {
+    let mut child = spawn(program, remote, true, "sftp", Stdio::piped())?;
+    let stderr = drain_stderr(&mut child);
+    let (stdin, stdout) = (child.stdin.take().expect("piped"), child.stdout.take().expect("piped"));
+    let mut applier = Applier::new(index, root, progress);
+    let mut batch = Vec::new();
+    let walked = sftp::walk(BufReader::new(stdout), stdin, &remote.path, |record| {
+        batch.push(record);
+        if batch.len() >= BATCH {
+            applier.apply(&mut batch);
+        }
+    });
+    applier.apply(&mut batch);
+    // The walk dropped ssh's stdin and stdout, so it ends; a failed walk may leave it running.
+    let _ = child.kill();
+    let status = child.wait()?;
+    let stderr = stderr.join().unwrap_or_default();
+    let walked = walked.map_err(|e| match status.code() {
+        Some(255) => failure(remote, Some(255), 0, &stderr).unwrap_or(e),
+        _ => io::Error::new(e.kind(), format!("SFTP on {} failed: {e} {}", remote.host, stderr.trim().lines().last().unwrap_or(""))),
+    })?;
+    progress.unreadable.fetch_add(walked.unreadable, Ordering::Relaxed);
+    if walked.unreadable == 0 {
         applier.prune();
     }
     Ok(())
@@ -203,10 +269,10 @@ fn failure(remote: &Remote, code: Option<i32>, records: u64, stderr: &str) -> Op
             format!("{host} needs a key or ssh-agent login; password login is not used ({message})"),
         ),
         Some(255) => err(io::ErrorKind::ConnectionRefused, format!("ssh to {host} failed: {message}")),
-        _ if stderr.contains("-printf") => err(
-            io::ErrorKind::Unsupported,
-            format!("{host} has no GNU find -printf: needs SFTP fallback (issue 16)"),
-        ),
+        // No GNU find -printf (BusyBox, BSD) or no find at all: the caller falls back to SFTP.
+        _ if code == Some(127) || stderr.contains("-printf") => {
+            err(io::ErrorKind::Unsupported, format!("{host} has no GNU find -printf"))
+        }
         _ => err(io::ErrorKind::Other, format!("find on {host} failed: {message}")),
     }
 }
@@ -307,7 +373,7 @@ mod tests {
                 inode: 1234,
                 links: 2,
                 size: 5120,
-                blocks: 16,
+                on_disk: 16 * 512,
                 modified: 1_700_000_000_500_000_000,
                 is_dir: false,
                 path: "dir/odd\tname".into(),
@@ -334,7 +400,8 @@ mod tests {
         assert_eq!(why(Some(1), 3, "find: './x': Permission denied"), None);
         assert!(why(Some(255), 0, "me@box: Permission denied (publickey,password).").unwrap().contains("key or ssh-agent"));
         assert!(why(Some(255), 0, "ssh: Could not resolve hostname box").unwrap().contains("ssh to me@box failed"));
-        assert!(why(Some(1), 0, "find: unknown predicate `-printf'").unwrap().contains("SFTP fallback (issue 16)"));
+        assert_eq!(failure(&r, Some(1), 0, "find: unknown predicate `-printf'").unwrap().kind(), io::ErrorKind::Unsupported);
+        assert_eq!(failure(&r, Some(127), 0, "sh: find: not found").unwrap().kind(), io::ErrorKind::Unsupported);
         assert!(why(Some(1), 0, "find: '/nope': No such file or directory").unwrap().contains("find on me@box failed"));
     }
 }
