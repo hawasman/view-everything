@@ -46,14 +46,11 @@ fn volumes_in(text: &str) -> Vec<VolumeInfo> {
 
     let mut kept: Vec<Mount> = Vec::new();
     for mount in mounts {
-        // A network share is one Volume however often it is mounted; it has no device to compare.
-        let repeats_kept = kept.iter().any(|k| {
-            if mount.is_network() {
-                k.is_network() && k.source == mount.source
-            } else {
-                k.device == mount.device && is_within(&mount.root, &k.root)
-            }
-        });
+        // Network shares are told apart by identity later; they have no device to compare.
+        let repeats_kept = !mount.is_network()
+            && kept
+                .iter()
+                .any(|k| k.device == mount.device && is_within(&mount.root, &k.root));
         if !repeats_kept {
             kept.push(mount);
         }
@@ -194,7 +191,7 @@ mod tests {
                     41 29 0:36 / /mnt/nas2 rw - nfs4 nas.lan:/volume1/media rw\n\
                     42 29 0:37 / /mnt/other rw - cifs //server/share rw\n\
                     43 29 0:38 / /proc rw - proc proc rw";
-        let volumes = volumes_in(text);
+        let volumes = crate::volumes::dedupe_shares(volumes_in(text));
         assert_eq!(volumes.len(), 2);
         let nas = &volumes[0];
         assert_eq!(nas.mount, PathBuf::from("/mnt/nas"));

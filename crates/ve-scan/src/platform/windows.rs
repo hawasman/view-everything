@@ -84,7 +84,8 @@ pub fn discover_volumes() -> Vec<VolumeInfo> {
             },
             network,
             mount: PathBuf::from(OsString::from_wide(root)),
-            fs_type: from_wide(&fs),
+            // Not plain "NTFS" on a share: the MFT fast path reads local volumes only.
+            fs_type: if network { format!("{} (remote)", from_wide(&fs)) } else { from_wide(&fs) },
             label: from_wide(&label),
             removable,
             read_only: flags & FILE_READ_ONLY_VOLUME != 0,

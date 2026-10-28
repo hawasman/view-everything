@@ -31,7 +31,17 @@ impl VolumeInfo {
 pub fn discover_volumes() -> Vec<VolumeInfo> {
     let mut volumes = crate::platform::discover_volumes();
     volumes.sort_by(|a, b| a.mount.cmp(&b.mount));
+    dedupe_shares(volumes)
+}
+
+/// Keeps the first of the mounts of one share, which has one identity however often it is
+/// mounted (Windows drive letters, repeated NFS mounts).
+pub(crate) fn dedupe_shares(volumes: Vec<VolumeInfo>) -> Vec<VolumeInfo> {
+    let mut seen = std::collections::HashSet::new();
     volumes
+        .into_iter()
+        .filter(|v| !v.network || seen.insert(v.identity.clone()))
+        .collect()
 }
 
 /// The identity of a network share from its mount source (`nas.lan:/volume1/media`,
@@ -43,7 +53,8 @@ pub fn share_identity(source: &str) -> String {
     let strip_user = |authority: &str| authority.rsplit('@').next().unwrap_or("").to_owned();
     let normal = if let Some(rest) = source.strip_prefix("//") {
         let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
-        format!("//{}/{path}", strip_user(host)).to_lowercase()
+        // Host names are case-insensitive; share and folder names may not be.
+        format!("//{}/{path}", strip_user(host).to_lowercase())
     } else if let Some((host, path)) = source.split_once(':') {
         format!("{}:{path}", strip_user(host))
     } else {
@@ -62,7 +73,8 @@ mod tests {
         assert_eq!(share_identity("me@host:/srv"), "share:host:/srv");
         let smb = "share://server/share";
         assert_eq!(share_identity("//server/share"), smb);
-        assert_eq!(share_identity("//guest@SERVER/Share"), smb);
+        assert_eq!(share_identity("//guest@SERVER/share"), smb);
         assert_eq!(share_identity(r"\\Server\share"), smb);
+        assert_ne!(share_identity("//server/Share"), smb);
     }
 }
