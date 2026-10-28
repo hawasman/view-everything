@@ -227,9 +227,12 @@ pub fn list(
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_global(Some(Duration::from_secs(120)))
         .http_status_as_error(false)
+        // The signature is in the URL: never forward it to another host.
+        .max_redirects(0)
         .build()
         .into();
     let mut token: Option<String> = None;
+    let mut tokens = HashSet::new();
     loop {
         let mut action = bucket.list_objects_v2(credentials);
         action.with_max_keys(PAGE);
@@ -267,16 +270,18 @@ pub fn list(
             .collect();
         page(objects)?;
         match parsed.next_continuation_token {
-            Some(next) => token = Some(next),
+            Some(next) if tokens.insert(next.clone()) => token = Some(next),
+            Some(_) => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{} repeats a continuation token", remote.endpoint_host()))),
             None => return Ok(()),
         }
     }
 }
 
 /// The folders and file `objects` stand for, parents first. `seen` holds the folders already
-/// produced. Keys with an empty name in their path (`a//b`) cannot be Entries and are counted in
+/// produced (`true`) and the files (`false`); a key whose path is both a file and a folder (`a`
+/// and `a/b`) cannot be Entries and is skipped. Keys with an empty name in their path (`a//b`) cannot be Entries and are counted in
 /// the second result; a key ending in `/` is a folder marker and makes just its folders.
-fn entries(objects: Vec<Object>, seen: &mut HashSet<String>) -> (Vec<(String, EntryMeta)>, u64) {
+fn entries(objects: Vec<Object>, seen: &mut HashMap<String, bool>) -> (Vec<(String, EntryMeta)>, u64) {
     let (mut out, mut skipped) = (Vec::new(), 0);
     for object in objects {
         // The prefix's own marker object is empty once the prefix is stripped.
@@ -292,16 +297,30 @@ fn entries(objects: Vec<Object>, seen: &mut HashSet<String>) -> (Vec<(String, En
         let parts: Vec<&str> = folders.split('/').collect();
         let last = if marker { parts.len() } else { parts.len() - 1 };
         let mut path = String::new();
+        let mut clash = false;
         for part in &parts[..last] {
             if !path.is_empty() {
                 path.push('/');
             }
             path.push_str(part);
-            if seen.insert(path.clone()) {
-                out.push((path.clone(), EntryMeta { is_dir: true, ..EntryMeta::default() }));
+            match seen.get(&path) {
+                Some(true) => {}
+                Some(false) => clash = true,
+                None => {
+                    seen.insert(path.clone(), true);
+                    out.push((path.clone(), EntryMeta { is_dir: true, ..EntryMeta::default() }));
+                }
             }
         }
+        if !marker && seen.get(folders) == Some(&true) {
+            clash = true;
+        }
+        if clash {
+            skipped += 1;
+            continue;
+        }
         if !marker {
+            seen.insert(folders.to_owned(), false);
             let meta = EntryMeta { logical: object.size, on_disk: object.size, modified: object.modified, ..EntryMeta::default() };
             out.push((folders.to_owned(), meta));
         }
@@ -333,7 +352,7 @@ pub fn sync_with(
     };
     let credentials = auth(&remote).map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))?;
     let mut applier = Applier::new(index, root, progress);
-    let mut seen = HashSet::new();
+    let mut seen = HashMap::new();
     list(&remote, credentials.as_ref(), |objects| {
         let (mut batch, skipped) = entries(objects, &mut seen);
         progress.unreadable.fetch_add(skipped, Ordering::Relaxed);
@@ -367,7 +386,7 @@ mod tests {
     #[test]
     fn keys_split_on_slash_into_folders_and_markers_make_folders() {
         let object = |key: &str, size| Object { key: key.into(), size, modified: 5 };
-        let mut seen = HashSet::new();
+        let mut seen = HashMap::new();
         let (items, skipped) = entries(
             vec![object("a/b/c.txt", 10), object("a/d.txt", 20), object("empty/", 0), object("top.bin", 7), object("x//y", 1), object("", 0)],
             &mut seen,
@@ -381,6 +400,10 @@ mod tests {
         // A later page does not repeat folders.
         let (items, _) = entries(vec![object("a/e.txt", 1)], &mut seen);
         assert_eq!(items.len(), 1);
+        // A file and a folder of one name: the first one wins, the other is skipped.
+        let mut seen = HashMap::new();
+        let (items, skipped) = entries(vec![object("f", 1), object("f/g", 2), object("d/h", 3), object("d", 4)], &mut seen);
+        assert_eq!((items.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), skipped), (["f", "d", "d/h"].to_vec(), 2));
     }
 
     #[test]
