@@ -32,16 +32,6 @@ pub enum ThemeChoice {
     Dark,
 }
 
-impl From<ThemeChoice> for egui::ThemePreference {
-    fn from(choice: ThemeChoice) -> Self {
-        match choice {
-            ThemeChoice::System => egui::ThemePreference::System,
-            ThemeChoice::Light => egui::ThemePreference::Light,
-            ThemeChoice::Dark => egui::ThemePreference::Dark,
-        }
-    }
-}
-
 fn default_refresh_minutes() -> u64 {
     30
 }
