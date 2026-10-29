@@ -157,6 +157,10 @@ impl Live {
         }
     }
 
+    /// There is no helper off Linux: macOS follows changes with FSEvents, Windows with the journal.
+    #[cfg(not(target_os = "linux"))]
+    pub(super) fn set_helper(&mut self, _on: bool) {}
+
     /// Turns the Linux helper on or off. Asking for authentication happens here, on and only on
     /// the user's request.
     #[cfg(target_os = "linux")]

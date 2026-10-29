@@ -354,10 +354,7 @@ fn run_indexer(
                 pending = reconcile_volumes(shared, &mounted, &wanted, &remotes);
                 live.set_mounts(local_mounts(&wanted));
             }
-            #[cfg(target_os = "linux")]
             Ok(Command::SetLiveHelper(on)) => live.set_helper(on),
-            #[cfg(not(target_os = "linux"))]
-            Ok(Command::SetLiveHelper(_)) => {}
             Ok(Command::RefreshLocation(identity)) => {
                 let target = refresh_target(&shared.index.read(), &identity);
                 // Several requests in a row (a filesystem's Volumes) are all kept.
