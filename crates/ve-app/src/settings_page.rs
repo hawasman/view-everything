@@ -164,24 +164,6 @@ fn secret_hint(input: &Entity<InputState>, kept: bool, window: &mut Window, cx: 
     input.update(cx, |i, cx| i.set_placeholder(hint, window, cx));
 }
 
-/// Whether `remote` may keep a secret in the OS keyring, under its identity.
-fn has_secret(remote: &Remote) -> bool {
-    match remote {
-        Remote::S3(r) => r.access_key.is_some(),
-        Remote::Ftp(_) => true,
-        Remote::Ssh(_) => false,
-    }
-}
-
-/// Whether `remote` cannot connect without a secret.
-fn needs_secret(remote: &Remote) -> bool {
-    match remote {
-        Remote::S3(r) => r.access_key.is_some(),
-        Remote::Ftp(r) => !r.is_anonymous(),
-        Remote::Ssh(_) => false,
-    }
-}
-
 /// The fields of the Add Remote dialog's FTP tab.
 #[derive(Clone)]
 struct FtpForm {
@@ -397,19 +379,19 @@ impl SettingsPage {
     ) -> Result<(), String> {
         let id = remote.identity();
         let old = self.editing.clone();
-        let moved = old.as_ref().filter(|o| has_secret(o) && o.identity() != id);
+        let moved = old.as_ref().filter(|o| o.has_secret() && o.identity() != id);
         match (&secret, moved) {
             (Some(secret), _) => ve_scan::s3::store_secret(&id, secret)?,
-            (None, Some(o)) if has_secret(&remote) => match ve_scan::s3::read_secret(&o.identity()) {
+            (None, Some(o)) if remote.has_secret() => match ve_scan::s3::read_secret(&o.identity()) {
                 Ok(secret) => ve_scan::s3::store_secret(&id, &secret)?,
-                Err(why) if needs_secret(&remote) => return Err(format!("Enter the secret again: {why}")),
+                Err(why) if remote.needs_secret() => return Err(format!("Enter the secret again: {why}")),
                 Err(_) => {}
             },
             _ => {}
         }
         if let Some(o) = &old
-            && has_secret(o)
-            && (o.identity() != id || !has_secret(&remote))
+            && o.has_secret()
+            && (o.identity() != id || !remote.has_secret())
         {
             ve_scan::s3::forget_secret(&o.identity());
         }
@@ -440,7 +422,7 @@ impl SettingsPage {
         self.check = Check::Running;
         window.refresh();
         // With none typed, an edited Remote's secret is still filed under its old identity until saved.
-        let kept = self.editing.as_ref().filter(|o| has_secret(o)).map(Remote::identity);
+        let kept = self.editing.as_ref().filter(|o| o.has_secret()).map(Remote::identity);
         let task = cx.background_spawn(async move {
             let secret = secret.or_else(|| kept.and_then(|id| ve_scan::s3::read_secret(&id).ok()));
             ve_scan::remote::check(&remote, secret.as_deref())
@@ -469,11 +451,7 @@ impl SettingsPage {
     }
 
     fn remove_remote(&mut self, remote: &Remote, window: &mut Window, cx: &mut Context<Self>) {
-        match remote {
-            Remote::S3(r) if r.access_key.is_some() => ve_scan::s3::forget_secret(&remote.identity()),
-            Remote::Ftp(r) => ve_scan::ftp::forget_password(r),
-            _ => {}
-        }
+        ve_scan::remote::forget_secret(remote);
         self.settings.remove_remote(remote);
         self.remote_refresh = Self::remote_selects(&self.settings, window, cx);
         self.commit(cx);

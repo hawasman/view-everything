@@ -241,32 +241,110 @@ impl Remote {
         }))
     }
 
+    /// The kind's own behaviour: the one `match` over kinds in ve-core.
+    fn kind_impl(&self) -> &dyn RemoteKind {
+        match self {
+            Remote::Ssh(r) => r,
+            Remote::S3(r) => r,
+            Remote::Ftp(r) => r,
+        }
+    }
+
     /// What makes this Remote the same Location wherever it is listed: `ssh:user@host:/path`,
     /// `s3:host/bucket/prefix` or `ftp://user@host:port/path`.
     pub fn identity(&self) -> String {
-        match self {
-            Remote::Ssh(r) => format!("ssh:{}:{}", r.host, r.path),
-            Remote::S3(r) => r.identity(),
-            Remote::Ftp(r) => r.identity(),
-        }
+        self.kind_impl().identity()
     }
 
     /// `user@host:/path` or `s3://bucket/prefix`, for display.
     pub fn label(&self) -> String {
-        match self {
-            Remote::Ssh(r) => format!("{}:{}", r.host, r.path),
-            Remote::S3(r) => r.label(),
-            Remote::Ftp(r) => r.identity(),
-        }
+        self.kind_impl().label()
     }
 
     /// The protocol, for the Remote · tag.
     pub fn kind(&self) -> &'static str {
+        self.kind_impl().kind()
+    }
+
+    /// Whether it may keep a secret in the OS keyring, under its identity.
+    pub fn has_secret(&self) -> bool {
+        self.kind_impl().has_secret()
+    }
+
+    /// Whether it cannot connect without a secret.
+    pub fn needs_secret(&self) -> bool {
+        self.kind_impl().needs_secret()
+    }
+
+    /// The Volume's filesystem type and SyncState for this Remote. The SyncState's variant order
+    /// is the saved Index's wire format: a new kind goes last.
+    fn sync_state(&self) -> (&'static str, SyncState) {
         match self {
-            Remote::Ssh(_) => "SSH",
-            Remote::S3(_) => "S3",
-            Remote::Ftp(_) => "FTP",
+            Remote::Ssh(r) => ("ssh", SyncState::Ssh(r.clone())),
+            Remote::S3(r) => ("s3", SyncState::S3(r.clone())),
+            Remote::Ftp(r) => ("ftp", SyncState::Ftp(r.clone())),
         }
+    }
+}
+
+/// What a Remote kind defines in ve-core; sync and check live in ve-scan's module for the kind.
+trait RemoteKind {
+    fn identity(&self) -> String;
+    fn label(&self) -> String;
+    fn kind(&self) -> &'static str;
+    fn has_secret(&self) -> bool {
+        false
+    }
+    fn needs_secret(&self) -> bool {
+        false
+    }
+}
+
+impl RemoteKind for SshRemote {
+    fn identity(&self) -> String {
+        format!("ssh:{}:{}", self.host, self.path)
+    }
+    fn label(&self) -> String {
+        format!("{}:{}", self.host, self.path)
+    }
+    fn kind(&self) -> &'static str {
+        "SSH"
+    }
+}
+
+impl RemoteKind for S3Remote {
+    fn identity(&self) -> String {
+        S3Remote::identity(self)
+    }
+    fn label(&self) -> String {
+        S3Remote::label(self)
+    }
+    fn kind(&self) -> &'static str {
+        "S3"
+    }
+    fn has_secret(&self) -> bool {
+        self.access_key.is_some()
+    }
+    fn needs_secret(&self) -> bool {
+        self.access_key.is_some()
+    }
+}
+
+impl RemoteKind for FtpRemote {
+    fn identity(&self) -> String {
+        FtpRemote::identity(self)
+    }
+    fn label(&self) -> String {
+        FtpRemote::identity(self)
+    }
+    fn kind(&self) -> &'static str {
+        "FTP"
+    }
+    fn has_secret(&self) -> bool {
+        true
+    }
+    fn needs_secret(&self) -> bool {
+        !self.is_anonymous()
     }
 }
 
@@ -286,6 +364,18 @@ pub enum SyncState {
     S3(S3Remote),
     /// A Remote: list the FTP server's folders again and apply differences. Last, as above.
     Ftp(FtpRemote),
+}
+
+impl SyncState {
+    /// The Remote this is the state of, if it is one.
+    pub fn remote(&self) -> Option<Remote> {
+        match self {
+            SyncState::Ssh(r) => Some(Remote::Ssh(r.clone())),
+            SyncState::S3(r) => Some(Remote::S3(r.clone())),
+            SyncState::Ftp(r) => Some(Remote::Ftp(r.clone())),
+            SyncState::Walk | SyncState::Ntfs { .. } => None,
+        }
+    }
 }
 
 /// A Volume's total and free bytes, as measured at a sync.
@@ -318,12 +408,7 @@ pub struct Volume {
 impl Volume {
     /// The Remote this Location is, if it is one.
     pub fn remote(&self) -> Option<Remote> {
-        match &self.sync {
-            SyncState::Ssh(remote) => Some(Remote::Ssh(remote.clone())),
-            SyncState::S3(remote) => Some(Remote::S3(remote.clone())),
-            SyncState::Ftp(remote) => Some(Remote::Ftp(remote.clone())),
-            _ => None,
-        }
+        self.sync.remote()
     }
 
     /// A read-only Remote rather than a mounted Volume.
@@ -438,11 +523,7 @@ impl Index {
             is_dir: true,
             ..EntryMeta::default()
         };
-        let (fs_type, sync) = match remote {
-            Remote::Ssh(r) => ("ssh", SyncState::Ssh(r.clone())),
-            Remote::S3(r) => ("s3", SyncState::S3(r.clone())),
-            Remote::Ftp(r) => ("ftp", SyncState::Ftp(r.clone())),
-        };
+        let (fs_type, sync) = remote.sync_state();
         self.add_volume(Path::new(&identity), fs_type, &identity, meta, sync)
     }
 

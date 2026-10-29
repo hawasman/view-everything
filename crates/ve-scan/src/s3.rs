@@ -353,6 +353,15 @@ pub fn list(remote: &S3Remote, credentials: Option<&Credentials>, mut page: impl
 
 /// Lists a single key of `remote`: proof that the endpoint answers, the bucket is there and the
 /// keys may list it, without reading the whole bucket.
+pub fn check_remote(r: &S3Remote, secret: Option<&str>) -> io::Result<()> {
+    let credentials = match (secret, &r.access_key) {
+        (Some(secret), Some(key)) => Some(Credentials::new(key.clone(), secret.to_owned())),
+        _ => with_system_chain(|chain| chain.credentials(r, &|| read_secret(&r.identity())))
+            .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))?,
+    };
+    check(r, credentials.as_ref())
+}
+
 pub fn check(remote: &S3Remote, credentials: Option<&Credentials>) -> io::Result<()> {
     let bucket = bucket(remote)?;
     fetch_page(&agent(), &bucket, remote, credentials, &key_prefix(remote), None, 1).map(|_| ())

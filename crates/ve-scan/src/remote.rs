@@ -130,25 +130,19 @@ pub fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::R
 /// the Index: the Test of the Remote dialog. `secret` is a secret key or password typed in but
 /// not stored yet; `None` uses the one kept in the OS keyring, as a sync would.
 pub fn check(remote: &Remote, secret: Option<&str>) -> io::Result<()> {
-    let denied = |e: String| io::Error::new(io::ErrorKind::PermissionDenied, e);
     match remote {
         Remote::Ssh(r) => check_with("ssh", r),
-        Remote::S3(r) => {
-            let credentials = match (secret, &r.access_key) {
-                (Some(secret), Some(key)) => Some(rusty_s3::Credentials::new(key.clone(), secret.to_owned())),
-                _ => {
-                    crate::s3::with_system_chain(|chain| chain.credentials(r, &|| crate::s3::read_secret(&r.identity()))).map_err(denied)?
-                }
-            };
-            crate::s3::check(r, credentials.as_ref())
-        }
-        Remote::Ftp(r) => {
-            let password = match secret {
-                Some(p) => p.to_owned(),
-                None => crate::ftp::password(r).map_err(denied)?,
-            };
-            crate::ftp::check(r, &password, crate::ftp::web_roots_config())
-        }
+        Remote::S3(r) => crate::s3::check_remote(r, secret),
+        Remote::Ftp(r) => crate::ftp::check_remote(r, secret),
+    }
+}
+
+/// Deletes the secret kept in the OS keyring for `remote`, if its kind keeps one.
+pub fn forget_secret(remote: &Remote) {
+    match remote {
+        Remote::S3(r) if r.access_key.is_some() => crate::s3::forget_secret(&r.identity()),
+        Remote::Ftp(r) => crate::ftp::forget_password(r),
+        _ => {}
     }
 }
 
