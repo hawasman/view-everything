@@ -76,3 +76,9 @@ pub fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::R
     }
     walk::sync(index, volume, progress)
 }
+
+/// Brings the folder `dir` of a local Volume, at `path`, and what is below it up to date, without
+/// walking the rest of the Volume. Meant for a change known to be confined to that folder.
+pub fn sync_folder(index: &SharedIndex, dir: ve_core::EntryId, path: &Path, progress: &Progress) -> io::Result<()> {
+    walk::sync_folder(index, dir, path, progress)
+}

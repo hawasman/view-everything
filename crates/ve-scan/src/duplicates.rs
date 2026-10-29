@@ -263,7 +263,7 @@ fn hash_stage(files: &mut [Candidate], progress: &HashProgress, cancel: &AtomicB
                             Some(hash)
                         }
                         None => {
-                            let hash = hash_file(&file.path, file.size, stage == Stage::Partial).ok();
+                            let hash = hash_file(&file.path, file.size, file.modified, stage == Stage::Partial).ok();
                             hashed.fetch_add(1, Ordering::Relaxed);
                             if let Some(hash) = hash {
                                 let cached = file.cached.get_or_insert(Cached {
@@ -295,11 +295,18 @@ fn hash_stage(files: &mut [Candidate], progress: &HashProgress, cancel: &AtomicB
 }
 
 /// BLAKE3 of a whole file, or of its first and last [`PARTIAL`] bytes when `partial` and the
-/// file is longer than both together. A file whose length differs from the Index's is stale and
-/// reported as an error.
-fn hash_file(path: &Path, size: u64, partial: bool) -> io::Result<Hash> {
+/// file is longer than both together. A file whose length or modified time differs from the
+/// Index's is stale and reported as an error. (A second of slack: filesystems keep time at
+/// different precisions.)
+fn hash_file(path: &Path, size: u64, modified: i64, partial: bool) -> io::Result<Hash> {
     let mut file = File::open(path)?;
-    if file.metadata()?.len() != size {
+    let meta = file.metadata()?;
+    let on_disk = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(modified, |d| d.as_nanos() as i64);
+    if meta.len() != size || (on_disk - modified).abs() > 1_000_000_000 {
         return Err(io::Error::other("file changed since it was indexed"));
     }
     let mut hasher = blake3::Hasher::new();

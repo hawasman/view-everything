@@ -101,7 +101,7 @@ impl Render for DuplicatesPanel {
                 let rows = group.copies.iter().enumerate().map(|(ri, &id)| {
                     let path = self.shared.index.read().path(id).display().to_string();
                     h_flex()
-                        .id(("copy", gi * 10_000 + ri))
+                        .id(("copy", gi << 32 | ri))
                         .gap(px(8.))
                         .py(px(3.))
                         .cursor_pointer()

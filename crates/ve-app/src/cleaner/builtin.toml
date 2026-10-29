@@ -35,6 +35,14 @@ files = true
 tick = false
 
 [[rule]]
+name = "Windows cache folder"
+group = "cache"
+platforms = ["windows"]
+query = 'parent:"{cache}/Microsoft/Windows/INetCache"|parent:"{cache}/D3DSCache"'
+files = true
+tick = false
+
+[[rule]]
 name = "npm cache"
 group = "cache"
 platforms = ["linux", "macos"]

@@ -125,9 +125,21 @@ impl CleanerPage {
         let commands = plan.iter().filter(|c| c.rule.is_command()).count();
         let this = cx.entity();
         let volumes = self.volumes.clone();
+        let (temp_days, build_days) = (self.temp_days, self.build_days);
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let this = this.clone();
-            let items: Vec<(Arc<Rule>, PathBuf)> = plan.iter().map(|c| (c.rule.clone(), c.path.clone())).collect();
+            // Ticked for being old: the age is tested again on disk just before removal.
+            let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
+            let items: Vec<(Arc<Rule>, PathBuf, Option<u64>)> = plan
+                .iter()
+                .map(|c| {
+                    let aged = c
+                        .pre_ticked(now, temp_days, build_days)
+                        .then(|| c.age_limit(temp_days, build_days))
+                        .flatten();
+                    (c.rule.clone(), c.path.clone(), aged)
+                })
+                .collect();
             let volumes = volumes.clone();
             let mut what = format!("This permanently removes {} item(s)", plan.len() - commands);
             if commands > 0 {
@@ -149,7 +161,13 @@ impl CleanerPage {
         });
     }
 
-    fn start_clean(&mut self, plan: Vec<(Arc<Rule>, PathBuf)>, volumes: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_clean(
+        &mut self,
+        plan: Vec<(Arc<Rule>, PathBuf, Option<u64>)>,
+        volumes: Vec<VolumeInfo>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let shared = self.shared.clone();
         window
             .spawn(cx, {
@@ -159,17 +177,13 @@ impl CleanerPage {
                         .background_executor()
                         .spawn(async move {
                             let outcome = clean(&plan, &volumes);
-                            // Whatever a command changed is read back into the Index.
-                            // ponytail: re-syncs the whole Volume; sync only the working folder when that is cheaper.
-                            let mut synced = Vec::new();
+                            // Whatever a command changed is read back into the Index: only its working
+                            // folder, since a command rule's effect is confined to it (the Volume would
+                            // take minutes to re-walk).
                             for command in outcome.commands.iter().filter(|c| c.result.is_ok()) {
-                                let volume = {
-                                    let index = shared.index.read();
-                                    index.find_path(&command.cwd).and_then(|id| index.volume_of(id))
-                                };
-                                if let Some(volume) = volume.filter(|v| !synced.contains(v)) {
-                                    let _ = ve_scan::sync(&shared.index, volume, &shared.progress);
-                                    synced.push(volume);
+                                let folder = shared.index.read().find_path(&command.cwd);
+                                if let Some(folder) = folder {
+                                    let _ = ve_scan::sync_folder(&shared.index, folder, &command.cwd, &shared.progress);
                                 }
                             }
                             outcome

@@ -19,6 +19,8 @@ const BUILTIN: &str = include_str!("builtin.toml");
 /// How much of a command's output is kept for the report.
 const OUTPUT_LIMIT: usize = 4000;
 
+const NANOS_PER_DAY: i64 = 86_400 * 1_000_000_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Group {
@@ -242,16 +244,22 @@ impl Cleanable {
         (self.rule.name.clone(), self.path.clone())
     }
 
+    /// The age limit that pre-ticks this: none for caches and for rules that say never.
+    pub fn age_limit(&self, temp_days: u64, build_days: u64) -> Option<u64> {
+        match self.rule.group {
+            Group::Cache => None,
+            _ if !self.rule.tick => None,
+            Group::Temp => Some(temp_days),
+            Group::Build => Some(build_days),
+        }
+    }
+
     /// Whether the Cleanup Plan starts with this ticked: not for caches, not where the rule says
     /// never, and only when nothing in the project changed within the age limit of its group.
     pub fn pre_ticked(&self, now_ns: i64, temp_days: u64, build_days: u64) -> bool {
-        let days = match self.rule.group {
-            Group::Cache => return false,
-            Group::Temp => temp_days,
-            Group::Build => build_days,
-        };
         // No file at all (an unknown age) is not "old".
-        self.rule.tick && self.newest > 0 && now_ns.saturating_sub(self.newest) > days as i64 * 86_400 * 1_000_000_000
+        self.age_limit(temp_days, build_days)
+            .is_some_and(|days| self.newest > 0 && now_ns.saturating_sub(self.newest) > (days as i64).saturating_mul(NANOS_PER_DAY))
     }
 }
 
@@ -374,9 +382,39 @@ pub fn find(index: &Index, volumes: &[VolumeInfo], rules: &[Arc<Rule>]) -> Vec<C
     out
 }
 
+/// A symbolic link, or on Windows also a junction or any other reparse point.
+fn is_link(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    meta.file_type().is_symlink()
+}
+
 /// A plain file: a link could point anywhere.
 fn plain(p: &Path) -> bool {
-    std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file())
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file() && !is_link(&m))
+}
+
+/// The newest modification time under `path`, in nanoseconds since the Unix epoch; links are not
+/// followed. 0 when nothing can be read.
+fn newest_on_disk(path: &Path) -> i64 {
+    let (mut newest, mut stack) = (0, vec![path.to_path_buf()]);
+    while let Some(current) = stack.pop() {
+        let Ok(meta) = std::fs::symlink_metadata(&current) else { continue };
+        if meta.is_dir() && !is_link(&meta) {
+            if let Ok(entries) = std::fs::read_dir(&current) {
+                stack.extend(entries.flatten().map(|e| e.path()));
+            }
+        } else if let Some(t) = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()) {
+            newest = newest.max(t.as_nanos() as i64);
+        }
+    }
+    newest
 }
 
 fn marker_on_disk(path: &Path, marker: &str) -> bool {
@@ -386,9 +424,11 @@ fn marker_on_disk(path: &Path, marker: &str) -> bool {
             || std::fs::read(&p).is_ok_and(|b| b.starts_with(CACHEDIR_SIGNATURE.as_bytes())))
 }
 
-/// Checks `path` on disk against the rule again: an absolute path that is not a link, with no
-/// Volume mounted on or inside it, that the rule's Query still selects, with a marker present.
-pub fn recheck(rule: &Rule, path: &Path, volumes: &[VolumeInfo]) -> Result<(), String> {
+/// Checks `path` on disk against the rule again: an absolute path that is not a link and has no
+/// link among its ancestor folders, with no Volume mounted on or inside it, that the rule's Query
+/// still selects, with a marker present. With `min_age_days` (the Cleanable was ticked for being
+/// old) nothing in its project may have changed within that many days.
+pub fn recheck(rule: &Rule, path: &Path, volumes: &[VolumeInfo], min_age_days: Option<u64>) -> Result<(), String> {
     if !path.is_absolute() {
         return Err("it is not an absolute path".into());
     }
@@ -397,8 +437,16 @@ pub fn recheck(rule: &Rule, path: &Path, volumes: &[VolumeInfo]) -> Result<(), S
         return Err("a Volume is mounted on or inside it".into());
     }
     let meta = std::fs::symlink_metadata(path).map_err(|_| "it no longer exists".to_owned())?;
-    if meta.file_type().is_symlink() {
+    if is_link(&meta) {
         return Err("it is now a link".into());
+    }
+    // Removal through a linked ancestor would reach wherever the link points.
+    if let Some(link) = path
+        .ancestors()
+        .skip(1)
+        .find(|a| std::fs::symlink_metadata(a).is_ok_and(|m| is_link(&m)))
+    {
+        return Err(format!("a folder above it ({}) is a link", link.display()));
     }
     if !meta.is_dir() && (rule.is_command() || !(meta.is_file() && rule.files)) {
         return Err("it is no longer a folder".into());
@@ -431,6 +479,18 @@ pub fn recheck(rule: &Rule, path: &Path, volumes: &[VolumeInfo]) -> Result<(), S
     }
     if !rule.markers.is_empty() && !rule.markers.iter().any(|m| marker_on_disk(path, m)) {
         return Err(format!("its marker ({}) is gone", rule.markers.join(" or ")));
+    }
+    if let Some(days) = min_age_days {
+        let project = if rule.markers.iter().any(|m| m.starts_with("..")) {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+        let newest = newest_on_disk(project);
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
+        if newest > 0 && now.saturating_sub(newest) <= (days as i64).saturating_mul(NANOS_PER_DAY) {
+            return Err(format!("something in it changed within the last {days} days"));
+        }
     }
     Ok(())
 }
@@ -481,10 +541,10 @@ fn run(argv: &[String], cwd: &Path) -> Result<(Option<i32>, String), String> {
 /// Rechecks each Cleanable and applies the rule to the ones that still match: a command runs, a
 /// path is removed permanently. `remove_dir_all` never follows links, so a folder swapped for a
 /// link after the recheck loses only the link.
-pub fn clean(plan: &[(Arc<Rule>, PathBuf)], volumes: &[VolumeInfo]) -> Outcome {
+pub fn clean(plan: &[(Arc<Rule>, PathBuf, Option<u64>)], volumes: &[VolumeInfo]) -> Outcome {
     let mut out = Outcome::default();
-    for (rule, path) in plan {
-        if let Err(why) = recheck(rule, path, volumes) {
+    for (rule, path, min_age_days) in plan {
+        if let Err(why) = recheck(rule, path, volumes, *min_age_days) {
             out.skipped.push((path.clone(), why));
         } else if rule.is_command() {
             out.commands.push(CommandReport {
@@ -563,6 +623,8 @@ mod tests {
         assert!(names("macos").contains(&"Xcode DerivedData".to_owned()));
         assert!(!names("linux").contains(&"Xcode DerivedData".to_owned()));
         assert!(!names("windows").contains(&"User cache folder".to_owned()));
+        assert!(names("windows").contains(&"Windows cache folder".to_owned()));
+        assert!(!names("linux").contains(&"Windows cache folder".to_owned()));
         assert!(names("windows").contains(&"Crash dumps".to_owned()));
     }
 
@@ -763,7 +825,7 @@ mod tests {
             target
         };
         let rust = rule("Rust build artefacts");
-        let rc = |p: &Path| recheck(&rust, p, &[]);
+        let rc = |p: &Path| recheck(&rust, p, &[], None);
         let cargo = make("cargo", true, None);
         let tagged = make("tagged", false, Some(CACHEDIR_SIGNATURE));
         let fake_tag = make("faketag", false, Some("nope"));
@@ -772,7 +834,7 @@ mod tests {
 
         let plan: Vec<_> = [&cargo, &tagged, &fake_tag, &unmarked, &vanished]
             .iter()
-            .map(|p| (rust.clone(), (*p).clone()))
+            .map(|p| (rust.clone(), (*p).clone(), None))
             .collect();
         let out = clean(&plan, &[]);
         assert_eq!(out.removed, vec![cargo.clone(), tagged.clone()]);
@@ -811,7 +873,7 @@ mod tests {
             network: false,
             read_only: false,
         };
-        assert!(recheck(&rust, &mounted, &[inside]).is_err());
+        assert!(recheck(&rust, &mounted, &[inside], None).is_err());
         assert!(rc(Path::new("target")).is_err());
         #[cfg(unix)]
         {
@@ -821,6 +883,18 @@ mod tests {
             std::os::unix::fs::symlink(&real, tagged_link.join("CACHEDIR.TAG")).unwrap();
             assert!(rc(&tagged_link).is_err());
         }
+        // A link among the ancestors is refused, and so is a project changed within the age limit.
+        #[cfg(unix)]
+        {
+            let real = make("real-parent", true, None);
+            let via = base.join("via");
+            std::os::unix::fs::symlink(real.parent().unwrap(), &via).unwrap();
+            let err = rc(&via.join("target")).unwrap_err();
+            assert!(err.contains("is a link"), "{err}");
+        }
+        let fresh = make("fresh", true, None);
+        assert!(recheck(&rust, &fresh, &[], Some(30)).unwrap_err().contains("changed within"));
+        assert!(recheck(&rust, &fresh, &[], Some(0)).is_ok());
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -845,7 +919,11 @@ mod tests {
         let bad = mk(r#"["sh", "-c", "echo oops >&2; exit 3"]"#);
         let missing = mk(r#"["definitely-not-a-tool", "--x"]"#);
         let out = clean(
-            &[(ok.clone(), project.clone()), (bad, project.clone()), (missing, project.clone())],
+            &[
+                (ok.clone(), project.clone(), None),
+                (bad, project.clone(), None),
+                (missing, project.clone(), None),
+            ],
             &[],
         );
         assert_eq!(out.commands.len(), 3);
@@ -860,7 +938,7 @@ mod tests {
         assert_eq!(mk(r#"["a", "b c"]"#).argv_text(), "a \"b c\"");
         // A command rule whose marker is gone does not run.
         std::fs::remove_file(project.join("marker")).unwrap();
-        let out = clean(&[(ok, project)], &[]);
+        let out = clean(&[(ok, project, None)], &[]);
         assert!(out.commands.is_empty() && out.skipped.len() == 1);
         std::fs::remove_dir_all(&base).unwrap();
     }

@@ -50,6 +50,25 @@ pub(crate) fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -
     Ok(())
 }
 
+/// Re-walks only the folder `dir` (at `path`) and below, applying every difference to the Index.
+pub(crate) fn sync_folder(index: &SharedIndex, dir: EntryId, path: &Path, progress: &Progress) -> io::Result<()> {
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a folder", path.display()),
+        ));
+    }
+    index.write().update(dir, entry_meta(&metadata, || path.to_path_buf()));
+    let walk = Walk {
+        index,
+        progress,
+        device: device(&metadata),
+    };
+    rayon::scope(|scope| walk.visit(scope, dir, path.to_path_buf()));
+    Ok(())
+}
+
 struct Walk<'a> {
     index: &'a SharedIndex,
     progress: &'a Progress,
