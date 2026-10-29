@@ -207,7 +207,7 @@ fn bucket(remote: &S3Remote) -> Result<Bucket, io::Error> {
 }
 
 /// The text between `<tag>` and `</tag>` in an S3 error body.
-fn xml_text<'a>(body: &'a str, tag: &str) -> Option<&'a str> {
+pub(crate) fn xml_text<'a>(body: &'a str, tag: &str) -> Option<&'a str> {
     let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
     let start = body.find(&open)? + open.len();
     Some(body[start..start + body[start..].find(&close)?].trim())
@@ -239,15 +239,17 @@ fn http_failure(remote: &S3Remote, status: u16, body: &str, anonymous: bool) -> 
     io::Error::new(kind, format!("{host} answered {status} {code} {message}{hint}").replace("  ", " "))
 }
 
-fn agent() -> ureq::Agent {
+pub(crate) fn agent_config() -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
     ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_global(Some(Duration::from_secs(120)))
         .http_status_as_error(false)
         // The signature is in the URL: never forward it to another host.
         .max_redirects(0)
-        .build()
-        .into()
+}
+
+pub(crate) fn agent() -> ureq::Agent {
+    agent_config().build().into()
 }
 
 /// `prefix/` of the Remote, as keys under it start; empty for the whole bucket.
@@ -353,6 +355,15 @@ pub fn list(remote: &S3Remote, credentials: Option<&Credentials>, mut page: impl
 
 /// Lists a single key of `remote`: proof that the endpoint answers, the bucket is there and the
 /// keys may list it, without reading the whole bucket.
+pub fn check_remote(r: &S3Remote, secret: Option<&str>) -> io::Result<()> {
+    let credentials = match (secret, &r.access_key) {
+        (Some(secret), Some(key)) => Some(Credentials::new(key.clone(), secret.to_owned())),
+        _ => with_system_chain(|chain| chain.credentials(r, &|| read_secret(&r.identity())))
+            .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))?,
+    };
+    check(r, credentials.as_ref())
+}
+
 pub fn check(remote: &S3Remote, credentials: Option<&Credentials>) -> io::Result<()> {
     let bucket = bucket(remote)?;
     fetch_page(&agent(), &bucket, remote, credentials, &key_prefix(remote), None, 1).map(|_| ())
@@ -362,7 +373,7 @@ pub fn check(remote: &S3Remote, credentials: Option<&Credentials>) -> io::Result
 /// produced (`true`) and the files (`false`); a key whose path is both a file and a folder (`a`
 /// and `a/b`) cannot be Entries and is skipped. Keys with an empty name in their path (`a//b`) cannot be Entries and are counted in
 /// the second result; a key ending in `/` is a folder marker and makes just its folders.
-fn entries(objects: Vec<Object>, seen: &mut HashMap<String, bool>) -> (Vec<(String, EntryMeta)>, u64) {
+pub(crate) fn entries(objects: Vec<Object>, seen: &mut HashMap<String, bool>) -> (Vec<(String, EntryMeta)>, u64) {
     let (mut out, mut skipped) = (Vec::new(), 0);
     for object in objects {
         // The prefix's own marker object is empty once the prefix is stripped.

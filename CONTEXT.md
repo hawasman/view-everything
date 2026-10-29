@@ -31,7 +31,7 @@ An Indexed Volume that is not currently mounted. Its Entries stay in the Index a
 _Avoid_: missing drive, disconnected, unplugged
 
 **Remote**:
-Storage reached over a network protocol (S3, FTP, SFTP or SSH) without mounting it. Remotes are read-only: the app never changes or removes their Entries, and they have no Trash.
+Storage reached over a network protocol (S3, FTP, WebDAV, Azure Blob, SFTP or SSH) without mounting it. Remotes are read-only: the app never changes or removes their Entries, and they have no Trash.
 _Avoid_: cloud, network drive, server, share
 
 **Last Synced**:

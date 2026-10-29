@@ -15,7 +15,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use ve_core::{FtpRemote, FtpTls, Remote, S3Remote};
+use ve_core::{AzureRemote, FtpRemote, FtpTls, Remote, S3Remote, WebdavRemote};
 use ve_scan::VolumeInfo;
 
 /// The protocol tabs of the Add Remote dialog.
@@ -24,6 +24,8 @@ enum RemoteTab {
     Ssh,
     S3,
     Ftp,
+    Webdav,
+    Azure,
 }
 
 /// The refresh choices, in minutes; 0 is Manual (never re-read while running).
@@ -185,24 +187,6 @@ fn secret_hint(input: &Entity<InputState>, kept: bool, window: &mut Window, cx: 
     input.update(cx, |i, cx| i.set_placeholder(hint, window, cx));
 }
 
-/// Whether `remote` may keep a secret in the OS keyring, under its identity.
-fn has_secret(remote: &Remote) -> bool {
-    match remote {
-        Remote::S3(r) => r.access_key.is_some(),
-        Remote::Ftp(_) => true,
-        Remote::Ssh(_) => false,
-    }
-}
-
-/// Whether `remote` cannot connect without a secret.
-fn needs_secret(remote: &Remote) -> bool {
-    match remote {
-        Remote::S3(r) => r.access_key.is_some(),
-        Remote::Ftp(r) => !r.is_anonymous(),
-        Remote::Ssh(_) => false,
-    }
-}
-
 /// The fields of the Add Remote dialog's FTP tab.
 #[derive(Clone)]
 struct FtpForm {
@@ -260,6 +244,111 @@ impl FtpForm {
     }
 }
 
+/// The fields of the Add Remote dialog's WebDAV tab.
+#[derive(Clone)]
+struct WebdavForm {
+    url: Entity<InputState>,
+    user: Entity<InputState>,
+    password: Entity<InputState>,
+}
+
+impl WebdavForm {
+    fn new(window: &mut Window, cx: &mut Context<SettingsPage>) -> Self {
+        let mut input = |hint: &'static str| cx.new(|cx| InputState::new(window, cx).placeholder(hint));
+        let (url, user) = (input("https://host/remote.php/dav/files/me"), input("empty for none"));
+        let password = cx.new(|cx| InputState::new(window, cx).placeholder("stored in the OS keyring").masked(true));
+        Self { url, user, password }
+    }
+
+    fn all(&self) -> [&Entity<InputState>; 3] {
+        [&self.url, &self.user, &self.password]
+    }
+
+    /// The WebDAV Remote typed in and the password typed for it, if any. `editing` is the Remote
+    /// the dialog edits: its password stays when none is typed and the server and user are unchanged.
+    fn read(&self, editing: Option<&Remote>, cx: &App) -> Result<(Remote, Option<String>), String> {
+        let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_owned();
+        let remote = WebdavRemote::new(&text(&self.url), &text(&self.user))?;
+        let password = self.password.read(cx).value().to_string();
+        // The stored password is only for the server and user it was typed for.
+        let kept = matches!(editing, Some(Remote::Webdav(old)) if !old.user.is_empty() && *old == remote);
+        if password.is_empty() && !remote.user.is_empty() && !kept {
+            return Err("Enter the password for this user".into());
+        }
+        let password = Some(password).filter(|p| !p.is_empty() && !remote.user.is_empty());
+        Ok((Remote::Webdav(remote), password))
+    }
+
+    /// Shows `remote` in the fields; its password is not shown, only said to be kept.
+    fn fill(&self, remote: &WebdavRemote, window: &mut Window, cx: &mut App) {
+        set(&self.url, &remote.url, window, cx);
+        set(&self.user, &remote.user, window, cx);
+        set(&self.password, "", window, cx);
+        secret_hint(&self.password, !remote.user.is_empty(), window, cx);
+    }
+}
+
+/// The fields of the Add Remote dialog's Azure Blob tab.
+#[derive(Clone)]
+struct AzureForm {
+    account: Entity<InputState>,
+    container: Entity<InputState>,
+    prefix: Entity<InputState>,
+    endpoint: Entity<InputState>,
+    secret: Entity<InputState>,
+}
+
+impl AzureForm {
+    fn new(window: &mut Window, cx: &mut Context<SettingsPage>) -> Self {
+        let mut input = |hint: &'static str| cx.new(|cx| InputState::new(window, cx).placeholder(hint));
+        let (account, container, prefix) = (input("mystorageaccount"), input("backups"), input("2024 (optional)"));
+        let endpoint = input("Azurite etc. (optional)");
+        let secret = cx.new(|cx| InputState::new(window, cx).placeholder("stored in the OS keyring").masked(true));
+        Self {
+            account,
+            container,
+            prefix,
+            endpoint,
+            secret,
+        }
+    }
+
+    fn all(&self) -> [&Entity<InputState>; 5] {
+        [&self.account, &self.container, &self.prefix, &self.endpoint, &self.secret]
+    }
+
+    /// The Azure Blob Remote typed in and the account key or SAS token typed for it, if any.
+    /// `editing` is the Remote the dialog edits: its secret stays when none is typed, unless it
+    /// was the other kind of secret or is for another endpoint.
+    fn read(&self, sas: bool, editing: Option<&Remote>, cx: &App) -> Result<(Remote, Option<String>), String> {
+        let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_owned();
+        let remote = AzureRemote::new(
+            &text(&self.account),
+            &text(&self.container),
+            &text(&self.prefix),
+            &text(&self.endpoint),
+            sas,
+        )?;
+        let secret = self.secret.read(cx).value().trim().to_owned();
+        // The stored secret is only for the endpoint and kind it was typed for.
+        let kept = matches!(editing, Some(Remote::Azure(old)) if old.identity() == remote.identity() && old.sas == sas);
+        if secret.is_empty() && !kept {
+            return Err(if sas { "Enter the SAS token" } else { "Enter the account key" }.into());
+        }
+        Ok((Remote::Azure(remote), Some(secret).filter(|s| !s.is_empty())))
+    }
+
+    /// Shows `remote` in the fields; its secret is not shown, only said to be kept.
+    fn fill(&self, remote: &AzureRemote, window: &mut Window, cx: &mut App) {
+        set(&self.account, &remote.account, window, cx);
+        set(&self.container, &remote.container, window, cx);
+        set(&self.prefix, &remote.prefix, window, cx);
+        set(&self.endpoint, remote.endpoint.as_deref().unwrap_or(""), window, cx);
+        set(&self.secret, "", window, cx);
+        secret_hint(&self.secret, true, window, cx);
+    }
+}
+
 /// What the Engine must be told after the user changes a setting.
 pub struct Changed {
     pub mounted: Vec<VolumeInfo>,
@@ -297,9 +386,13 @@ pub struct SettingsPage {
     remote_every: RefreshSelect,
     s3: S3Form,
     ftp: FtpForm,
+    webdav: WebdavForm,
+    azure: AzureForm,
     /// The tab the Remote dialog shows.
     remote_tab: RemoteTab,
     s3_path_style: bool,
+    /// Azure Blob's secret is a SAS token rather than an account key.
+    azure_sas: bool,
     /// FTP without TLS was switched on in the dialog.
     ftp_plain: bool,
     /// The Remote the dialog edits; `None` adds one.
@@ -347,8 +440,15 @@ impl SettingsPage {
         let remote_every = cx.new(|cx| SelectState::new(items, Some(manual), window, cx));
         let remote_refresh = Self::remote_selects(&settings, window, cx);
         let (s3, ftp) = (S3Form::new(window, cx), FtpForm::new(window, cx));
+        let (webdav, azure) = (WebdavForm::new(window, cx), AzureForm::new(window, cx));
         // A Test result is for the details it tested.
-        for input in [&remote_host, &remote_path].into_iter().chain(s3.all()).chain(ftp.all()) {
+        for input in [&remote_host, &remote_path]
+            .into_iter()
+            .chain(s3.all())
+            .chain(ftp.all())
+            .chain(webdav.all())
+            .chain(azure.all())
+        {
             cx.subscribe(input, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.forget_check(cx);
@@ -370,14 +470,19 @@ impl SettingsPage {
             remote_every,
             s3,
             ftp,
-            // Screenshots: VE_DIALOG_TAB=s3 or ftp opens the Add Remote dialog on that tab, VE_DIALOG_PLAIN
+            webdav,
+            azure,
+            // Screenshots: VE_DIALOG_TAB=s3, ftp, webdav or azure opens the Add Remote dialog on that tab, VE_DIALOG_PLAIN
             // with FTP's plain toggle on.
             remote_tab: match (cfg!(feature = "bench"), std::env::var("VE_DIALOG_TAB").as_deref()) {
                 (true, Ok("s3")) => RemoteTab::S3,
                 (true, Ok("ftp")) => RemoteTab::Ftp,
+                (true, Ok("webdav")) => RemoteTab::Webdav,
+                (true, Ok("azure")) => RemoteTab::Azure,
                 _ => RemoteTab::Ssh,
             },
             s3_path_style: false,
+            azure_sas: false,
             ftp_plain: cfg!(feature = "bench") && std::env::var_os("VE_DIALOG_PLAIN").is_some(),
             editing: None,
             check: Check::Idle,
@@ -402,6 +507,8 @@ impl SettingsPage {
         match self.remote_tab {
             RemoteTab::S3 => self.s3.read(self.s3_path_style, self.editing.as_ref(), cx),
             RemoteTab::Ftp => self.ftp.read(self.ftp_plain, self.editing.as_ref(), cx),
+            RemoteTab::Webdav => self.webdav.read(self.editing.as_ref(), cx),
+            RemoteTab::Azure => self.azure.read(self.azure_sas, self.editing.as_ref(), cx),
             RemoteTab::Ssh => Ok((
                 Remote::new(
                     self.remote_host.read(cx).value().as_ref(),
@@ -425,21 +532,21 @@ impl SettingsPage {
     ) -> Result<(), String> {
         let id = remote.identity();
         let old = self.editing.clone();
-        let moved = old.as_ref().filter(|o| has_secret(o) && o.identity() != id);
+        let moved = old.as_ref().filter(|o| o.has_secret() && o.identity() != id);
         match (&secret, moved) {
-            (Some(secret), _) => ve_scan::s3::store_secret(&id, secret)?,
-            (None, Some(o)) if has_secret(&remote) => match ve_scan::s3::read_secret(&o.identity()) {
-                Ok(secret) => ve_scan::s3::store_secret(&id, &secret)?,
-                Err(why) if needs_secret(&remote) => return Err(format!("Enter the secret again: {why}")),
+            (Some(secret), _) => ve_scan::remote::store_secret(&id, secret)?,
+            (None, Some(o)) if remote.has_secret() => match ve_scan::remote::read_secret(&o.identity()) {
+                Ok(secret) => ve_scan::remote::store_secret(&id, &secret)?,
+                Err(why) if remote.needs_secret() => return Err(format!("Enter the secret again: {why}")),
                 Err(_) => {}
             },
             _ => {}
         }
         if let Some(o) = &old
-            && has_secret(o)
-            && (o.identity() != id || !has_secret(&remote))
+            && o.has_secret()
+            && (o.identity() != id || !remote.has_secret())
         {
-            ve_scan::s3::forget_secret(&o.identity());
+            ve_scan::remote::forget_secret(o);
         }
         match &old {
             Some(o) => self.settings.replace_remote(o, remote, minutes),
@@ -468,9 +575,9 @@ impl SettingsPage {
         self.check = Check::Running;
         window.refresh();
         // With none typed, an edited Remote's secret is still filed under its old identity until saved.
-        let kept = self.editing.as_ref().filter(|o| has_secret(o)).map(Remote::identity);
+        let kept = self.editing.as_ref().filter(|o| o.has_secret()).map(Remote::identity);
         let task = cx.background_spawn(async move {
-            let secret = secret.or_else(|| kept.and_then(|id| ve_scan::s3::read_secret(&id).ok()));
+            let secret = secret.or_else(|| kept.and_then(|id| ve_scan::remote::read_secret(&id).ok()));
             ve_scan::remote::check(&remote, secret.as_deref())
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -497,11 +604,7 @@ impl SettingsPage {
     }
 
     fn remove_remote(&mut self, remote: &Remote, window: &mut Window, cx: &mut Context<Self>) {
-        match remote {
-            Remote::S3(r) if r.access_key.is_some() => ve_scan::s3::forget_secret(&remote.identity()),
-            Remote::Ftp(r) => ve_scan::ftp::forget_password(r),
-            _ => {}
-        }
+        ve_scan::remote::forget_secret(remote);
         self.settings.remove_remote(remote);
         self.remote_refresh = Self::remote_selects(&self.settings, window, cx);
         self.commit(cx);
@@ -887,7 +990,7 @@ impl SettingsPage {
         cx.notify();
     }
 
-    /// The Remote dialog: SSH, S3 or FTP details for a read-only Remote, to add one or to edit
+    /// The Remote dialog: SSH, S3, FTP, WebDAV or Azure Blob details for a read-only Remote, to add one or to edit
     /// `editing`. Test tries the details before they are saved.
     pub fn open_remote_dialog(&mut self, editing: Option<Remote>, window: &mut Window, cx: &mut Context<Self>) {
         // An Add after an Edit starts empty; an Add after a cancelled Add keeps what was typed.
@@ -898,11 +1001,19 @@ impl SettingsPage {
         self.forget_check(cx);
         let (host, path, every) = (self.remote_host.clone(), self.remote_path.clone(), self.remote_every.clone());
         let (form, ftp_form) = (self.s3.clone(), self.ftp.clone());
+        let (dav_form, azure_form) = (self.webdav.clone(), self.azure.clone());
         let page = cx.entity();
         window.open_dialog(cx, move |dialog, _, cx| {
             let page = page.clone();
-            let (shown_tab, path_style, plain, editing, check) = page.read_with(cx, |p, _| {
-                (p.remote_tab, p.s3_path_style, p.ftp_plain, p.editing.is_some(), p.check.clone())
+            let (shown_tab, path_style, plain, sas, editing, check) = page.read_with(cx, |p, _| {
+                (
+                    p.remote_tab,
+                    p.s3_path_style,
+                    p.ftp_plain,
+                    p.azure_sas,
+                    p.editing.is_some(),
+                    p.check.clone(),
+                )
             });
             let p = palette(cx);
             let (surface, ground, border, muted, text) = (p.surface, p.ground, p.border, p.muted, p.text);
@@ -1028,6 +1139,49 @@ impl SettingsPage {
                             ))
                         })
                         .child(refresh)
+                } else if shown_tab == RemoteTab::Webdav {
+                    v_flex()
+                        .gap(px(11.))
+                        .child(field("URL", &dav_form.url))
+                        .child(
+                            h_flex()
+                                .gap(px(12.))
+                                .child(field("User", &dav_form.user))
+                                .child(field("Password", &dav_form.password)),
+                        )
+                        .child(refresh)
+                } else if shown_tab == RemoteTab::Azure {
+                    v_flex()
+                        .gap(px(11.))
+                        .child(
+                            h_flex()
+                                .gap(px(12.))
+                                .child(field("Account", &azure_form.account))
+                                .child(field("Container", &azure_form.container)),
+                        )
+                        .child(
+                            h_flex()
+                                .gap(px(12.))
+                                .child(field("Prefix", &azure_form.prefix))
+                                .child(field("Endpoint", &azure_form.endpoint)),
+                        )
+                        .child(field(if sas { "SAS token" } else { "Account key" }, &azure_form.secret))
+                        .child(
+                            h_flex()
+                                .gap(px(10.))
+                                .items_center()
+                                .child(Switch::new("azure-sas").checked(sas).on_click({
+                                    let page = page.clone();
+                                    move |checked: &bool, _, cx| {
+                                        page.update(cx, |page, cx| {
+                                            page.azure_sas = *checked;
+                                            page.forget_check(cx);
+                                        })
+                                    }
+                                }))
+                                .child(div().text_color(muted).child("The secret is a SAS token, not an account key")),
+                        )
+                        .child(refresh)
                 } else {
                     v_flex()
                         .gap(px(11.))
@@ -1069,7 +1223,9 @@ impl SettingsPage {
                     .bg(surface)
                     .child(tab("tab-ssh", "SSH", RemoteTab::Ssh))
                     .child(tab("tab-s3", "S3", RemoteTab::S3))
-                    .child(tab("tab-ftp", "FTP", RemoteTab::Ftp)),
+                    .child(tab("tab-ftp", "FTP", RemoteTab::Ftp))
+                    .child(tab("tab-webdav", "WebDAV", RemoteTab::Webdav))
+                    .child(tab("tab-azure", "Azure", RemoteTab::Azure)),
             );
             dialog
                 .w(px(480.))
@@ -1104,6 +1260,8 @@ impl SettingsPage {
                         .child(div().flex_1().text_xs().text_color(muted).child(match shown_tab {
                             RemoteTab::S3 => "Keys left empty: AWS_* or ~/.aws",
                             RemoteTab::Ftp => "Passive mode, FTPS (AUTH TLS) by default",
+                            RemoteTab::Webdav => "Basic auth: prefer https",
+                            RemoteTab::Azure => "Account key or SAS token",
                             RemoteTab::Ssh => "Keys and ssh-agent only",
                         }))
                         .child(pill("remote-cancel", "Cancel").build(cx, |_, window, cx| window.close_dialog(cx)))
@@ -1128,11 +1286,15 @@ impl SettingsPage {
             .into_iter()
             .chain(self.s3.all())
             .chain(self.ftp.all())
+            .chain(self.webdav.all())
+            .chain(self.azure.all())
         {
             set(input, "", window, cx);
         }
         secret_hint(&self.s3.secret, false, window, cx);
         secret_hint(&self.ftp.password, false, window, cx);
+        secret_hint(&self.webdav.password, false, window, cx);
+        secret_hint(&self.azure.secret, false, window, cx);
         let minutes = remote.map_or(0, |r| self.settings.remote_refresh_minutes(r));
         self.remote_every.update(cx, |select, cx| {
             let (items, at) = refresh_items(minutes);
@@ -1141,6 +1303,7 @@ impl SettingsPage {
         });
         self.s3_path_style = false;
         self.ftp_plain = false;
+        self.azure_sas = false;
         match remote {
             None => {}
             Some(Remote::Ssh(r)) => {
@@ -1157,6 +1320,15 @@ impl SettingsPage {
                 self.remote_tab = RemoteTab::Ftp;
                 self.ftp_plain = r.tls == FtpTls::Plain;
                 self.ftp.fill(r, window, cx);
+            }
+            Some(Remote::Webdav(r)) => {
+                self.remote_tab = RemoteTab::Webdav;
+                self.webdav.fill(r, window, cx);
+            }
+            Some(Remote::Azure(r)) => {
+                self.remote_tab = RemoteTab::Azure;
+                self.azure_sas = r.sas;
+                self.azure.fill(r, window, cx);
             }
         }
     }

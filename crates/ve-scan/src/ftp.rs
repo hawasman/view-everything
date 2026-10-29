@@ -430,6 +430,14 @@ pub(crate) fn password(remote: &FtpRemote) -> Result<String, String> {
 
 /// Logs in to `remote` with `password` and enters its folder, trusting `tls` for FTPS: the
 /// Test of the Remote dialog.
+pub fn check_remote(r: &FtpRemote, secret: Option<&str>) -> io::Result<()> {
+    let password = match secret {
+        Some(p) => p.to_owned(),
+        None => password(r).map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))?,
+    };
+    check(r, &password, web_roots_config())
+}
+
 pub fn check(remote: &FtpRemote, password: &str, tls: Arc<ClientConfig>) -> io::Result<()> {
     let mut ftp = connect(remote, password, tls)?;
     let entered = ftp.cwd(remote.path.as_str()).map_err(|e| match e {

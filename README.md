@@ -11,7 +11,7 @@ never wait on a scan.
 - **Export**: Export CSV writes what the flat list shows (every Entry matching the Query, so a zoomed folder is included) with the columns path, name, Logical Size, On-disk Size, modified (UTC) and Category. Export PNG on the Treemap saves the tiles as drawn, at 2x, in the current theme's colours (without the text labels). Both ask where to save, or use the Downloads folder where there is no save dialog.
 - **Locations**: local Volumes are indexed by default. Removable disks stay searchable as Offline
   Volumes after you unplug them, mounted network shares are opt-in, and read-only Remotes can be
-  indexed over SSH/SFTP, S3 and FTP. Test a Remote's details before you add it, and edit it later
+  indexed over SSH/SFTP, S3, FTP, WebDAV and Azure Blob. Test a Remote's details before you add it, and edit it later
   from Settings.
 - **Trash**: Move to Trash and Empty Trash with confirmation.
 - **Cleaner**: lists what can be regenerated or discarded, grouped as Temporary Files, Caches and Build Artefacts, with each one's On-disk Size. Built-in Cleanup Rules cover the user temp and cache folders (on Windows the Internet cache and shader cache), Rust `target/`, Next.js `.next`, `node_modules` and other tool output; you can add [your own](#cleanup-rules). Build artefacts count only when a project marker is found (a sibling `Cargo.toml`, `package.json`, …). Temporary files are pre-ticked when nothing in them changed for 7 days and build artefacts when nothing in the project changed for 30 days (both limits are in Settings); caches and `node_modules` are never pre-ticked. Tick them to form a Cleanup Plan, review the exact paths and commands under Advanced, and Clean removes them permanently (not via the Trash) after re-checking each on disk (still the same kind of folder, marker present, no link on the way to it, nothing in it changed within the age limit if it was ticked for being old). Some rules remove by running a tool's own command (such as `npm cache clean --force`): it runs without a shell, its size is only an Estimated one, and its output and exit status are shown after Clean. Remotes, Offline Volumes and read-only mounts are never offered.
@@ -118,8 +118,15 @@ swapped, the old one removed on the next start), and the macOS `.app` (when its 
 Anywhere else, and when a download fails, the row keeps the **What's new** link. Builds another
 tool manages (the AUR package) are compiled without the updater: `cargo build --no-default-features`.
 
-SSH Remotes use your system `ssh` with keys or ssh-agent (no password prompts). S3 and FTP
-secrets are kept in the operating system's keyring, never in the settings file.
+SSH Remotes use your system `ssh` with keys or ssh-agent (no password prompts). S3, FTP, WebDAV
+and Azure Blob secrets are kept in the operating system's keyring, never in the settings file.
+
+WebDAV Remotes take a folder URL and a user (Basic authentication; leave the user empty for a
+server that needs none) and are read folder by folder with `PROPFIND Depth: 1`, which servers that
+refuse `Depth: infinity` accept. Use `https://` anywhere you do not trust the network: Basic
+authentication sends the password without encryption over `http://`. Azure Blob Remotes take a storage account, a container
+(and optionally a prefix) and either the account key or a SAS token (it needs list permission) as
+the secret; fill Endpoint for Azurite or a sovereign cloud. A container is listed flat, like S3.
 
 ## Build from source
 

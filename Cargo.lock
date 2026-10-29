@@ -7439,6 +7439,7 @@ dependencies = [
 name = "ve-scan"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bincode",
  "blake3",
  "chrono",
@@ -7446,8 +7447,11 @@ dependencies = [
  "keyring",
  "libc",
  "parking_lot 0.13.0",
+ "percent-encoding",
+ "quick-xml",
  "rayon",
  "rcgen",
+ "ring",
  "rustls",
  "rusty-s3",
  "serde",
