@@ -4,6 +4,7 @@
 use crate::categories::CategoryPanel;
 use crate::cleaner::CleanerPage;
 use crate::dashboard::{Act, DashboardPage};
+use crate::duplicates::DuplicatesPanel;
 use crate::engine::{Engine, Phase, Repaint, last_synced_label};
 use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
@@ -29,6 +30,7 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use ve_core::CategoryMap;
 use ve_scan::VolumeInfo;
 
@@ -79,6 +81,9 @@ pub struct Shell {
     tree: Entity<TableState<TreeList>>,
     /// Whether the Explorer shows the tree rather than the flat list.
     show_tree: bool,
+    /// Whether the Explorer shows the Duplicates panel instead of a list.
+    show_duplicates: bool,
+    duplicates: Entity<DuplicatesPanel>,
     filters: Entity<FiltersPanel>,
     show_filters: bool,
     /// The name field of the Saved Queries dialog, and the saved Query it is renaming.
@@ -147,6 +152,7 @@ impl Shell {
             page.set_context(&settings, volumes.clone(), cx);
             page
         });
+        let duplicates = cx.new(|_| DuplicatesPanel::new(engine.shared.clone(), trash.clone(), volumes.clone()));
         let cleaner = cx.new(|_| CleanerPage::new(engine.shared.clone(), repaint.clone(), volumes.clone(), &settings));
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
         cx.subscribe_in(&dashboard, window, |this, _, act: &Act, window, cx| {
@@ -358,6 +364,8 @@ impl Shell {
             settings_page,
             dashboard,
             cleaner,
+            duplicates,
+            show_duplicates: false,
             trash,
             treemap,
             categories: category_panel,
@@ -524,6 +532,7 @@ impl Shell {
     fn mounts_changed(&mut self, now: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) {
         let before = std::mem::replace(&mut self.volumes, now.clone());
         self.cleaner.update(cx, |c, cx| c.set_volumes(now.clone(), cx));
+        self.duplicates.update(cx, |d, cx| d.set_volumes(now.clone(), cx));
         // An unmounted Volume's 'Index this?' no longer applies; a replug asks again.
         let gone: Vec<String> = self
             .offered
@@ -927,6 +936,24 @@ impl Shell {
             }
             Phase::Idle => {}
         }
+        if shared.hashing_now() {
+            let hashing = &shared.hash_progress;
+            let (stage, done, total) = (
+                hashing.stage.load(Ordering::Relaxed),
+                hashing.done.load(Ordering::Relaxed),
+                hashing.total.load(Ordering::Relaxed),
+            );
+            let what = if stage == 2 {
+                "Hashing whole files"
+            } else {
+                "Comparing file starts and ends"
+            };
+            bar = bar.child(sep()).child(
+                item()
+                    .child(dot(accent))
+                    .child(format!("{what} for Duplicates — {done} of {total}")),
+            );
+        }
         let synced = {
             let oldest = shared.index.read().oldest_synced();
             last_synced_label(oldest, chrono::Utc::now().timestamp())
@@ -1240,7 +1267,7 @@ impl Shell {
     fn tabs(&self, summary: String, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let (text, muted, border) = (p.text, p.muted, p.border);
-        let tab = |id: &'static str, label: &'static str, on: bool, tree: bool, cx: &mut Context<Self>| {
+        let tab = |id: &'static str, label: &'static str, on: bool, tree: Option<bool>, cx: &mut Context<Self>| {
             div()
                 .id(id)
                 .relative()
@@ -1255,7 +1282,10 @@ impl Shell {
                     d.child(div().absolute().left_0().right_0().bottom(px(-1.)).h(px(2.)).bg(text))
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.show_tree = tree;
+                    this.show_duplicates = tree.is_none();
+                    if let Some(tree) = tree {
+                        this.show_tree = tree;
+                    }
                     cx.notify();
                 }))
         };
@@ -1264,8 +1294,15 @@ impl Shell {
             .items_center()
             .border_b_1()
             .border_color(border)
-            .child(tab("tab-tree", "Tree", self.show_tree, true, cx))
-            .child(tab("tab-flat", "Flat list", !self.show_tree, false, cx))
+            .child(tab("tab-tree", "Tree", self.show_tree && !self.show_duplicates, Some(true), cx))
+            .child(tab(
+                "tab-flat",
+                "Flat list",
+                !self.show_tree && !self.show_duplicates,
+                Some(false),
+                cx,
+            ))
+            .child(tab("tab-dupes", "Duplicates", self.show_duplicates, None, cx))
             .child(div().ml_auto().text_xs().text_color(muted).child(summary))
     }
 
@@ -1367,7 +1404,9 @@ impl Shell {
                 )
                 .child(format!("selected · {}", format::size(selected_size)))
         });
-        let list = if self.show_tree {
+        let list = if self.show_duplicates {
+            self.duplicates.clone().into_any_element()
+        } else if self.show_tree {
             DataTable::new(&self.tree)
                 .small()
                 .bordered(false)

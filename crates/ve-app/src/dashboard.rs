@@ -386,7 +386,7 @@ fn run_summary(
             continue;
         }
         // Parsed per computation: a relative date such as `dm:today` means today.
-        let context = QueryContext::new(categories.clone(), Local::now());
+        let context = QueryContext::new(categories.clone(), Local::now()).with_duplicates(shared.duplicates.lock().set.clone());
         let (query, error) = match Query::parse(&text, &context) {
             Ok(q) => (Some(q), None),
             Err(e) => (None, Some(e.to_string())),

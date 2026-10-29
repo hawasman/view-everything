@@ -8,6 +8,7 @@ mod categories;
 mod cleaner;
 mod dashboard;
 mod dashboard_summary;
+mod duplicates;
 mod engine;
 mod explorer;
 mod export;

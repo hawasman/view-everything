@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use ve_core::{CategoryMap, Index, Query, QueryContext, Remote, SyncState, VolumeId};
+use ve_core::{BitSet, CategoryMap, Index, Query, QueryContext, Remote, SyncState, VolumeId};
+use ve_scan::duplicates::{self, Group, HashCache, HashProgress};
 use ve_scan::{Progress, SharedIndex, VolumeInfo};
 
 /// How often a Volume kept current by the NTFS change journal is polled while the app runs.
@@ -45,10 +46,27 @@ pub struct Shared {
     /// Why the current Query text could not be parsed.
     pub query_error: Mutex<Option<String>>,
     busy: AtomicBool,
+    /// Duplicates found by hashing, and how far a running search has got.
+    pub duplicates: Mutex<DuplicateState>,
+    pub hash_progress: HashProgress,
+    hashing: AtomicBool,
     /// Held while the Index is written to disk, so two saves never share the temporary file.
     saving: Mutex<()>,
     /// Called from the background threads whenever something the GUI shows has changed.
     repaint: Repaint,
+}
+
+/// The Duplicates found so far; replaced whole when a search finishes.
+#[derive(Clone, Default)]
+pub struct DuplicateState {
+    /// Largest wasted space first.
+    pub groups: Arc<Vec<Group>>,
+    /// Entries in `groups`, for `dupe:`.
+    pub set: Arc<BitSet>,
+    /// Bumped each time a search finishes.
+    pub version: u64,
+    /// The Index generation the latest search started from, `None` before the first search.
+    pub generation: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -112,6 +130,9 @@ impl Engine {
             view: Mutex::new(None),
             query_error: Mutex::new(None),
             busy: AtomicBool::new(true),
+            duplicates: Mutex::new(DuplicateState::default()),
+            hash_progress: HashProgress::default(),
+            hashing: AtomicBool::new(false),
             saving: Mutex::new(()),
             repaint,
         });
@@ -192,6 +213,10 @@ impl Engine {
 }
 
 impl Shared {
+    pub fn hashing_now(&self) -> bool {
+        self.hashing.load(Ordering::Relaxed)
+    }
+
     fn set_phase(&self, phase: Phase) {
         self.status.lock().phase = phase;
         (self.repaint)();
@@ -497,19 +522,101 @@ fn save_if_changed(shared: &Shared, path: Option<&Path>, saved_generation: &mut 
     }
 }
 
-fn run_viewer(shared: &Shared, queries: &Receiver<String>, categories: &CategoryMap) {
+/// The cache of file hashes, beside the Index.
+fn hashes_path() -> Option<PathBuf> {
+    Some(settings::index_path()?.with_file_name("hashes.bin"))
+}
+
+/// Starts a search for Duplicates unless the last one is current for the Index, or the Index
+/// is still being read (hashing would chase every change). Cached hashes keep a repeat cheap.
+pub fn refresh_duplicates(shared: &Arc<Shared>) {
+    let current = shared.duplicates.lock().generation == Some(shared.index.read().generation());
+    if !current && matches!(shared.status.lock().phase, Phase::Idle) {
+        start_hashing(shared);
+    }
+}
+
+pub fn start_hashing(shared: &Arc<Shared>) {
+    if shared.hashing.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let generation = shared.index.read().generation();
+    let shared = shared.clone();
+    // Redraws the progress while files are hashed.
+    {
+        let shared = shared.clone();
+        let _ = thread::Builder::new().name("ve-hash-progress".into()).spawn(move || {
+            while shared.hashing.load(Ordering::Relaxed) {
+                thread::sleep(PROGRESS_NUDGE);
+                (shared.repaint)();
+            }
+        });
+    }
+    let spawned = thread::Builder::new().name("ve-hasher".into()).spawn({
+        let shared = shared.clone();
+        move || {
+            let path = hashes_path();
+            let mut cache = path.as_deref().map(HashCache::load).unwrap_or_default();
+            let (groups, _) = duplicates::find(
+                &shared.index,
+                &mut cache,
+                duplicates::DEFAULT_MIN_SIZE,
+                &shared.hash_progress,
+                &AtomicBool::new(false),
+            );
+            if let Some(path) = &path
+                && let Err(e) = cache.save(path)
+            {
+                eprintln!("Could not save the hash cache to {}: {e}", path.display());
+            }
+            let mut set = BitSet::new(shared.index.read().capacity());
+            for id in groups.iter().flat_map(|g| &g.files) {
+                set.insert(id.index());
+            }
+            let mut state = shared.duplicates.lock();
+            state.groups = Arc::new(groups);
+            state.set = Arc::new(set);
+            state.version += 1;
+            state.generation = Some(generation);
+            drop(state);
+            shared.hashing.store(false, Ordering::Relaxed);
+            (shared.repaint)();
+        }
+    });
+    if spawned.is_err() {
+        shared.hashing.store(false, Ordering::Relaxed);
+    }
+}
+
+fn run_viewer(shared: &Arc<Shared>, queries: &Receiver<String>, categories: &CategoryMap) {
     let mut text = String::new();
     let mut query: Option<Query> = None;
-    let mut computed: Option<(String, u64)> = None;
+    let mut computed: Option<(String, u64, u64)> = None;
     let mut last_compute = Instant::now() - VIEW_THROTTLE;
+    let mut seen_duplicates = 0;
     loop {
-        match queries.recv_timeout(Duration::from_millis(200)) {
+        let received = match queries.recv_timeout(Duration::from_millis(200)) {
             Ok(latest) => {
                 text = queries.try_iter().last().unwrap_or(latest);
+                true
+            }
+            Err(RecvTimeoutError::Timeout) => false,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        // `dupe:` needs the hashes.
+        if text.contains("dupe:") {
+            refresh_duplicates(shared);
+        }
+        // A finished search changes what `dupe:` means: parse again with its result.
+        let duplicates = shared.duplicates.lock().clone();
+        if received || duplicates.version != seen_duplicates {
+            seen_duplicates = duplicates.version;
+            {
                 let parsed = if text.trim().is_empty() {
                     Ok(None)
                 } else {
-                    Query::parse(&text, &QueryContext::new(categories.clone(), Local::now())).map(Some)
+                    let context = QueryContext::new(categories.clone(), Local::now()).with_duplicates(duplicates.set);
+                    Query::parse(&text, &context).map(Some)
                 };
                 match parsed {
                     Ok(parsed) => {
@@ -523,15 +630,15 @@ fn run_viewer(shared: &Shared, queries: &Receiver<String>, categories: &Category
                     }
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
         }
         if shared.query_error.lock().is_some() {
             continue;
         }
         let generation = shared.index.read().generation();
-        let up_to_date = computed.as_ref().is_some_and(|(t, g)| *t == text && *g == generation);
-        let only_index_moved = computed.as_ref().is_some_and(|(t, _)| *t == text);
+        let up_to_date = computed
+            .as_ref()
+            .is_some_and(|(t, g, d)| *t == text && *g == generation && *d == seen_duplicates);
+        let only_index_moved = computed.as_ref().is_some_and(|(t, _, d)| *t == text && *d == seen_duplicates);
         if up_to_date || (only_index_moved && last_compute.elapsed() < VIEW_THROTTLE) {
             continue;
         }
@@ -540,7 +647,7 @@ fn run_viewer(shared: &Shared, queries: &Receiver<String>, categories: &Category
             View::compute(&index, &text, query.as_ref(), categories)
         };
         *shared.view.lock() = Some(Arc::new(view));
-        computed = Some((text.clone(), generation));
+        computed = Some((text.clone(), generation, seen_duplicates));
         last_compute = Instant::now();
         (shared.repaint)();
     }
@@ -561,6 +668,9 @@ mod tests {
             view: Mutex::new(None),
             query_error: Mutex::new(None),
             busy: AtomicBool::new(false),
+            duplicates: Mutex::new(DuplicateState::default()),
+            hash_progress: HashProgress::default(),
+            hashing: AtomicBool::new(false),
             saving: Mutex::new(()),
             repaint: Arc::new(|| {}),
         }
