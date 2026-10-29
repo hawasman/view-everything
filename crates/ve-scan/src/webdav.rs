@@ -61,13 +61,21 @@ pub(crate) fn password(remote: &WebdavRemote) -> Result<String, String> {
 
 /// The `scheme://host[:port]` and the (encoded) path of the Remote's folder.
 fn split(remote: &WebdavRemote) -> io::Result<(String, String)> {
-    let url = url::Url::parse(&remote.url).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("{}: {e}", remote.url)))?;
+    // The URL is left out of the error: a hand-edited one may carry a password.
+    let url = url::Url::parse(&remote.url)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("the WebDAV URL is not valid: {e}")))?;
     Ok((url.origin().ascii_serialization(), url.path().to_owned()))
 }
 
+/// The host (and port) of the URL, never its userinfo.
 fn host(remote: &WebdavRemote) -> String {
-    let rest = remote.url.split_once("://").map_or(remote.url.as_str(), |(_, r)| r);
-    rest.split('/').next().unwrap_or(rest).to_owned()
+    url::Url::parse(&remote.url)
+        .ok()
+        .and_then(|u| {
+            let host = u.host_str()?.to_owned();
+            Some(u.port().map_or(host.clone(), |p| format!("{host}:{p}")))
+        })
+        .unwrap_or_default()
 }
 
 /// `PROPFIND` of `url` at `depth`; the multistatus body, or why the server would not give one.
@@ -117,9 +125,12 @@ fn propfind(agent: &ureq::Agent, remote: &WebdavRemote, password: &str, url: &st
 /// A server path as the server named it: `href` may be a full URL or a path, relative to the
 /// folder `from` if it has no leading `/`. Returns the encoded path and the decoded one.
 fn href_path(href: &str, from: &str) -> (String, String) {
+    // Only http(s) hrefs are URLs: `a:b.txt` is a relative name that has a colon.
+    let absolute = href.get(..8).is_some_and(|h| h.eq_ignore_ascii_case("https://"))
+        || href.get(..7).is_some_and(|h| h.eq_ignore_ascii_case("http://"));
     let path = match url::Url::parse(href) {
-        Ok(url) => url.path().to_owned(),
-        Err(_) => href.split(['?', '#']).next().unwrap_or("").to_owned(),
+        Ok(url) if absolute => url.path().to_owned(),
+        _ => href.split(['?', '#']).next().unwrap_or("").to_owned(),
     };
     let path = if path.starts_with('/') { path } else { format!("{from}{path}") };
     let decoded = percent_decode_str(&path).decode_utf8_lossy().into_owned();
@@ -264,5 +275,6 @@ mod tests {
         assert_eq!(href_path("https://h/dav/a%20b/", "/x/"), ("/dav/a%20b/".into(), "/dav/a b/".into()));
         assert_eq!(href_path("/dav/c?x=1", "/x/"), ("/dav/c".into(), "/dav/c".into()));
         assert_eq!(href_path("d", "/dav/"), ("/dav/d".into(), "/dav/d".into()));
+        assert_eq!(href_path("a:b.txt", "/dav/"), ("/dav/a:b.txt".into(), "/dav/a:b.txt".into()));
     }
 }
