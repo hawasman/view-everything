@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"VESNAP\0\x01";
@@ -139,8 +140,15 @@ impl Snapshot {
 
     /// Compares the Index's current Folder Sizes with this Snapshot, matching folders by path.
     pub fn compare(&self, index: &Index) -> Comparison {
-        let filter = Filter::compute(index, None);
+        self.compare_with(|| index)
+    }
+
+    /// Like [`Snapshot::compare`], taking the Index from `read` only once the work that does not
+    /// need it is done, so a read lock is held for as short a time as possible.
+    pub fn compare_with<I: Deref<Target = Index>>(&self, read: impl FnOnce() -> I) -> Comparison {
         let by_parent: HashMap<(u32, &str), u32> = (0..self.folders()).map(|i| ((self.parent[i], self.name(i)), i as u32)).collect();
+        let index = &*read();
+        let filter = Filter::compute(index, None);
         let mut out = Comparison {
             generation: index.generation(),
             changes: vec![Change::default(); index.folder_slots()],

@@ -507,7 +507,6 @@ pub fn recheck(rule: &Rule, path: &Path, volumes: &[VolumeInfo], min_age_days: O
 /// it needs admin rights (ADR-0008). `deep` false judges `path` alone, as for a command rule's
 /// working folder. Where ownership cannot be told (no uid, an unreadable folder) it counts as not
 /// the user's: the admin step shows the command instead of a Clean that might fail half-way.
-// ponytail: walks every file of each Cleanable on the render thread, once per Index generation; move to the background if a huge node_modules makes it visible.
 #[cfg(unix)]
 pub fn foreign(path: &Path, deep: bool) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;

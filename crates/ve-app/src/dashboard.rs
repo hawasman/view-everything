@@ -159,6 +159,8 @@ impl DashboardPage {
             recent_query,
             editing: None,
         };
+        // The Cleaner card shows what its background look found.
+        cx.observe(&page.cleaner, |_, _, cx| cx.notify()).detach();
         page.set_context(settings, Vec::new(), cx);
         page
     }
@@ -858,24 +860,27 @@ impl DashboardPage {
             );
 
         // The Cleaner looks again only when the Index changed, so this follows every Clean.
-        let (reclaim, found) = self.cleaner.update(cx, |c, _| {
-            c.refresh();
-            c.reclaimable()
+        let (reclaim, found, looking) = self.cleaner.update(cx, |c, cx| {
+            c.refresh(cx);
+            let (reclaim, found) = c.reclaimable();
+            (reclaim, found, c.looking())
         });
         let cleaner = panel(cx)
             .child(div().font_weight(FontWeight::MEDIUM).child("Cleaner"))
-            .child(
-                div()
-                    .mt(px(12.))
-                    .text_size(px(32.))
-                    .line_height(px(38.))
-                    .child(format::size(reclaim)),
-            )
-            .child(div().text_xs().text_color(p.muted).mb(px(16.)).child(format!(
-                "Could be reclaimed from {} Cleanable{}.",
-                format::count(found as u64),
-                if found == 1 { "" } else { "s" }
-            )))
+            .child(div().mt(px(12.)).text_size(px(32.)).line_height(px(38.)).child(if looking {
+                "…".to_owned()
+            } else {
+                format::size(reclaim)
+            }))
+            .child(div().text_xs().text_color(p.muted).mb(px(16.)).child(if looking {
+                "Looking for Cleanables.".to_owned()
+            } else {
+                format!(
+                    "Could be reclaimed from {} Cleanable{}.",
+                    format::count(found as u64),
+                    if found == 1 { "" } else { "s" }
+                )
+            }))
             .child(div().child(pill("open-cleaner", "Open Cleaner").build(cx, cx.listener(|_, _, _, cx| cx.emit(Act::OpenCleaner)))));
 
         let old = oldest_ix.map(|i| &locations[i]);

@@ -521,7 +521,11 @@ fn save_if_changed(shared: &Arc<Shared>, path: Option<&Path>, saved_generation: 
         Ok(()) => {
             *saved_generation = index.generation();
             shared.resolve("save");
-            snapshot_first_save_of_day(shared, path);
+            // A Location still on its first scan would make a partial Snapshot, and a comparison
+            // with it would call everything the scan has not reached yet removed.
+            if matches!(index.oldest_synced(), Some(Some(_))) {
+                snapshot_first_save_of_day(shared, path);
+            }
         }
         Err(e) => shared.report("save", format!("Could not save the Index to {}: {e}", path.display())),
     }
@@ -532,7 +536,7 @@ pub fn snapshots_dir() -> Option<PathBuf> {
     Some(settings::index_path()?.with_file_name("snapshots"))
 }
 
-/// After the first Index save of a day, stores that day's Snapshot on a thread of its own, so
+/// After the first Index save of a day (once every Location has synced), stores that day's Snapshot on a thread of its own, so
 /// neither the save nor the GUI waits for it, then drops the Snapshots retention no longer keeps.
 fn snapshot_first_save_of_day(shared: &Arc<Shared>, index_path: &Path) {
     let dir = index_path.with_file_name("snapshots"); // same folder as `snapshots_dir`
@@ -727,6 +731,28 @@ mod tests {
             }
         }
         index
+    }
+
+    #[::core::prelude::v1::test]
+    fn no_snapshot_is_stored_until_every_location_has_synced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.bin");
+        let shared = Arc::new(shared());
+        *shared.index.write() = index_with_volumes(&[Some(100), None]);
+        let mut saved = 0;
+        save_if_changed(&shared, Some(&path), &mut saved, true);
+        assert!(path.exists() && !dir.path().join("snapshots").exists());
+        // The second Location finishes its first sync: the next save stores the day's Snapshot.
+        shared.index.write().mark_synced(VolumeId(1), 200, None);
+        save_if_changed(&shared, Some(&path), &mut saved, true);
+        let today = snapshot::path_for(&dir.path().join("snapshots"), Local::now().date_naive());
+        for _ in 0..100 {
+            if today.exists() && !shared.snapshotting.load(Ordering::Acquire) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(today.exists());
     }
 
     #[::core::prelude::v1::test]

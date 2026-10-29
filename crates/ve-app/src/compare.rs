@@ -91,7 +91,7 @@ impl Compare {
                         Arc::new(Snapshot::load(&path).map_err(|e| format!("Could not read the Snapshot of {date}: {e}"))?)
                     }
                 };
-                let comparison = snap.compare(&shared.index.read());
+                let comparison = snap.compare_with(|| shared.index.read());
                 Ok::<_, String>((snap, Arc::new(comparison)))
             });
             let done = work.await;

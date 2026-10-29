@@ -40,6 +40,11 @@ pub struct CleanerPage {
     build_days: u64,
     /// Index generation `cleanables` was found in.
     seen: Option<u64>,
+    /// A look for Cleanables is running on a background thread. Nothing it has not told apart
+    /// into yours and admin-only is offered, so a Cleanable never shows up as cleanable early.
+    looking: bool,
+    /// Counts the changes (rules, Volumes, age limits) that make a running look's answer stale.
+    epoch: u64,
     cleanables: Vec<Cleanable>,
     /// Cleanables already shown, so one that appears later is pre-ticked once and a choice of the
     /// user's stays.
@@ -86,6 +91,8 @@ impl CleanerPage {
             temp_days: settings.cleaner_temp_days,
             build_days: settings.cleaner_build_days,
             seen: None,
+            looking: false,
+            epoch: 0,
             cleanables: Vec::new(),
             known: HashSet::new(),
             ticked: HashSet::new(),
@@ -99,7 +106,7 @@ impl CleanerPage {
 
     pub fn set_volumes(&mut self, volumes: Vec<VolumeInfo>, cx: &mut Context<Self>) {
         self.volumes = volumes;
-        self.seen = None;
+        self.invalidate();
         cx.notify();
     }
 
@@ -110,30 +117,68 @@ impl CleanerPage {
             self.build_days = settings.cleaner_build_days;
             self.known.clear();
             self.ticked.clear();
-            self.seen = None;
+            self.invalidate();
             cx.notify();
         }
     }
 
-    /// Looks for Cleanables again when the Index or `cleanup.toml` changed since the last look.
-    // ponytail: scans on the render thread; move to a background thread if a 10M-Entry Index makes it visible.
-    pub fn refresh(&mut self) {
+    /// The next `refresh` looks again, and a look already running is forgotten.
+    fn invalidate(&mut self) {
+        self.seen = None;
+        self.epoch += 1;
+    }
+
+    /// Whether the first look for Cleanables is still running.
+    pub fn looking(&self) -> bool {
+        self.looking && self.seen.is_none()
+    }
+
+    /// Starts looking for Cleanables again when the Index or `cleanup.toml` changed since the
+    /// last look. The look, with the ownership walk over every Cleanable, runs on a background
+    /// thread; what the page shows meanwhile is the last look's answer.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let stamp = rules_stamp();
         if stamp != self.rules_stamp {
             self.rules_stamp = stamp;
             self.rules = rules::load(cleanup_path().as_deref());
-            self.seen = None;
+            self.invalidate();
         }
-        let index = self.shared.index.read();
-        if self.seen == Some(index.generation()) {
+        if self.looking || self.seen == Some(self.shared.index.read().generation()) {
             return;
         }
-        let (admin, own): (Vec<_>, Vec<_>) = rules::find(&index, &self.volumes, &self.rules.rules)
-            .into_iter()
-            .partition(|c| foreign(&c.path, !c.rule.is_command()).is_some());
+        self.looking = true;
+        let epoch = self.epoch;
+        let (shared, volumes, rules) = (self.shared.clone(), self.volumes.clone(), self.rules.rules.clone());
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_spawn(async move {
+                    let index = shared.index.read();
+                    let generation = index.generation();
+                    let found = rules::find(&index, &volumes, &rules);
+                    drop(index);
+                    // Fail closed: a Cleanable is the user's only if the whole walk says so.
+                    let (admin, own): (Vec<_>, Vec<_>) = found.into_iter().partition(|c| foreign(&c.path, !c.rule.is_command()).is_some());
+                    (generation, own, admin)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.looking = false;
+                // Rules or Volumes changed meanwhile: this answer is for something else, so the
+                // render that follows looks again.
+                if this.epoch == epoch {
+                    this.apply(found.0, found.1, found.2);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn apply(&mut self, generation: u64, own: Vec<Cleanable>, admin: Vec<Cleanable>) {
         self.cleanables = own;
         self.admin = admin;
-        self.seen = Some(index.generation());
+        self.seen = Some(generation);
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
         for c in &self.cleanables {
             if self.known.insert(c.key()) && c.pre_ticked(now, self.temp_days, self.build_days) {
@@ -510,7 +555,7 @@ impl CleanerPage {
 
 impl Render for CleanerPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.refresh();
+        self.refresh(cx);
         let p = palette(cx);
         let (muted, rule, warning) = (p.muted, p.rule, p.warning);
         let plan = self.plan();
@@ -619,7 +664,9 @@ impl Render for CleanerPage {
                 .child(
                     panel(cx)
                         .child(v_flex().children(rows))
-                        .when(self.cleanables.is_empty(), |d| d.child("Nothing to clean."))
+                        .when(self.cleanables.is_empty(), |d| {
+                            d.child(if self.looking() { "Looking for Cleanables…" } else { "Nothing to clean." })
+                        })
                         .child(
                             h_flex()
                                 .mt(px(12.))
