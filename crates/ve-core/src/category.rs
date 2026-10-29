@@ -42,9 +42,7 @@ impl Category {
 
     /// Parses a Category name, ignoring case.
     pub fn parse(name: &str) -> Option<Category> {
-        Category::ALL
-            .into_iter()
-            .find(|c| c.name().eq_ignore_ascii_case(name))
+        Category::ALL.into_iter().find(|c| c.name().eq_ignore_ascii_case(name))
     }
 }
 
@@ -58,15 +56,14 @@ const BUILTIN: &[(Category, &[&str])] = &[
     (
         Category::Video,
         &[
-            "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "3gp", "m2ts",
-            "vob", "ogv",
+            "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "3gp", "m2ts", "vob", "ogv",
         ],
     ),
     (
         Category::Image,
         &[
-            "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "heic", "heif", "svg",
-            "ico", "raw", "cr2", "nef", "arw", "dng", "psd", "xcf", "avif", "jxl",
+            "jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "heic", "heif", "svg", "ico", "raw", "cr2", "nef", "arw", "dng",
+            "psd", "xcf", "avif", "jxl",
         ],
     ),
     (
@@ -78,32 +75,28 @@ const BUILTIN: &[(Category, &[&str])] = &[
     (
         Category::Archive,
         &[
-            "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "zst", "lz4", "lzma", "cab",
-            "iso", "img", "dmg", "deb", "rpm", "jar", "apk", "appimage", "pkg", "vhd", "vhdx",
-            "vmdk", "qcow2", "wim",
+            "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "zst", "lz4", "lzma", "cab", "iso", "img", "dmg", "deb", "rpm", "jar",
+            "apk", "appimage", "pkg", "vhd", "vhdx", "vmdk", "qcow2", "wim",
         ],
     ),
     (
         Category::Code,
         &[
-            "rs", "c", "h", "cpp", "hpp", "cc", "cs", "java", "kt", "go", "py", "js", "mjs", "ts",
-            "tsx", "jsx", "rb", "php", "swift", "m", "lua", "sh", "bash", "zsh", "ps1", "html",
-            "css", "scss", "json", "toml", "yaml", "yml", "xml", "sql", "o", "obj", "a", "lib",
+            "rs", "c", "h", "cpp", "hpp", "cc", "cs", "java", "kt", "go", "py", "js", "mjs", "ts", "tsx", "jsx", "rb", "php", "swift", "m",
+            "lua", "sh", "bash", "zsh", "ps1", "html", "css", "scss", "json", "toml", "yaml", "yml", "xml", "sql", "o", "obj", "a", "lib",
             "rlib", "pyc", "class", "wasm",
         ],
     ),
     (
         Category::Document,
         &[
-            "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "txt",
-            "md", "csv", "epub", "mobi", "tex", "log",
+            "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "txt", "md", "csv", "epub", "mobi", "tex",
+            "log",
         ],
     ),
     (
         Category::Executable,
-        &[
-            "exe", "dll", "so", "dylib", "msi", "bin", "sys", "elf", "app", "com", "bat", "cmd",
-        ],
+        &["exe", "dll", "so", "dylib", "msi", "bin", "sys", "elf", "app", "com", "bat", "cmd"],
     ),
 ];
 
@@ -148,10 +141,8 @@ impl CategoryMap {
     pub fn with_overrides(overrides: &CategoryOverrides) -> Result<Self, String> {
         let mut map = Self::builtin();
         for (ext, name) in &overrides.extensions {
-            let category = Category::parse(name)
-                .ok_or_else(|| format!("unknown Category `{name}` for extension `{ext}`"))?;
-            map.by_extension
-                .insert(ext.trim_start_matches('.').to_ascii_lowercase(), category);
+            let category = Category::parse(name).ok_or_else(|| format!("unknown Category `{name}` for extension `{ext}`"))?;
+            map.by_extension.insert(ext.trim_start_matches('.').to_ascii_lowercase(), category);
         }
         Ok(map)
     }
@@ -164,16 +155,9 @@ impl CategoryMap {
 
     pub fn of_extension(&self, ext: &str) -> Category {
         if ext.bytes().all(|b| !b.is_ascii_uppercase()) {
-            return self
-                .by_extension
-                .get(ext)
-                .copied()
-                .unwrap_or(Category::Other);
+            return self.by_extension.get(ext).copied().unwrap_or(Category::Other);
         }
-        self.by_extension
-            .get(&ext.to_ascii_lowercase())
-            .copied()
-            .unwrap_or(Category::Other)
+        self.by_extension.get(&ext.to_ascii_lowercase()).copied().unwrap_or(Category::Other)
     }
 
     pub fn of_name(&self, name: &str) -> Category {

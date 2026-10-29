@@ -34,7 +34,12 @@ pub fn forget_password(remote: &FtpRemote) {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Line {
     /// A file or a folder.
-    Item { name: String, is_dir: bool, size: u64, modified: i64 },
+    Item {
+        name: String,
+        is_dir: bool,
+        size: u64,
+        modified: i64,
+    },
     /// Not an Entry: `.`/`..`, a symlink or special file, a `total` line, a blank.
     Skip,
     /// Not understood: the listing cannot be trusted to be complete.
@@ -102,7 +107,10 @@ fn unix_time(month: &str, day: &str, year_or_time: &str, now: NaiveDateTime) -> 
 fn parse_unix(line: &str, now: NaiveDateTime) -> Line {
     let f = fields(line);
     let kind = f.first().and_then(|(_, perms)| perms.chars().next());
-    if !f.first().is_some_and(|(_, perms)| perms.len() >= 10 && perms.chars().skip(1).all(|c| "rwxsStT-+@.".contains(c))) {
+    if !f
+        .first()
+        .is_some_and(|(_, perms)| perms.len() >= 10 && perms.chars().skip(1).all(|c| "rwxsStT-+@.".contains(c)))
+    {
         return Line::Bad;
     }
     // Month at fields i..i+3, size just before it, the name after. The first place that reads as
@@ -114,8 +122,18 @@ fn parse_unix(line: &str, now: NaiveDateTime) -> Line {
     let Some((i, size, modified)) = found else { return Line::Bad };
     let name = line[f[i + 3].0..].trim_end_matches(['\r', '\n']);
     match kind {
-        Some('d') if usable(name) => Line::Item { name: name.into(), is_dir: true, size: 0, modified },
-        Some('-') if usable(name) => Line::Item { name: name.into(), is_dir: false, size, modified },
+        Some('d') if usable(name) => Line::Item {
+            name: name.into(),
+            is_dir: true,
+            size: 0,
+            modified,
+        },
+        Some('-') if usable(name) => Line::Item {
+            name: name.into(),
+            is_dir: false,
+            size,
+            modified,
+        },
         // Symlinks are skipped; so are devices, pipes and sockets.
         Some('l' | 'c' | 'b' | 'p' | 's') => Line::Skip,
         Some('d' | '-') => unusable(name),
@@ -133,20 +151,32 @@ fn parse_dos(line: &str) -> Line {
     let date: Vec<u32> = f[0].1.split('-').filter_map(|p| p.parse().ok()).collect();
     let [month, day, year] = date[..] else { return Line::Bad };
     // IIS prints two digits: 70..99 are 19xx, 00..69 are 20xx.
-    let year = if year < 70 { 2000 + year } else if year < 100 { 1900 + year } else { year };
+    let year = if year < 70 {
+        2000 + year
+    } else if year < 100 {
+        1900 + year
+    } else {
+        year
+    };
     let time = f[1].1.to_ascii_uppercase();
     let (clock, pm) = match time.strip_suffix("PM") {
         Some(c) => (c, Some(true)),
         None => (time.strip_suffix("AM").unwrap_or(&time), time.ends_with("AM").then_some(false)),
     };
-    let Some((h, m)) = clock.split_once(':').and_then(|(h, m)| Some((h.parse::<u32>().ok()?, m.parse::<u32>().ok()?))) else {
+    let Some((h, m)) = clock
+        .split_once(':')
+        .and_then(|(h, m)| Some((h.parse::<u32>().ok()?, m.parse::<u32>().ok()?)))
+    else {
         return Line::Bad;
     };
     let h = match pm {
         Some(pm) => (h % 12) + if pm { 12 } else { 0 },
         None => h,
     };
-    let Some(modified) = NaiveDate::from_ymd_opt(year as i32, month, day).and_then(|d| d.and_hms_opt(h, m, 0)).map(nanos) else {
+    let Some(modified) = NaiveDate::from_ymd_opt(year as i32, month, day)
+        .and_then(|d| d.and_hms_opt(h, m, 0))
+        .map(nanos)
+    else {
         return Line::Bad;
     };
     let name = line[f[3].0..].trim_end_matches(['\r', '\n']);
@@ -158,7 +188,16 @@ fn parse_dos(line: &str) -> Line {
             Err(_) => return Line::Bad,
         }
     };
-    if usable(name) { Line::Item { name: name.into(), is_dir, size, modified } } else { unusable(name) }
+    if usable(name) {
+        Line::Item {
+            name: name.into(),
+            is_dir,
+            size,
+            modified,
+        }
+    } else {
+        unusable(name)
+    }
 }
 
 /// One line of `LIST` output in either format. `now` anchors the year of times without one.
@@ -167,7 +206,11 @@ pub fn parse_list_line(line: &str, now: NaiveDateTime) -> Line {
     if line.trim().is_empty() || line.trim_start().to_ascii_lowercase().starts_with("total") {
         return Line::Skip;
     }
-    if line.starts_with(|c: char| c.is_ascii_digit()) { parse_dos(line) } else { parse_unix(line, now) }
+    if line.starts_with(|c: char| c.is_ascii_digit()) {
+        parse_dos(line)
+    } else {
+        parse_unix(line, now)
+    }
 }
 
 /// `YYYYMMDDHHMMSS[.sss]` (UTC), the `modify` fact of MLSD, as nanoseconds.
@@ -181,7 +224,9 @@ fn mlsd_time(text: &str) -> Option<i64> {
 pub fn parse_mlsd_line(line: &str) -> Line {
     let line = line.trim_end_matches(['\r', '\n']);
     // The facts end at the first "; ": after that comes the name, which may hold anything.
-    let Some((facts, name)) = line.split_once("; ") else { return if line.trim().is_empty() { Line::Skip } else { Line::Bad } };
+    let Some((facts, name)) = line.split_once("; ") else {
+        return if line.trim().is_empty() { Line::Skip } else { Line::Bad };
+    };
     let (mut kind, mut size, mut modified) = (None, 0, 0);
     for fact in facts.split(';') {
         let Some((key, value)) = fact.split_once('=') else { continue };
@@ -197,8 +242,18 @@ pub fn parse_mlsd_line(line: &str) -> Line {
         }
     }
     match kind.as_deref() {
-        Some("file") if usable(name) => Line::Item { name: name.into(), is_dir: false, size, modified },
-        Some("dir") if usable(name) => Line::Item { name: name.into(), is_dir: true, size: 0, modified },
+        Some("file") if usable(name) => Line::Item {
+            name: name.into(),
+            is_dir: false,
+            size,
+            modified,
+        },
+        Some("dir") if usable(name) => Line::Item {
+            name: name.into(),
+            is_dir: true,
+            size: 0,
+            modified,
+        },
         Some("file" | "dir") => unusable(name),
         Some("cdir" | "pdir") => Line::Skip,
         // Symlinks (OS.unix=slink, OS.unix=symlink) and anything unknown are not Entries.
@@ -210,7 +265,9 @@ pub fn parse_mlsd_line(line: &str) -> Line {
 // ---- the session -----------------------------------------------------------------------------
 
 fn handshake_failure(host: &str, why: &str) -> io::Error {
-    io::Error::other(format!("FTPS handshake with {host} failed: {why} (servers with a private CA or a self-signed certificate are not supported)"))
+    io::Error::other(format!(
+        "FTPS handshake with {host} failed: {why} (servers with a private CA or a self-signed certificate are not supported)"
+    ))
 }
 
 fn failure(remote: &FtpRemote, e: FtpError) -> io::Error {
@@ -218,17 +275,22 @@ fn failure(remote: &FtpRemote, e: FtpError) -> io::Error {
     match e {
         FtpError::SecureError(e) => handshake_failure(&host, &e),
         // The handshake runs inside a socket read, so rustls's complaint arrives as an I/O error.
-        FtpError::ConnectionError(e) if e.get_ref().is_some_and(|inner| inner.is::<rustls::Error>()) => handshake_failure(&host, &e.to_string()),
-        FtpError::ConnectionError(e) => io::Error::new(e.kind(), format!("FTP {host}: {e}")),
-        FtpError::UnexpectedResponse(r) if r.status.code() == 530 => {
-            io::Error::new(io::ErrorKind::PermissionDenied, format!("{host} rejected the login: check the user and password"))
+        FtpError::ConnectionError(e) if e.get_ref().is_some_and(|inner| inner.is::<rustls::Error>()) => {
+            handshake_failure(&host, &e.to_string())
         }
+        FtpError::ConnectionError(e) => io::Error::new(e.kind(), format!("FTP {host}: {e}")),
+        FtpError::UnexpectedResponse(r) if r.status.code() == 530 => io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{host} rejected the login: check the user and password"),
+        ),
         e => io::Error::other(format!("FTP {host}: {e}")),
     }
 }
 
 fn web_roots_config() -> Arc<ClientConfig> {
-    let roots = RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+    let roots = RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
     client_config(roots)
 }
 
@@ -248,7 +310,9 @@ pub fn client_config(roots: RootCertStore) -> Arc<ClientConfig> {
 fn connect(remote: &FtpRemote, password: &str, tls: Arc<ClientConfig>) -> io::Result<RustlsFtpStream> {
     let host = format!("{}:{}", remote.host, remote.port);
     let fail = |e| failure(remote, e);
-    let addrs = (remote.host.as_str(), remote.port).to_socket_addrs().map_err(|e| io::Error::new(e.kind(), format!("{host}: {e}")))?;
+    let addrs = (remote.host.as_str(), remote.port)
+        .to_socket_addrs()
+        .map_err(|e| io::Error::new(e.kind(), format!("{host}: {e}")))?;
     // Every address the name has, in order: `localhost` may be ::1 first on a server bound to IPv4.
     let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{host} has no address"));
     let mut ftp = None;
@@ -310,17 +374,34 @@ fn walk(ftp: &mut RustlsFtpStream, root: &str, mut emit: impl FnMut(String, Entr
                 continue;
             }
             Err(FtpError::UnexpectedResponse(r)) if r.status.code() == 550 => {
-                return Err(io::Error::new(io::ErrorKind::NotFound, format!("{root} is not a folder on the server")));
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{root} is not a folder on the server"),
+                ));
             }
             Err(e) => return Err(io::Error::other(e.to_string())),
         };
         for line in lines {
             match line {
-                Line::Item { name, is_dir, size, modified } => {
+                Line::Item {
+                    name,
+                    is_dir,
+                    size,
+                    modified,
+                } => {
                     let path = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
                     // Folders carry no size of their own: Folder Size is the sum of their contents.
                     let (logical, on_disk) = if is_dir { (0, 0) } else { (size, size) };
-                    emit(path.clone(), EntryMeta { is_dir, logical, on_disk, modified, ..EntryMeta::default() });
+                    emit(
+                        path.clone(),
+                        EntryMeta {
+                            is_dir,
+                            logical,
+                            on_disk,
+                            modified,
+                            ..EntryMeta::default()
+                        },
+                    );
                     if is_dir {
                         stack.push((path, format!("{}/{name}", abs.trim_end_matches('/'))));
                     }
@@ -358,7 +439,9 @@ pub fn sync_with(
 ) -> io::Result<()> {
     let (root, remote): (EntryId, FtpRemote) = {
         let index = index.read();
-        let v = index.volume(volume).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such Remote"))?;
+        let v = index
+            .volume(volume)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such Remote"))?;
         match &v.sync {
             SyncState::Ftp(remote) => (v.root, remote.clone()),
             _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "not an FTP Remote")),
@@ -398,20 +481,40 @@ mod tests {
     }
 
     fn item(name: &str, is_dir: bool, size: u64, modified: i64) -> Line {
-        Line::Item { name: name.into(), is_dir, size, modified }
+        Line::Item {
+            name: name.into(),
+            is_dir,
+            size,
+            modified,
+        }
     }
 
     #[test]
     fn unix_lines_parse_with_year_or_time_and_odd_names() {
         let p = |l: &str| parse_list_line(l, now());
-        assert_eq!(p("-rw-r--r--   1 user group     1234 Nov  5  2018 example.txt"), item("example.txt", false, 1234, at(2018, 11, 5, 0, 0)));
-        assert_eq!(p("drwxr-xr-x   2 0  0  4096 Jan 10 09:30 my folder"), item("my folder", true, 0, at(2026, 1, 10, 9, 30)));
+        assert_eq!(
+            p("-rw-r--r--   1 user group     1234 Nov  5  2018 example.txt"),
+            item("example.txt", false, 1234, at(2018, 11, 5, 0, 0))
+        );
+        assert_eq!(
+            p("drwxr-xr-x   2 0  0  4096 Jan 10 09:30 my folder"),
+            item("my folder", true, 0, at(2026, 1, 10, 9, 30))
+        );
         // A time of day in a month still to come is last year's (ls shows times for six months).
-        assert_eq!(p("-rw-r--r-- 1 u g 7 Dec 31 23:59 old.log"), item("old.log", false, 7, at(2025, 12, 31, 23, 59)));
+        assert_eq!(
+            p("-rw-r--r-- 1 u g 7 Dec 31 23:59 old.log"),
+            item("old.log", false, 7, at(2025, 12, 31, 23, 59))
+        );
         // Within a day of now, a time stays this year (the server's clock may run ahead).
-        assert_eq!(p("-rw-r--r-- 1 u g 7 Jun 16 01:00 fresh"), item("fresh", false, 7, at(2026, 6, 16, 1, 0)));
+        assert_eq!(
+            p("-rw-r--r-- 1 u g 7 Jun 16 01:00 fresh"),
+            item("fresh", false, 7, at(2026, 6, 16, 1, 0))
+        );
         // No group column, a name with leading text that looks like a month, and a double space.
-        assert_eq!(p("-rw-r--r-- 1 owner 99 Mar  3  2020 Mar  4  2021.txt"), item("Mar  4  2021.txt", false, 99, at(2020, 3, 3, 0, 0)));
+        assert_eq!(
+            p("-rw-r--r-- 1 owner 99 Mar  3  2020 Mar  4  2021.txt"),
+            item("Mar  4  2021.txt", false, 99, at(2020, 3, 3, 0, 0))
+        );
         // Symlinks, devices, `total`, blanks, `.` and `..` are not Entries.
         assert_eq!(p("lrwxrwxrwx 1 u g 11 Nov  5  2018 link -> target"), Line::Skip);
         assert_eq!(p("crw-rw-rw- 1 u g 1, 3 Nov  5  2018 null"), Line::Skip);
@@ -430,17 +533,32 @@ mod tests {
     #[test]
     fn dos_lines_parse_with_two_digit_years_and_12_hour_clock() {
         let p = |l: &str| parse_list_line(l, now());
-        assert_eq!(p("10-19-20  03:19PM       <DIR>          pub"), item("pub", true, 0, at(2020, 10, 19, 15, 19)));
-        assert_eq!(p("04-08-14  12:09AM                  403 read me.txt"), item("read me.txt", false, 403, at(2014, 4, 8, 0, 9)));
-        assert_eq!(p("01-02-1999  12:00PM 1,234,567 big.bin"), item("big.bin", false, 1_234_567, at(1999, 1, 2, 12, 0)));
+        assert_eq!(
+            p("10-19-20  03:19PM       <DIR>          pub"),
+            item("pub", true, 0, at(2020, 10, 19, 15, 19))
+        );
+        assert_eq!(
+            p("04-08-14  12:09AM                  403 read me.txt"),
+            item("read me.txt", false, 403, at(2014, 4, 8, 0, 9))
+        );
+        assert_eq!(
+            p("01-02-1999  12:00PM 1,234,567 big.bin"),
+            item("big.bin", false, 1_234_567, at(1999, 1, 2, 12, 0))
+        );
         assert_eq!(p("12-31-98  11:59PM 5 old"), item("old", false, 5, at(1998, 12, 31, 23, 59)));
         assert_eq!(p("13-45-20  03:19PM <DIR> bad"), Line::Bad);
     }
 
     #[test]
     fn mlsd_lines_parse_files_and_folders_and_skip_the_rest() {
-        assert_eq!(parse_mlsd_line("type=file;size=1234;modify=20240102030405.123; a; b.txt"), item("a; b.txt", false, 1234, at(2024, 1, 2, 3, 4) + 5_000_000_000));
-        assert_eq!(parse_mlsd_line("Type=DIR;Modify=20240102030405;UNIX.mode=0755; sub"), item("sub", true, 0, at(2024, 1, 2, 3, 4) + 5_000_000_000));
+        assert_eq!(
+            parse_mlsd_line("type=file;size=1234;modify=20240102030405.123; a; b.txt"),
+            item("a; b.txt", false, 1234, at(2024, 1, 2, 3, 4) + 5_000_000_000)
+        );
+        assert_eq!(
+            parse_mlsd_line("Type=DIR;Modify=20240102030405;UNIX.mode=0755; sub"),
+            item("sub", true, 0, at(2024, 1, 2, 3, 4) + 5_000_000_000)
+        );
         assert_eq!(parse_mlsd_line("type=cdir;modify=20240102030405; ."), Line::Skip);
         assert_eq!(parse_mlsd_line("type=pdir; .."), Line::Skip);
         assert_eq!(parse_mlsd_line("type=OS.unix=slink:/x;size=1; link"), Line::Skip);
@@ -455,7 +573,10 @@ mod tests {
     fn a_remote_is_an_identity_and_is_checked() {
         let r = FtpRemote::new(" ftp.example.com ", 2121, "me", "/pub/", FtpTls::Explicit).unwrap();
         assert_eq!(r.identity(), "ftp://me@ftp.example.com:2121/pub");
-        assert_eq!(FtpRemote::new("h", 21, "me", "", FtpTls::Plain).unwrap().identity(), "ftp://me@h:21/");
+        assert_eq!(
+            FtpRemote::new("h", 21, "me", "", FtpTls::Plain).unwrap().identity(),
+            "ftp://me@h:21/"
+        );
         assert!(FtpRemote::new("a@b", 21, "me", "/", FtpTls::Explicit).is_err());
         assert!(FtpRemote::new("h", 0, "me", "/", FtpTls::Explicit).is_err());
         assert!(FtpRemote::new("h", 21, "", "/", FtpTls::Explicit).is_err());

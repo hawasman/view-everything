@@ -2,10 +2,7 @@ use chrono::{Local, TimeZone};
 use ve_core::{Candidate, CategoryMap, Query, QueryContext};
 
 fn context() -> QueryContext {
-    QueryContext::new(
-        CategoryMap::builtin(),
-        Local.with_ymd_and_hms(2025, 3, 14, 12, 0, 0).unwrap(),
-    )
+    QueryContext::new(CategoryMap::builtin(), Local.with_ymd_and_hms(2025, 3, 14, 12, 0, 0).unwrap())
 }
 
 fn file(name: &str) -> Candidate<'_> {
@@ -89,28 +86,15 @@ fn a_slash_or_backslash_matches_against_the_full_path() {
     assert!(query.matches(&at("/home/me/app/node_modules/react/index.js")));
     assert!(!query.matches(&at("/home/me/app/src/node_modules.txt")));
     assert!(matches("users\\me", &at("C:/Users/Me/notes.txt")));
-    assert!(matches(
-        "/home/*/downloads/*.iso",
-        &at("/home/me/Downloads/arch.iso")
-    ));
+    assert!(matches("/home/*/downloads/*.iso", &at("/home/me/Downloads/arch.iso")));
     // `*` also spans folder separators, as in Everything.
-    assert!(matches(
-        "/home/*/downloads/*.iso",
-        &at("/home/me/Downloads/old/arch.iso")
-    ));
-    assert!(!matches(
-        "/home/*/downloads/*.iso",
-        &at("/home/me/Downloads/arch.iso.part")
-    ));
+    assert!(matches("/home/*/downloads/*.iso", &at("/home/me/Downloads/old/arch.iso")));
+    assert!(!matches("/home/*/downloads/*.iso", &at("/home/me/Downloads/arch.iso.part")));
 }
 
 #[test]
 fn plain_terms_do_not_need_the_path() {
-    assert!(
-        !Query::parse("report *.pdf", &context())
-            .unwrap()
-            .needs_path()
-    );
+    assert!(!Query::parse("report *.pdf", &context()).unwrap().needs_path());
 }
 
 fn folder(name: &str) -> Candidate<'_> {
@@ -141,19 +125,10 @@ fn type_matches_files_of_a_category() {
 
 #[test]
 fn type_follows_category_overrides() {
-    let categories =
-        CategoryMap::from_toml("[extensions]\nblend = \"Image\"\nflac = \"Other\"\n").unwrap();
+    let categories = CategoryMap::from_toml("[extensions]\nblend = \"Image\"\nflac = \"Other\"\n").unwrap();
     let context = QueryContext::new(categories, context().now);
-    assert!(
-        Query::parse("type:image", &context)
-            .unwrap()
-            .matches(&file("scene.blend"))
-    );
-    assert!(
-        Query::parse("type:other", &context)
-            .unwrap()
-            .matches(&file("song.flac"))
-    );
+    assert!(Query::parse("type:image", &context).unwrap().matches(&file("scene.blend")));
+    assert!(Query::parse("type:other", &context).unwrap().matches(&file("song.flac")));
 }
 
 #[test]
@@ -205,11 +180,7 @@ fn size_never_matches_folders() {
 }
 
 fn modified_at(y: i32, mo: u32, d: u32, h: u32) -> Candidate<'static> {
-    let modified = Local
-        .with_ymd_and_hms(y, mo, d, h, 0, 0)
-        .unwrap()
-        .timestamp_nanos_opt()
-        .unwrap();
+    let modified = Local.with_ymd_and_hms(y, mo, d, h, 0, 0).unwrap().timestamp_nanos_opt().unwrap();
     Candidate {
         name: "doc.txt",
         path: None,
@@ -253,23 +224,13 @@ fn dm_today_and_yesterday_follow_the_context_clock() {
 fn dm_never_matches_folders() {
     let mut candidate = modified_at(2025, 3, 14, 1);
     candidate.is_dir = true;
-    assert!(
-        !Query::parse("dm:2025", &context())
-            .unwrap()
-            .matches(&candidate)
-    );
+    assert!(!Query::parse("dm:2025", &context()).unwrap().matches(&candidate));
 }
 
 #[test]
 fn regex_matches_names_ignoring_case() {
-    assert!(matches(
-        "regex:^img_\\d{4}\\.jpe?g$",
-        &file("IMG_2024.JPEG")
-    ));
-    assert!(!matches(
-        "regex:^img_\\d{4}\\.jpe?g$",
-        &file("my_img_2024.jpg")
-    ));
+    assert!(matches("regex:^img_\\d{4}\\.jpe?g$", &file("IMG_2024.JPEG")));
+    assert!(!matches("regex:^img_\\d{4}\\.jpe?g$", &file("my_img_2024.jpg")));
 }
 
 #[test]
@@ -298,9 +259,5 @@ fn exclusions_are_the_stand_alone_negated_terms() {
     assert!(!query.passes_exclusions(&file("index.js.map")));
     // A negation inside an OR group is not a stand-alone exclusion.
     assert!(query.passes_exclusions(&file("debug.log")));
-    assert!(
-        Query::parse("report", &context())
-            .unwrap()
-            .passes_exclusions(&file("anything"))
-    );
+    assert!(Query::parse("report", &context()).unwrap().passes_exclusions(&file("anything")));
 }

@@ -108,14 +108,8 @@ impl Query {
                 }
             }
         }
-        let needs_path = clauses
-            .iter()
-            .flatten()
-            .any(|l| matches!(&l.term, Term::Text(t) if t.on_path));
-        Ok(Query {
-            clauses,
-            needs_path,
-        })
+        let needs_path = clauses.iter().flatten().any(|l| matches!(&l.term, Term::Text(t) if t.on_path));
+        Ok(Query { clauses, needs_path })
     }
 
     /// Whether candidates must carry their full path.
@@ -150,28 +144,16 @@ impl Term {
         match self {
             Term::Text(text) => text.matches(candidate),
             Term::Ext(list) => {
-                !candidate.is_dir
-                    && extension(candidate.name)
-                        .is_some_and(|ext| list.iter().any(|e| e.eq_ignore_ascii_case(ext)))
+                !candidate.is_dir && extension(candidate.name).is_some_and(|ext| list.iter().any(|e| e.eq_ignore_ascii_case(ext)))
             }
-            Term::Type(category, map) => {
-                !candidate.is_dir && map.of_name(candidate.name) == *category
-            }
-            Term::Size { min, max } => {
-                !candidate.is_dir && (*min..=*max).contains(&candidate.logical)
-            }
-            Term::Modified { from, until } => {
-                !candidate.is_dir && (*from..*until).contains(&candidate.modified)
-            }
+            Term::Type(category, map) => !candidate.is_dir && map.of_name(candidate.name) == *category,
+            Term::Size { min, max } => !candidate.is_dir && (*min..=*max).contains(&candidate.logical),
+            Term::Modified { from, until } => !candidate.is_dir && (*from..*until).contains(&candidate.modified),
             Term::Regex(regex) => regex.is_match(candidate.name),
         }
     }
 
-    fn parse(
-        word: &Word,
-        categories: &Arc<CategoryMap>,
-        context: &QueryContext,
-    ) -> Result<Term, QueryError> {
+    fn parse(word: &Word, categories: &Arc<CategoryMap>, context: &QueryContext) -> Result<Term, QueryError> {
         let Some((name, value)) = word.modifier() else {
             return Ok(Term::Text(Text::new(&word.text)));
         };
@@ -194,21 +176,16 @@ impl Term {
                 }
                 let category = Category::parse(value).ok_or_else(|| {
                     let known: Vec<&str> = Category::ALL.iter().map(|c| c.name()).collect();
-                    QueryError(format!(
-                        "unknown type `{value}`; expected one of {}",
-                        known.join(", ")
-                    ))
+                    QueryError(format!("unknown type `{value}`; expected one of {}", known.join(", ")))
                 })?;
                 Ok(Term::Type(category, categories.clone()))
             }
             "size" => {
-                let (min, max) =
-                    size_bounds(value).map_err(|e| QueryError(format!("size: {e}")))?;
+                let (min, max) = size_bounds(value).map_err(|e| QueryError(format!("size: {e}")))?;
                 Ok(Term::Size { min, max })
             }
             "dm" => {
-                let (from, until) =
-                    date_bounds(value, context.now).map_err(|e| QueryError(format!("dm: {e}")))?;
+                let (from, until) = date_bounds(value, context.now).map_err(|e| QueryError(format!("dm: {e}")))?;
                 Ok(Term::Modified { from, until })
             }
             "regex" => regex::RegexBuilder::new(value)
@@ -275,9 +252,7 @@ fn size_bounds(value: &str) -> Result<(u64, u64), String> {
 /// A byte count such as `512`, `10kb`, `1.5GB`, `2g`; units are powers of 1024.
 fn parse_size(text: &str) -> Result<u64, String> {
     let lower = text.trim().to_ascii_lowercase();
-    let split = lower
-        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .unwrap_or(lower.len());
+    let split = lower.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(lower.len());
     let (number, unit) = lower.split_at(split);
     let power = match unit {
         "" | "b" => 0,
@@ -287,9 +262,7 @@ fn parse_size(text: &str) -> Result<u64, String> {
         "t" | "tb" => 4,
         _ => return Err(format!("unknown unit `{unit}`; use b, kb, mb, gb or tb")),
     };
-    let value: f64 = number
-        .parse()
-        .map_err(|_| format!("`{text}` is not a size"))?;
+    let value: f64 = number.parse().map_err(|_| format!("`{text}` is not a size"))?;
     Ok((value * 1024f64.powi(power)).round() as u64)
 }
 
@@ -309,8 +282,7 @@ fn date_bounds(value: &str, now: DateTime<Local>) -> Result<(i64, i64), String> 
 /// The local-time span `[start, end)` named by `today`, `yesterday`, `YYYY`, `YYYY-MM` or
 /// `YYYY-MM-DD`, in Unix nanoseconds.
 fn date_span(text: &str, now: DateTime<Local>) -> Result<(i64, i64), String> {
-    let invalid =
-        || format!("`{text}` is not a date; use YYYY, YYYY-MM, YYYY-MM-DD, today or yesterday");
+    let invalid = || format!("`{text}` is not a date; use YYYY, YYYY-MM, YYYY-MM-DD, today or yesterday");
     let today = now.date_naive();
     let (start, end) = match text.to_ascii_lowercase().as_str() {
         "today" => (today, today + Days::new(1)),
@@ -322,29 +294,15 @@ fn date_span(text: &str, now: DateTime<Local>) -> Result<(i64, i64), String> {
             match parts[..] {
                 [_] => {
                     let start = NaiveDate::from_ymd_opt(year, 1, 1).ok_or_else(invalid)?;
-                    (
-                        start,
-                        start
-                            .checked_add_months(Months::new(12))
-                            .ok_or_else(invalid)?,
-                    )
+                    (start, start.checked_add_months(Months::new(12)).ok_or_else(invalid)?)
                 }
                 [_, m] => {
                     let start = NaiveDate::from_ymd_opt(year, number(m)?, 1).ok_or_else(invalid)?;
-                    (
-                        start,
-                        start
-                            .checked_add_months(Months::new(1))
-                            .ok_or_else(invalid)?,
-                    )
+                    (start, start.checked_add_months(Months::new(1)).ok_or_else(invalid)?)
                 }
                 [_, m, d] => {
-                    let start = NaiveDate::from_ymd_opt(year, number(m)?, number(d)?)
-                        .ok_or_else(invalid)?;
-                    (
-                        start,
-                        start.checked_add_days(Days::new(1)).ok_or_else(invalid)?,
-                    )
+                    let start = NaiveDate::from_ymd_opt(year, number(m)?, number(d)?).ok_or_else(invalid)?;
+                    (start, start.checked_add_days(Days::new(1)).ok_or_else(invalid)?)
                 }
                 _ => return Err(invalid()),
             }
@@ -356,15 +314,12 @@ fn date_span(text: &str, now: DateTime<Local>) -> Result<(i64, i64), String> {
 fn local_midnight_nanos(date: NaiveDate) -> i64 {
     let midnight = date.and_hms_opt(0, 0, 0).expect("midnight exists");
     // Midnight can be skipped by a daylight-saving change; take the first instant after it.
-    let local = Local
-        .from_local_datetime(&midnight)
-        .earliest()
-        .unwrap_or_else(|| {
-            Local
-                .from_local_datetime(&(midnight + chrono::Duration::hours(1)))
-                .earliest()
-                .expect("valid local time")
-        });
+    let local = Local.from_local_datetime(&midnight).earliest().unwrap_or_else(|| {
+        Local
+            .from_local_datetime(&(midnight + chrono::Duration::hours(1)))
+            .earliest()
+            .expect("valid local time")
+    });
     local.timestamp_nanos_opt().unwrap_or(i64::MAX)
 }
 
@@ -384,9 +339,7 @@ impl Text {
 
     fn matches(&self, candidate: &Candidate) -> bool {
         let subject = if self.on_path {
-            candidate
-                .path
-                .expect("Query::needs_path requires candidates to carry their path")
+            candidate.path.expect("Query::needs_path requires candidates to carry their path")
         } else {
             candidate.name
         };
@@ -454,9 +407,7 @@ impl Word {
         if self.quoted_from.is_some_and(|q| q <= colon) {
             return None;
         }
-        let name = MODIFIERS
-            .iter()
-            .find(|m| m.eq_ignore_ascii_case(&self.text[..colon]))?;
+        let name = MODIFIERS.iter().find(|m| m.eq_ignore_ascii_case(&self.text[..colon]))?;
         Some((name, &self.text[colon + 1..]))
     }
 }
@@ -465,9 +416,11 @@ fn tokenize(text: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut current: Option<Word> = None;
     let mut in_quotes = false;
-    let start = |at: usize| move || Word {
-        start: at,
-        ..Word::default()
+    let start = |at: usize| {
+        move || Word {
+            start: at,
+            ..Word::default()
+        }
     };
     for (at, c) in text.char_indices() {
         let end = at + c.len_utf8();
@@ -488,10 +441,7 @@ fn tokenize(text: &str) -> Vec<Token> {
                 tokens.extend(current.take().map(Token::Word));
                 tokens.push(Token::Or);
             }
-            '!' if current
-                .as_ref()
-                .is_none_or(|w| w.text.is_empty() && !w.negated) =>
-            {
+            '!' if current.as_ref().is_none_or(|w| w.text.is_empty() && !w.negated) => {
                 let word = current.get_or_insert_with(start(at));
                 word.negated = true;
                 word.end = end;

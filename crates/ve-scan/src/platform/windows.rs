@@ -6,16 +6,12 @@ use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::{Mutex, OnceLock};
-use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_CANCELLED, GetLastError, HANDLE, NO_ERROR,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, GetLastError, HANDLE, NO_ERROR};
 use windows_sys::Win32::NetworkManagement::WNet::WNetGetConnectionW;
-use windows_sys::Win32::Security::{
-    GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
-};
+use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows_sys::Win32::Storage::FileSystem::{
-    GetCompressedFileSizeW, GetDiskFreeSpaceW, GetDriveTypeW, GetLogicalDriveStringsW,
-    GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
+    GetCompressedFileSizeW, GetDiskFreeSpaceW, GetDriveTypeW, GetLogicalDriveStringsW, GetVolumeInformationW,
+    GetVolumeNameForVolumeMountPointW,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
@@ -33,9 +29,7 @@ fn wide(s: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
 
 fn from_wide(buf: &[u16]) -> String {
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    OsString::from_wide(&buf[..end])
-        .to_string_lossy()
-        .into_owned()
+    OsString::from_wide(&buf[..end]).to_string_lossy().into_owned()
 }
 
 /// Fixed and removable local drives, and mapped network drives.
@@ -85,7 +79,11 @@ pub fn discover_volumes() -> Vec<VolumeInfo> {
             network,
             mount: PathBuf::from(OsString::from_wide(root)),
             // Not plain "NTFS" on a share: the MFT fast path reads local volumes only.
-            fs_type: if network { format!("{} (remote)", from_wide(&fs)) } else { from_wide(&fs) },
+            fs_type: if network {
+                format!("{} (remote)", from_wide(&fs))
+            } else {
+                from_wide(&fs)
+            },
             label: from_wide(&label),
             removable,
             read_only: flags & FILE_READ_ONLY_VOLUME != 0,
@@ -109,9 +107,7 @@ fn remote_name(root: &[u16]) -> Option<String> {
 fn identity(root_z: &[u16], serial: u32) -> String {
     let mut name = [0u16; 64];
     // SAFETY: `root_z` is NUL terminated and `name` is valid for the length given.
-    let ok = unsafe {
-        GetVolumeNameForVolumeMountPointW(root_z.as_ptr(), name.as_mut_ptr(), name.len() as u32)
-    };
+    let ok = unsafe { GetVolumeNameForVolumeMountPointW(root_z.as_ptr(), name.as_mut_ptr(), name.len() as u32) };
     if ok != 0 {
         format!("guid:{}", from_wide(&name))
     } else {
@@ -225,9 +221,7 @@ fn extended_path(path: &Path) -> Option<(Vec<u16>, char)> {
         return None;
     };
     let drive = match prefix.kind() {
-        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
-            (letter as char).to_ascii_uppercase()
-        }
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => (letter as char).to_ascii_uppercase(),
         _ => return None,
     };
     if matches!(prefix.kind(), Prefix::VerbatimDisk(_)) {
@@ -249,15 +243,7 @@ fn cluster_size(drive: char) -> Option<u64> {
     let root = wide(format!("{drive}:\\"));
     let (mut sectors, mut bytes, mut free, mut total) = (0u32, 0u32, 0u32, 0u32);
     // SAFETY: `root` is NUL terminated and the out pointers are valid.
-    let ok = unsafe {
-        GetDiskFreeSpaceW(
-            root.as_ptr(),
-            &mut sectors,
-            &mut bytes,
-            &mut free,
-            &mut total,
-        )
-    };
+    let ok = unsafe { GetDiskFreeSpaceW(root.as_ptr(), &mut sectors, &mut bytes, &mut free, &mut total) };
     let size = u64::from(sectors) * u64::from(bytes);
     if ok == 0 || size == 0 {
         return None;

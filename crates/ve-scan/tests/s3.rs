@@ -40,12 +40,22 @@ impl Drop for Server {
 
 fn encode(key: &str) -> String {
     key.bytes()
-        .map(|b| if b.is_ascii_alphanumeric() || b"-_.~/".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~/".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
         .collect()
 }
 
 fn respond(stream: &mut TcpStream, status: &str, body: &str) {
-    let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
 }
 
 fn serve(state: &State, mut stream: TcpStream) {
@@ -70,15 +80,27 @@ fn serve(state: &State, mut stream: TcpStream) {
     };
     let failing = state.fail_after.load(Ordering::Relaxed);
     if failing > 0 && answered >= failing {
-        return respond(&mut stream, "500 Internal Server Error", "<Error><Code>InternalError</Code><Message>boom</Message></Error>");
+        return respond(
+            &mut stream,
+            "500 Internal Server Error",
+            "<Error><Code>InternalError</Code><Message>boom</Message></Error>",
+        );
     }
     if url.path() != "/bkt" && url.path() != "/bkt/" {
-        return respond(&mut stream, "404 Not Found", "<Error><Code>NoSuchBucket</Code><Message>no such bucket</Message></Error>");
+        return respond(
+            &mut stream,
+            "404 Not Found",
+            "<Error><Code>NoSuchBucket</Code><Message>no such bucket</Message></Error>",
+        );
     }
     if let Some(key) = state.require_key.lock().unwrap().as_ref() {
         let credential = get("X-Amz-Credential").unwrap_or_default();
         if !credential.starts_with(&format!("{key}/")) || get("X-Amz-Signature").is_none() {
-            return respond(&mut stream, "403 Forbidden", "<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>");
+            return respond(
+                &mut stream,
+                "403 Forbidden",
+                "<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>",
+            );
         }
     }
     assert_eq!(get("list-type").as_deref(), Some("2"));
@@ -88,17 +110,29 @@ fn serve(state: &State, mut stream: TcpStream) {
     let mut matching: Vec<_> = objects.iter().filter(|(k, ..)| k.starts_with(&prefix)).collect();
     matching.sort();
     // The continuation token is the last key of the previous page.
-    let rest: Vec<_> = matching.into_iter().filter(|(k, ..)| after.as_ref().is_none_or(|a| k > a)).collect();
+    let rest: Vec<_> = matching
+        .into_iter()
+        .filter(|(k, ..)| after.as_ref().is_none_or(|a| k > a))
+        .collect();
     let page = &rest[..rest.len().min(SERVER_PAGE)];
     let truncated = rest.len() > SERVER_PAGE;
-    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>bkt</Name>");
-    xml += &format!("<Prefix>{}</Prefix><KeyCount>{}</KeyCount><MaxKeys>{SERVER_PAGE}</MaxKeys><EncodingType>url</EncodingType>", encode(&prefix), page.len());
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>bkt</Name>",
+    );
+    xml += &format!(
+        "<Prefix>{}</Prefix><KeyCount>{}</KeyCount><MaxKeys>{SERVER_PAGE}</MaxKeys><EncodingType>url</EncodingType>",
+        encode(&prefix),
+        page.len()
+    );
     xml += &format!("<IsTruncated>{truncated}</IsTruncated>");
     if truncated {
         xml += &format!("<NextContinuationToken>{}</NextContinuationToken>", page.last().unwrap().0);
     }
     for (key, size, modified) in page {
-        xml += &format!("<Contents><Key>{}</Key><LastModified>{modified}</LastModified><ETag>&quot;x&quot;</ETag><Size>{size}</Size><StorageClass>STANDARD</StorageClass></Contents>", encode(key));
+        xml += &format!(
+            "<Contents><Key>{}</Key><LastModified>{modified}</LastModified><ETag>&quot;x&quot;</ETag><Size>{size}</Size><StorageClass>STANDARD</StorageClass></Contents>",
+            encode(key)
+        );
     }
     xml += "</ListBucketResult>";
     respond(&mut stream, "200 OK", &xml);
@@ -124,7 +158,16 @@ fn start(objects: &[(&str, u64, &str)]) -> Server {
 }
 
 fn remote(server: &Server, prefix: &str) -> S3Remote {
-    S3Remote::new("bkt", prefix, &format!("http://127.0.0.1:{}", server.port), "us-east-1", true, "", "AKIATEST").unwrap()
+    S3Remote::new(
+        "bkt",
+        prefix,
+        &format!("http://127.0.0.1:{}", server.port),
+        "us-east-1",
+        true,
+        "",
+        "AKIATEST",
+    )
+    .unwrap()
 }
 
 fn keys(_: &S3Remote) -> Result<Option<Credentials>, String> {
@@ -181,15 +224,24 @@ fn a_bucket_prefix_is_indexed_page_by_page_and_a_refresh_applies_differences() {
         assert_eq!(names(&index, index.child_named(root, "empty").unwrap()), Vec::<String>::new());
         let totals = Filter::compute(&index, None).totals(&index, root);
         assert_eq!((totals.logical, totals.on_disk), (3305, 3305));
-        assert_eq!(index.path(a).to_string_lossy(), format!("s3:127.0.0.1:{}/bkt/photos/2024/a.jpg", server.port));
+        assert_eq!(
+            index.path(a).to_string_lossy(),
+            format!("s3:127.0.0.1:{}/bkt/photos/2024/a.jpg", server.port)
+        );
         // The key with an empty name is counted as unreadable, not indexed.
         assert_eq!(progress.unreadable(), 1);
     }
 
     // A failure part-way leaves the Entries as they were.
-    server.state.fail_after.store(server.state.requests.lock().unwrap().len() + 1, Ordering::Relaxed);
+    server
+        .state
+        .fail_after
+        .store(server.state.requests.lock().unwrap().len() + 1, Ordering::Relaxed);
     let err = s3::sync_with(&index, id, &Progress::default(), &keys).unwrap_err();
-    assert!(err.to_string().contains("500") && err.to_string().contains("InternalError"), "{err}");
+    assert!(
+        err.to_string().contains("500") && err.to_string().contains("InternalError"),
+        "{err}"
+    );
     assert_eq!(index.read().live_count(), 8, "root, 3 folders, 4 files");
     server.state.fail_after.store(0, Ordering::Relaxed);
 
@@ -227,11 +279,17 @@ fn credentials_are_signed_in_and_a_wrong_key_or_none_explains_itself() {
     let wrong = |_: &S3Remote| Ok(Some(Credentials::new("AKIAWRONG", "secret")));
     let err = s3::sync_with(&index, id, &Progress::default(), &wrong).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-    assert!(err.to_string().contains("AccessDenied") && err.to_string().contains("check the keys"), "{err}");
+    assert!(
+        err.to_string().contains("AccessDenied") && err.to_string().contains("check the keys"),
+        "{err}"
+    );
     let err = s3::sync_with(&index, id, &Progress::default(), &|_| Ok(None)).unwrap_err();
     assert!(err.to_string().contains("no keys were found"), "{err}");
     // A missing secret in the keyring is reported, not guessed around.
-    let err = s3::sync_with(&index, id, &Progress::default(), &|_| Err("the secret key is not in the OS keyring".into())).unwrap_err();
+    let err = s3::sync_with(&index, id, &Progress::default(), &|_| {
+        Err("the secret key is not in the OS keyring".into())
+    })
+    .unwrap_err();
     assert!(err.to_string().contains("keyring"));
     assert_eq!(index.read().live_count(), 1);
     // Anonymous access to a server that allows it.
@@ -250,7 +308,10 @@ fn a_missing_bucket_and_an_unreachable_endpoint_are_reported() {
     missing.bucket = "nope".into();
     let id = index.write().add_remote(&Remote::S3(missing));
     let err = s3::sync_with(&index, id, &Progress::default(), &keys).unwrap_err();
-    assert!(err.to_string().contains("NoSuchBucket") && err.to_string().contains("bucket name"), "{err}");
+    assert!(
+        err.to_string().contains("NoSuchBucket") && err.to_string().contains("bucket name"),
+        "{err}"
+    );
     let mut gone = remote(&server, "");
     gone.endpoint = Some("http://127.0.0.1:1".into());
     let id = index.write().add_remote(&Remote::S3(gone));

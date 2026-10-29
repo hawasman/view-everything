@@ -37,12 +37,7 @@ impl Selection {
     }
 
     /// Applies a click on `row`. `entry_at` maps a row to its Entry.
-    pub fn click(
-        &mut self,
-        row: usize,
-        modifiers: Modifiers,
-        entry_at: impl Fn(usize) -> Option<EntryId>,
-    ) {
+    pub fn click(&mut self, row: usize, modifiers: Modifiers, entry_at: impl Fn(usize) -> Option<EntryId>) {
         let Some(id) = entry_at(row) else { return };
         if modifiers.shift {
             let from = self.anchor.unwrap_or(row);

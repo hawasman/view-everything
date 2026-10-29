@@ -46,12 +46,7 @@ pub struct CategoryRow {
 }
 
 impl View {
-    pub fn compute(
-        index: &Index,
-        query_text: &str,
-        query: Option<&Query>,
-        categories: &CategoryMap,
-    ) -> View {
+    pub fn compute(index: &Index, query_text: &str, query: Option<&Query>, categories: &CategoryMap) -> View {
         let started = Instant::now();
         let filter = Filter::compute(index, query);
 
@@ -93,7 +88,11 @@ fn focus(index: &Index, filter: &Filter) -> Option<EntryId> {
         .max_by_key(|&id| filter.totals(index, id).on_disk)
         .or_else(|| roots().next())?;
     loop {
-        let mut shown = index.children(folder).iter().copied().filter(|&c| index.is_live(c) && filter.is_shown(c));
+        let mut shown = index
+            .children(folder)
+            .iter()
+            .copied()
+            .filter(|&c| index.is_live(c) && filter.is_shown(c));
         match (shown.next(), shown.next()) {
             (Some(only), None) if index.is_dir(only) && !filter.is_matched(only) => folder = only,
             _ => return Some(folder),
@@ -107,11 +106,7 @@ fn breakdown(index: &Index, filter: &Filter, categories: &CategoryMap) -> Vec<Ca
     let mut lowered: HashMap<String, Totals> = HashMap::new();
     for i in 0..index.capacity() {
         let id = EntryId(i as u32);
-        if !index.is_live(id)
-            || index.is_dir(id)
-            || !filter.is_counted(id)
-            || filter.is_repeated_link(id)
-        {
+        if !index.is_live(id) || index.is_dir(id) || !filter.is_counted(id) || filter.is_repeated_link(id) {
             continue;
         }
         let ext = extension(index.name(id)).unwrap_or("");
@@ -139,17 +134,12 @@ fn breakdown(index: &Index, filter: &Filter, categories: &CategoryMap) -> Vec<Ca
             extensions: Vec::new(),
         });
         row.totals.add(totals);
-        let label = if ext.is_empty() {
-            "(none)".to_owned()
-        } else {
-            ext.to_owned()
-        };
+        let label = if ext.is_empty() { "(none)".to_owned() } else { ext.to_owned() };
         row.extensions.push((label, totals));
     }
     let mut rows: Vec<CategoryRow> = rows.into_values().collect();
     for row in &mut rows {
-        row.extensions
-            .sort_unstable_by_key(|(_, t)| std::cmp::Reverse(t.on_disk));
+        row.extensions.sort_unstable_by_key(|(_, t)| std::cmp::Reverse(t.on_disk));
         row.extensions.truncate(EXTENSIONS_PER_CATEGORY);
     }
     rows.sort_unstable_by_key(|r| std::cmp::Reverse(r.totals.on_disk));

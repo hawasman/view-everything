@@ -71,7 +71,11 @@ fn a_remount_at_another_path_is_the_same_volume_and_only_catches_up() {
     sync(&index, id);
     let index = index.read();
     assert_eq!(index.live_count(), before + 1);
-    assert_eq!(index.find_path(&new.join("a.txt")), Some(a_txt), "unchanged Entries are not replaced");
+    assert_eq!(
+        index.find_path(&new.join("a.txt")),
+        Some(a_txt),
+        "unchanged Entries are not replaced"
+    );
     assert!(index.find_path(&new.join("c.txt")).is_some());
     assert_eq!(index.volumes().count(), 1);
 }

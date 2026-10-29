@@ -12,8 +12,8 @@ mod explorer;
 mod filters;
 mod format;
 mod scope;
-mod settings;
 mod selection;
+mod settings;
 mod settings_page;
 mod theme;
 mod trash;
@@ -85,35 +85,29 @@ fn main() {
         });
     }
 
-    gpui_kit::application()
-        .with_assets(theme::Assets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            theme::init(settings.theme, cx);
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                    None,
-                    size(px(1440.), px(900.)),
-                    cx,
-                ))),
-                window_min_size: Some(size(px(720.), px(480.))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("view-everything".into()),
-                    ..Default::default()
-                }),
-                app_id: Some("view-everything".into()),
+    gpui_kit::application().with_assets(theme::Assets).run(move |cx| {
+        gpui_kit::init(cx);
+        theme::init(settings.theme, cx);
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1440.), px(900.)), cx))),
+            window_min_size: Some(size(px(720.), px(480.))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("view-everything".into()),
                 ..Default::default()
-            };
-            gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| app::Shell::new(settings, categories, volumes, problems, window, cx))
-            })
-            .expect("failed to open window");
-            cx.activate(true);
-        });
+            }),
+            app_id: Some("view-everything".into()),
+            ..Default::default()
+        };
+        gpui_kit::open_window(options, cx, |window, cx| {
+            cx.new(|cx| app::Shell::new(settings, categories, volumes, problems, window, cx))
+        })
+        .expect("failed to open window");
+        cx.activate(true);
+    });
 }

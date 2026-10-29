@@ -30,7 +30,9 @@ fn entry(identity: &str) -> Result<keyring::Entry, String> {
 
 /// Keeps the secret of typed keys in the OS keyring (never in settings.toml).
 pub fn store_secret(identity: &str, secret: &str) -> Result<(), String> {
-    entry(identity)?.set_password(secret).map_err(|e| format!("the OS keyring refused the secret: {e}"))
+    entry(identity)?
+        .set_password(secret)
+        .map_err(|e| format!("the OS keyring refused the secret: {e}"))
 }
 
 /// The secret kept for `identity`.
@@ -65,7 +67,9 @@ fn parse_ini(text: &str) -> Ini {
             section = Some(name.trim().to_owned());
             ini.entry(name.trim().to_owned()).or_default();
         } else if let (Some(section), Some((k, v))) = (&section, line.split_once('=')) {
-            ini.entry(section.clone()).or_default().insert(k.trim().to_ascii_lowercase(), v.trim().to_owned());
+            ini.entry(section.clone())
+                .or_default()
+                .insert(k.trim().to_ascii_lowercase(), v.trim().to_owned());
         }
     }
     ini
@@ -88,14 +92,21 @@ impl Chain<'_> {
     fn profile(&self, name: &str) -> HashMap<String, String> {
         let config = parse_ini(self.config_file.as_deref().unwrap_or(""));
         let credentials = parse_ini(self.credentials_file.as_deref().unwrap_or(""));
-        let config_section = if name == "default" { config.get("default") } else { config.get(&format!("profile {name}")) };
+        let config_section = if name == "default" {
+            config.get("default")
+        } else {
+            config.get(&format!("profile {name}"))
+        };
         let mut merged = config_section.cloned().unwrap_or_default();
         merged.extend(credentials.get(name).cloned().unwrap_or_default());
         merged
     }
 
     fn profile_name(&self, explicit: Option<&str>) -> String {
-        explicit.map(str::to_owned).or_else(|| self.var("AWS_PROFILE")).unwrap_or_else(|| "default".into())
+        explicit
+            .map(str::to_owned)
+            .or_else(|| self.var("AWS_PROFILE"))
+            .unwrap_or_else(|| "default".into())
     }
 
     /// The region and endpoint a profile (or, failing that, the environment) names, to fill what
@@ -103,7 +114,11 @@ impl Chain<'_> {
     pub fn defaults(&self, profile: Option<&str>) -> Defaults {
         let p = self.profile(&self.profile_name(profile));
         Defaults {
-            region: p.get("region").cloned().or_else(|| self.var("AWS_REGION")).or_else(|| self.var("AWS_DEFAULT_REGION")),
+            region: p
+                .get("region")
+                .cloned()
+                .or_else(|| self.var("AWS_REGION"))
+                .or_else(|| self.var("AWS_DEFAULT_REGION")),
             endpoint: p
                 .get("endpoint_url")
                 .cloned()
@@ -115,11 +130,7 @@ impl Chain<'_> {
     /// The keys of `remote`, or `None` for anonymous access. Order: keys typed into the dialog
     /// (secret from the keyring, through `secret`), the profile chosen in the dialog, the
     /// environment, then `AWS_PROFILE` or `default`.
-    pub fn credentials(
-        &self,
-        remote: &S3Remote,
-        secret: &dyn Fn() -> Result<String, String>,
-    ) -> Result<Option<Credentials>, String> {
+    pub fn credentials(&self, remote: &S3Remote, secret: &dyn Fn() -> Result<String, String>) -> Result<Option<Credentials>, String> {
         if let Some(key) = &remote.access_key {
             return Ok(Some(Credentials::new(key.clone(), secret()?)));
         }
@@ -182,7 +193,10 @@ pub struct Object {
 }
 
 fn bucket(remote: &S3Remote) -> Result<Bucket, io::Error> {
-    let endpoint = remote.endpoint.clone().unwrap_or_else(|| format!("https://{}", remote.endpoint_host()));
+    let endpoint = remote
+        .endpoint
+        .clone()
+        .unwrap_or_else(|| format!("https://{}", remote.endpoint_host()));
     let url = url::Url::parse(&endpoint).map_err(|e| invalid(format!("endpoint {endpoint}: {e}")))?;
     let style = if remote.path_style { UrlStyle::Path } else { UrlStyle::VirtualHost };
     Bucket::new(url, style, remote.bucket.clone(), remote.region.clone()).map_err(|e| invalid(format!("S3 bucket: {e}")))
@@ -208,21 +222,27 @@ fn http_failure(remote: &S3Remote, status: u16, body: &str, anonymous: bool) -> 
             io::ErrorKind::PermissionDenied,
             " (no keys were found: set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, choose a profile, or enter keys)",
         ),
-        401 | 403 => (io::ErrorKind::PermissionDenied, " (check the keys and that they may list this bucket)"),
-        404 => (io::ErrorKind::NotFound, " (check the bucket name, and the Endpoint and path-style option)"),
+        401 | 403 => (
+            io::ErrorKind::PermissionDenied,
+            " (check the keys and that they may list this bucket)",
+        ),
+        404 => (
+            io::ErrorKind::NotFound,
+            " (check the bucket name, and the Endpoint and path-style option)",
+        ),
         _ => (io::ErrorKind::Other, ""),
     };
     io::Error::new(kind, format!("{host} answered {status} {code} {message}{hint}").replace("  ", " "))
 }
 
 /// Lists every current object of `remote`, a page at a time, giving each page to `page`.
-pub fn list(
-    remote: &S3Remote,
-    credentials: Option<&Credentials>,
-    mut page: impl FnMut(Vec<Object>) -> io::Result<()>,
-) -> io::Result<()> {
+pub fn list(remote: &S3Remote, credentials: Option<&Credentials>, mut page: impl FnMut(Vec<Object>) -> io::Result<()>) -> io::Result<()> {
     let bucket = bucket(remote)?;
-    let prefix = if remote.prefix.is_empty() { String::new() } else { format!("{}/", remote.prefix) };
+    let prefix = if remote.prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", remote.prefix)
+    };
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_global(Some(Duration::from_secs(120)))
@@ -257,21 +277,37 @@ pub fn list(
         if status != 200 {
             return Err(http_failure(remote, status, &body, credentials.is_none()));
         }
-        let parsed = rusty_s3::actions::ListObjectsV2::parse_response(&body)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("unreadable listing from {}: {e}", remote.endpoint_host())))?;
+        let parsed = rusty_s3::actions::ListObjectsV2::parse_response(&body).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unreadable listing from {}: {e}", remote.endpoint_host()),
+            )
+        })?;
         let objects = parsed
             .contents
             .into_iter()
             .filter_map(|c| {
                 let key = c.key.strip_prefix(prefix.as_str())?.to_owned();
-                let modified = c.last_modified.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
-                Some(Object { key, size: c.size.unwrap_or(0), modified: modified.and_then(|t| t.timestamp_nanos_opt()).unwrap_or(0) })
+                let modified = c
+                    .last_modified
+                    .as_deref()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+                Some(Object {
+                    key,
+                    size: c.size.unwrap_or(0),
+                    modified: modified.and_then(|t| t.timestamp_nanos_opt()).unwrap_or(0),
+                })
             })
             .collect();
         page(objects)?;
         match parsed.next_continuation_token {
             Some(next) if tokens.insert(next.clone()) => token = Some(next),
-            Some(_) => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{} repeats a continuation token", remote.endpoint_host()))),
+            Some(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{} repeats a continuation token", remote.endpoint_host()),
+                ));
+            }
             None => return Ok(()),
         }
     }
@@ -308,7 +344,13 @@ fn entries(objects: Vec<Object>, seen: &mut HashMap<String, bool>) -> (Vec<(Stri
                 Some(false) => clash = true,
                 None => {
                     seen.insert(path.clone(), true);
-                    out.push((path.clone(), EntryMeta { is_dir: true, ..EntryMeta::default() }));
+                    out.push((
+                        path.clone(),
+                        EntryMeta {
+                            is_dir: true,
+                            ..EntryMeta::default()
+                        },
+                    ));
                 }
             }
         }
@@ -321,7 +363,12 @@ fn entries(objects: Vec<Object>, seen: &mut HashMap<String, bool>) -> (Vec<(Stri
         }
         if !marker {
             seen.insert(folders.to_owned(), false);
-            let meta = EntryMeta { logical: object.size, on_disk: object.size, modified: object.modified, ..EntryMeta::default() };
+            let meta = EntryMeta {
+                logical: object.size,
+                on_disk: object.size,
+                modified: object.modified,
+                ..EntryMeta::default()
+            };
             out.push((folders.to_owned(), meta));
         }
     }
@@ -344,7 +391,9 @@ pub fn sync_with(
 ) -> io::Result<()> {
     let (root, remote): (EntryId, S3Remote) = {
         let index = index.read();
-        let v = index.volume(volume).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such Remote"))?;
+        let v = index
+            .volume(volume)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such Remote"))?;
         match &v.sync {
             SyncState::S3(remote) => (v.root, remote.clone()),
             _ => return Err(invalid("not an S3 Remote")),
@@ -378,23 +427,44 @@ mod tests {
         let r2 = S3Remote::new("b", "", "https://acct.r2.cloudflarestorage.com/", "auto", true, "", "").unwrap();
         assert_eq!(r2.identity(), "s3:acct.r2.cloudflarestorage.com/b/");
         let minio = S3Remote::new("b", "/x/", "localhost:9000", "us-east-1", true, "", "").unwrap();
-        assert_eq!((minio.endpoint.as_deref(), minio.identity().as_str()), (Some("https://localhost:9000"), "s3:localhost:9000/b/x"));
+        assert_eq!(
+            (minio.endpoint.as_deref(), minio.identity().as_str()),
+            (Some("https://localhost:9000"), "s3:localhost:9000/b/x")
+        );
         assert!(S3Remote::new("a/b", "", "", "us-east-1", false, "", "").is_err());
         assert!(S3Remote::new("b", "", "ftp://x", "us-east-1", false, "", "").is_err());
     }
 
     #[test]
     fn keys_split_on_slash_into_folders_and_markers_make_folders() {
-        let object = |key: &str, size| Object { key: key.into(), size, modified: 5 };
+        let object = |key: &str, size| Object {
+            key: key.into(),
+            size,
+            modified: 5,
+        };
         let mut seen = HashMap::new();
         let (items, skipped) = entries(
-            vec![object("a/b/c.txt", 10), object("a/d.txt", 20), object("empty/", 0), object("top.bin", 7), object("x//y", 1), object("", 0)],
+            vec![
+                object("a/b/c.txt", 10),
+                object("a/d.txt", 20),
+                object("empty/", 0),
+                object("top.bin", 7),
+                object("x//y", 1),
+                object("", 0),
+            ],
             &mut seen,
         );
         let paths: Vec<_> = items.iter().map(|(p, m)| (p.as_str(), m.is_dir, m.logical, m.on_disk)).collect();
         assert_eq!(
             paths,
-            [("a", true, 0, 0), ("a/b", true, 0, 0), ("a/b/c.txt", false, 10, 10), ("a/d.txt", false, 20, 20), ("empty", true, 0, 0), ("top.bin", false, 7, 7)]
+            [
+                ("a", true, 0, 0),
+                ("a/b", true, 0, 0),
+                ("a/b/c.txt", false, 10, 10),
+                ("a/d.txt", false, 20, 20),
+                ("empty", true, 0, 0),
+                ("top.bin", false, 7, 7)
+            ]
         );
         assert_eq!(skipped, 1);
         // A later page does not repeat folders.
@@ -403,7 +473,10 @@ mod tests {
         // A file and a folder of one name: the first one wins, the other is skipped.
         let mut seen = HashMap::new();
         let (items, skipped) = entries(vec![object("f", 1), object("f/g", 2), object("d/h", 3), object("d", 4)], &mut seen);
-        assert_eq!((items.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), skipped), (["f", "d", "d/h"].to_vec(), 2));
+        assert_eq!(
+            (items.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), skipped),
+            (["f", "d", "d/h"].to_vec(), 2)
+        );
     }
 
     #[test]
@@ -437,10 +510,17 @@ mod tests {
         // Region and endpoint come from the profile.
         assert_eq!(
             chain.defaults(Some("work")),
-            Defaults { region: Some("eu-north-1".into()), endpoint: Some("https://minio.lan:9000".into()) }
+            Defaults {
+                region: Some("eu-north-1".into()),
+                endpoint: Some("https://minio.lan:9000".into())
+            }
         );
         assert_eq!(chain.defaults(None), Defaults::default());
-        let empty = Chain { env: &no_env, credentials_file: None, config_file: None };
+        let empty = Chain {
+            env: &no_env,
+            credentials_file: None,
+            config_file: None,
+        };
         assert_eq!(empty.credentials(&remote("", ""), &none), Ok(None));
     }
 
@@ -448,7 +528,14 @@ mod tests {
     fn errors_read_as_what_to_do() {
         let r = remote("", "");
         let why = |status, body: &str, anon| http_failure(&r, status, body, anon).to_string();
-        assert!(why(403, "<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>", true).contains("no keys were found"));
+        assert!(
+            why(
+                403,
+                "<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>",
+                true
+            )
+            .contains("no keys were found")
+        );
         assert!(why(403, "<Error><Code>SignatureDoesNotMatch</Code></Error>", false).contains("SignatureDoesNotMatch (check the keys"));
         assert!(why(301, "<Error><Code>PermanentRedirect</Code></Error>", false).contains("Region"));
         assert!(why(404, "<Error><Code>NoSuchBucket</Code></Error>", false).contains("NoSuchBucket (check the bucket"));

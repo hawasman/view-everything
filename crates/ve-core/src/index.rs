@@ -114,7 +114,11 @@ impl S3Remote {
     /// `host[:port]` of the endpoint, or the AWS host of the region.
     pub fn endpoint_host(&self) -> String {
         match &self.endpoint {
-            Some(e) => e.split_once("://").map_or(e.as_str(), |(_, rest)| rest).trim_end_matches('/').to_owned(),
+            Some(e) => e
+                .split_once("://")
+                .map_or(e.as_str(), |(_, rest)| rest)
+                .trim_end_matches('/')
+                .to_owned(),
             None => format!("s3.{}.amazonaws.com", self.region),
         }
     }
@@ -175,7 +179,13 @@ impl FtpRemote {
             return Err("Path must be an absolute folder, such as /pub".into());
         }
         let path = path.trim_end_matches('/');
-        Ok(FtpRemote { host: host.into(), port, user: user.into(), path: if path.is_empty() { "/".into() } else { path.into() }, tls })
+        Ok(FtpRemote {
+            host: host.into(),
+            port,
+            user: user.into(),
+            path: if path.is_empty() { "/".into() } else { path.into() },
+            tls,
+        })
     }
 
     /// A public server: it needs no password in the keyring.
@@ -211,7 +221,10 @@ impl Remote {
             return Err("Path must be an absolute folder, such as /srv/backup".into());
         }
         let path = if path.len() > 1 { path.trim_end_matches('/') } else { path };
-        Ok(Remote::Ssh(SshRemote { host: host.into(), path: if path.is_empty() { "/".into() } else { path.into() } }))
+        Ok(Remote::Ssh(SshRemote {
+            host: host.into(),
+            path: if path.is_empty() { "/".into() } else { path.into() },
+        }))
     }
 
     /// What makes this Remote the same Location wherever it is listed: `ssh:user@host:/path`,
@@ -384,14 +397,7 @@ impl Index {
         self.live
     }
 
-    pub fn add_volume(
-        &mut self,
-        mount: &Path,
-        fs_type: &str,
-        identity: &str,
-        meta: EntryMeta,
-        sync: SyncState,
-    ) -> VolumeId {
+    pub fn add_volume(&mut self, mount: &Path, fs_type: &str, identity: &str, meta: EntryMeta, sync: SyncState) -> VolumeId {
         debug_assert!(meta.is_dir, "a Volume root is a folder");
         let root = self.push(NO_PARENT, &mount.to_string_lossy(), meta);
         let volume = Volume {
@@ -414,7 +420,10 @@ impl Index {
     /// `s3:host/bucket/prefix/...` or `ftp://user@host:port/path/...`.
     pub fn add_remote(&mut self, remote: &Remote) -> VolumeId {
         let identity = remote.identity();
-        let meta = EntryMeta { is_dir: true, ..EntryMeta::default() };
+        let meta = EntryMeta {
+            is_dir: true,
+            ..EntryMeta::default()
+        };
         let (fs_type, sync) = match remote {
             Remote::Ssh(r) => ("ssh", SyncState::Ssh(r.clone())),
             Remote::S3(r) => ("s3", SyncState::S3(r.clone())),
@@ -442,9 +451,7 @@ impl Index {
 
     /// The Volume with filesystem identity `identity`.
     pub fn volume_with_identity(&self, identity: &str) -> Option<VolumeId> {
-        self.volumes()
-            .find(|(_, v)| v.identity == identity)
-            .map(|(id, _)| id)
+        self.volumes().find(|(_, v)| v.identity == identity).map(|(id, _)| id)
     }
 
     /// Records that `id` is mounted at `mount` (a remount keeps every Entry), or not mounted.
@@ -495,9 +502,7 @@ impl Index {
 
     /// The Volume whose root is `root`.
     pub fn volume_with_root(&self, root: EntryId) -> Option<VolumeId> {
-        self.volumes()
-            .find(|(_, v)| v.root == root)
-            .map(|(id, _)| id)
+        self.volumes().find(|(_, v)| v.root == root).map(|(id, _)| id)
     }
 
     /// The Volume containing `id`.
@@ -717,10 +722,7 @@ impl Index {
     }
 
     pub fn child_named(&self, dir: EntryId, name: &str) -> Option<EntryId> {
-        self.children(dir)
-            .iter()
-            .copied()
-            .find(|&c| self.name(c) == name)
+        self.children(dir).iter().copied().find(|&c| self.name(c) == name)
     }
 
     /// Full path of an Entry.
@@ -750,11 +752,7 @@ impl Index {
             current = parent;
         }
         let (root, rest) = chain.split_last().expect("chain holds at least the Entry");
-        out.extend(
-            self.name(*root)
-                .chars()
-                .map(|c| if c == '\\' { '/' } else { c }),
-        );
+        out.extend(self.name(*root).chars().map(|c| if c == '\\' { '/' } else { c }));
         for &component in rest.iter().rev() {
             if !out.ends_with('/') {
                 out.push('/');
@@ -786,10 +784,7 @@ impl Index {
                 continue;
             };
             let root = out.push(NO_PARENT, self.name(volume.root), self.meta(volume.root));
-            out.volumes.push(Some(Volume {
-                root,
-                ..volume.clone()
-            }));
+            out.volumes.push(Some(Volume { root, ..volume.clone() }));
             let mut stack = vec![(volume.root, root)];
             while let Some((old, new)) = stack.pop() {
                 for &child in self.children(old) {
@@ -850,8 +845,7 @@ impl Index {
                 ));
             }
         }
-        let mut index: Index = bincode::deserialize_from(input)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let mut index: Index = bincode::deserialize_from(input).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         index.touch();
         Ok(index)
     }

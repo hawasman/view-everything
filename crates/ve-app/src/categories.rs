@@ -45,10 +45,7 @@ impl CategoryPanel {
     fn add_to_query(&self, term: String, window: &mut Window, cx: &mut App) {
         self.query.update(cx, |query, cx| {
             let mut text = query.value().to_string();
-            if text
-                .split_whitespace()
-                .any(|t| t.eq_ignore_ascii_case(&term))
-            {
+            if text.split_whitespace().any(|t| t.eq_ignore_ascii_case(&term)) {
                 return;
             }
             if !text.trim().is_empty() {
@@ -156,9 +153,12 @@ impl Render for CategoryPanel {
                     )
                     .child(
                         div().w(px(BAR)).flex_none().px(px(12.)).child(
-                            div().h(px(4.)).rounded(px(2.)).bg(free).overflow_hidden().child(
-                                div().h_full().w(relative(share.clamp(0.0, 1.0))).bg(color),
-                            ),
+                            div()
+                                .h(px(4.))
+                                .rounded(px(2.))
+                                .bg(free)
+                                .overflow_hidden()
+                                .child(div().h_full().w(relative(share.clamp(0.0, 1.0))).bg(color)),
                         ),
                     )
                     .child(cell(SIZE).child(format::size(row.totals.on_disk)))
@@ -181,16 +181,18 @@ impl Render for CategoryPanel {
                         .child(div().flex_1().child(label))
                         .child(cell(SIZE).text_color(muted).child(format::size(totals.on_disk)))
                         .child(cell(FILES).text_color(muted).child(format::count(totals.files)))
-                        .child(cell(SHARE).text_color(muted).child(format!(
-                            "{:.1}%",
-                            totals.on_disk as f64 * 100.0 / whole as f64
-                        )));
-                    if let Some(term) = term {
-                        item = item.cursor_pointer().hover(move |s| s.bg(hover).text_color(text)).on_click(
-                            cx.listener(move |this, _, window, cx| {
-                                this.add_to_query(term.clone(), window, cx);
-                            }),
+                        .child(
+                            cell(SHARE)
+                                .text_color(muted)
+                                .child(format!("{:.1}%", totals.on_disk as f64 * 100.0 / whole as f64)),
                         );
+                    if let Some(term) = term {
+                        item = item
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(hover).text_color(text))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.add_to_query(term.clone(), window, cx);
+                            }));
                     }
                     list = list.child(item);
                 }

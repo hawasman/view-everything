@@ -1,1 +1,5 @@
 /target
+/dist
+# Local working files: screenshots, logs, sandboxes, design exploration.
+/.scratch
+/designs

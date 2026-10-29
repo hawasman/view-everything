@@ -84,7 +84,10 @@ struct Best {
 
 impl Best {
     fn new(n: usize) -> Self {
-        Self { n, heap: BinaryHeap::with_capacity(n + 1) }
+        Self {
+            n,
+            heap: BinaryHeap::with_capacity(n + 1),
+        }
     }
 
     /// Whether an item with `key` could still make the cut.
@@ -109,12 +112,7 @@ impl Best {
 
 /// One pass over the Index. `recent` selects the files Recently modified may list; `None` lists
 /// none. Hard links count once per Volume, as everywhere else.
-pub fn summarize(
-    index: &Index,
-    categories: &CategoryMap,
-    recent: Option<&Query>,
-    recent_error: Option<String>,
-) -> Summary {
+pub fn summarize(index: &Index, categories: &CategoryMap, recent: Option<&Query>, recent_error: Option<String>) -> Summary {
     summarize_with(POOL, index, categories, recent, recent_error)
 }
 
@@ -133,7 +131,10 @@ fn summarize_with(
     let mut newest = Best::new(pool_len);
 
     for (_, volume) in index.volumes() {
-        let mut summary = VolumeSummary { identity: volume.identity.clone(), ..Default::default() };
+        let mut summary = VolumeSummary {
+            identity: volume.identity.clone(),
+            ..Default::default()
+        };
         let mut seen_links = HashSet::new();
         let mut stack = vec![volume.root];
         while let Some(dir) = stack.pop() {
@@ -170,7 +171,12 @@ fn summarize_with(
     let truncated = pool.len() == pool_len;
     let recent_ids = recent.map_or_else(Vec::new, |query| {
         let mut scratch = (String::new(), Vec::new());
-        let mut ids: Vec<EntryId> = pool.iter().copied().filter(|&id| matches(index, query, id, &mut scratch)).take(LIST_LEN).collect();
+        let mut ids: Vec<EntryId> = pool
+            .iter()
+            .copied()
+            .filter(|&id| matches(index, query, id, &mut scratch))
+            .take(LIST_LEN)
+            .collect();
         // A Query few of the newest files satisfy: look through every file for the newest ones.
         if ids.len() < LIST_LEN && truncated {
             let mut best = Best::new(LIST_LEN);
@@ -251,7 +257,11 @@ impl Lane {
     /// reports.
     pub fn new(mut categories: [u64; 8], capacity: Option<Capacity>) -> Lane {
         let Some(capacity) = capacity else {
-            return Lane { categories, unindexed: 0, free: 0 };
+            return Lane {
+                categories,
+                unindexed: 0,
+                free: 0,
+            };
         };
         let free = capacity.free.min(capacity.total);
         let used = capacity.total - free;
@@ -265,7 +275,11 @@ impl Lane {
         }
         let indexed: u64 = categories.iter().sum();
         // Whatever used space the Entries do not explain is Unindexed Space.
-        Lane { categories, unindexed: used - indexed, free }
+        Lane {
+            categories,
+            unindexed: used - indexed,
+            free,
+        }
     }
 
     pub fn total(&self) -> u64 {
@@ -329,11 +343,19 @@ mod tests {
     use ve_core::{EntryMeta, QueryContext, SyncState};
 
     fn file(size: u64, modified: i64) -> EntryMeta {
-        EntryMeta { logical: size, on_disk: size, modified, ..Default::default() }
+        EntryMeta {
+            logical: size,
+            on_disk: size,
+            modified,
+            ..Default::default()
+        }
     }
 
     fn folder() -> EntryMeta {
-        EntryMeta { is_dir: true, ..Default::default() }
+        EntryMeta {
+            is_dir: true,
+            ..Default::default()
+        }
     }
 
     /// Two Volumes: /a with a Video, an Image and a hard-linked pair; /b with an Audio.
@@ -345,7 +367,11 @@ mod tests {
         let docs = index.insert(ra, "docs", folder());
         index.insert(docs, "film.mp4", file(1000, 5));
         index.insert(docs, "photo.JPG", file(300, 9));
-        let link = EntryMeta { key: 7, hardlinked: true, ..file(50, 1) };
+        let link = EntryMeta {
+            key: 7,
+            hardlinked: true,
+            ..file(50, 1)
+        };
         index.insert(docs, "one.txt", link);
         index.insert(ra, "two.txt", link);
         let hidden = index.insert(rb, ".cache", folder());
@@ -486,7 +512,10 @@ mod tests {
         let s = sum(&shared.read(), None);
         let lane = s.volume(&remote.identity()).expect("the Remote has a lane");
         assert!(lane.categories[Category::Audio as usize] >= 5000);
-        assert_eq!(s.categories[Category::Audio as usize].0, before.categories[Category::Audio as usize].0 + lane.categories[Category::Audio as usize]);
+        assert_eq!(
+            s.categories[Category::Audio as usize].0,
+            before.categories[Category::Audio as usize].0 + lane.categories[Category::Audio as usize]
+        );
         assert!(shared.read().volume(id).unwrap().capacity.is_some());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -505,6 +534,9 @@ mod tests {
         assert_eq!(ago(1000 + 3 * 3600, 1000), "3 h ago");
         assert_eq!(ago(1000 + 86400, 1000), "1 day ago");
         assert_eq!(ago(1000 + 6 * 86400, 1000), "6 days ago");
-        assert_eq!((every(15), every(120), every(0)), ("Every 15 min".into(), "Every 2 h".into(), "Manual".into()));
+        assert_eq!(
+            (every(15), every(120), every(0)),
+            ("Every 15 min".into(), "Every 2 h".into(), "Manual".into())
+        );
     }
 }

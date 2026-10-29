@@ -80,9 +80,7 @@ fn volume_uuid(plist: &str) -> Option<&str> {
 
 fn c_text(field: &[libc::c_char]) -> String {
     // SAFETY: statfs name fields are NUL-terminated within their fixed size.
-    unsafe { CStr::from_ptr(field.as_ptr()) }
-        .to_string_lossy()
-        .into_owned()
+    unsafe { CStr::from_ptr(field.as_ptr()) }.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]

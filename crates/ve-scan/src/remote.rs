@@ -47,7 +47,15 @@ impl Record {
         let modified = parse_time(std::str::from_utf8(fields.next()?).ok()?)?;
         let kind = fields.next()?;
         let path = String::from_utf8_lossy(fields.next()?).into_owned();
-        Some(Record { inode, links, size, on_disk: blocks.checked_mul(512)?, modified, is_dir: kind == b"d", path })
+        Some(Record {
+            inode,
+            links,
+            size,
+            on_disk: blocks.checked_mul(512)?,
+            modified,
+            is_dir: kind == b"d",
+            path,
+        })
     }
 
     fn meta(&self) -> EntryMeta {
@@ -71,7 +79,11 @@ fn parse_time(text: &str) -> Option<i64> {
     let negative = secs.starts_with('-');
     let secs: i64 = secs.parse().ok()?;
     let digits: String = frac.chars().take(9).collect();
-    let nanos: i64 = if digits.is_empty() { 0 } else { digits.parse::<i64>().ok()? * 10i64.pow(9 - digits.len() as u32) };
+    let nanos: i64 = if digits.is_empty() {
+        0
+    } else {
+        digits.parse::<i64>().ok()? * 10i64.pow(9 - digits.len() as u32)
+    };
     secs.checked_mul(1_000_000_000)?.checked_add(if negative { -nanos } else { nanos })
 }
 
@@ -124,7 +136,9 @@ static SFTP_ONLY: Mutex<Vec<SshRemote>> = Mutex::new(Vec::new());
 pub fn sync_with(program: &str, index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::Result<()> {
     let (root, remote) = {
         let index = index.read();
-        let v = index.volume(volume).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such Remote"))?;
+        let v = index
+            .volume(volume)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such Remote"))?;
         match &v.sync {
             SyncState::Ssh(remote) => (v.root, remote.clone()),
             _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a Remote")),
@@ -160,7 +174,13 @@ fn list(program: &str, index: &SharedIndex, root: EntryId, remote: &SshRemote, p
 /// The capacity of the filesystem holding the Remote's root, from `df -kP` run over `program`
 /// (ssh) with the options the listing uses; so it works on SFTP-only hosts that can run `df`.
 pub fn df_with(program: &str, remote: &SshRemote) -> io::Result<Capacity> {
-    let mut child = spawn(program, remote, false, &format!("df -kP {}", shell_quote(&remote.path)), Stdio::null())?;
+    let mut child = spawn(
+        program,
+        remote,
+        false,
+        &format!("df -kP {}", shell_quote(&remote.path)),
+        Stdio::null(),
+    )?;
     let stderr = drain_stderr(&mut child);
     let mut out = String::new();
     // df prints a few lines; a server printing more than 64 KiB is not answering df.
@@ -168,7 +188,11 @@ pub fn df_with(program: &str, remote: &SshRemote) -> io::Result<Capacity> {
     let status = child.wait()?;
     let stderr = stderr.join().unwrap_or_default();
     if !status.success() {
-        return Err(io::Error::other(format!("df on {} failed: {}", remote.host, stderr.trim().lines().last().unwrap_or(""))));
+        return Err(io::Error::other(format!(
+            "df on {} failed: {}",
+            remote.host,
+            stderr.trim().lines().last().unwrap_or("")
+        )));
     }
     parse_df(&out).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "df printed no capacity"))
 }
@@ -183,7 +207,10 @@ pub fn parse_df(text: &str) -> Option<Capacity> {
     let percent = fields.iter().skip(3).position(|f| f.ends_with('%') || *f == "-")? + 3;
     let kib = |f: &str| f.parse::<u64>().ok()?.checked_mul(1024);
     let (total, free) = (kib(fields[percent - 3])?, kib(fields[percent - 1])?);
-    (total > 0).then_some(Capacity { total, free: free.min(total) })
+    (total > 0).then_some(Capacity {
+        total,
+        free: free.min(total),
+    })
 }
 
 /// Starts `program` (ssh) with the options every run shares; `command` runs on the server, or
@@ -287,7 +314,10 @@ fn sync_sftp(program: &str, index: &SharedIndex, root: EntryId, remote: &SshRemo
     let stderr = stderr.join().unwrap_or_default();
     let walked = walked.map_err(|e| match status.code() {
         Some(255) => failure(remote, Some(255), 0, &stderr).unwrap_or(e),
-        _ => io::Error::new(e.kind(), format!("SFTP on {} failed: {e} {}", remote.host, stderr.trim().lines().last().unwrap_or(""))),
+        _ => io::Error::new(
+            e.kind(),
+            format!("SFTP on {} failed: {e} {}", remote.host, stderr.trim().lines().last().unwrap_or("")),
+        ),
     })?;
     progress.unreadable.fetch_add(walked.unreadable, Ordering::Relaxed);
     if walked.unreadable == 0 {
@@ -311,9 +341,7 @@ fn failure(remote: &SshRemote, code: Option<i32>, records: u64, stderr: &str) ->
         ),
         Some(255) => err(io::ErrorKind::ConnectionRefused, format!("ssh to {host} failed: {message}")),
         // No GNU find -printf (BusyBox, BSD) or no find at all: the caller falls back to SFTP.
-        _ if code == Some(127) || stderr.contains("-printf") => {
-            err(io::ErrorKind::Unsupported, format!("{host} has no GNU find -printf"))
-        }
+        _ if code == Some(127) || stderr.contains("-printf") => err(io::ErrorKind::Unsupported, format!("{host} has no GNU find -printf")),
         _ => err(io::ErrorKind::Other, format!("find on {host} failed: {message}")),
     }
 }
@@ -344,14 +372,25 @@ impl<'a> Applier<'a> {
                 for &child in index.children(dir) {
                     unseen.insert((dir, index.name(child).to_owned()), child);
                     if index.is_dir(child) {
-                        let p = if path.is_empty() { index.name(child).to_owned() } else { format!("{path}/{}", index.name(child)) };
+                        let p = if path.is_empty() {
+                            index.name(child).to_owned()
+                        } else {
+                            format!("{path}/{}", index.name(child))
+                        };
                         dirs.insert(p.clone(), child);
                         stack.push((child, p));
                     }
                 }
             }
         }
-        Applier { index, progress, root, dirs, unseen, records: 0 }
+        Applier {
+            index,
+            progress,
+            root,
+            dirs,
+            unseen,
+            records: 0,
+        }
     }
 
     pub(crate) fn apply(&mut self, batch: &mut Vec<(String, EntryMeta)>) {
@@ -427,20 +466,43 @@ mod tests {
     #[test]
     fn df_output_parses_from_gnu_busybox_and_bsd() {
         let gnu = "Filesystem     1024-blocks      Used Available Capacity Mounted on\n/dev/nvme0n1p2   495911220 382096892 104909188      79% /\n";
-        let want = Some(Capacity { total: 495_911_220 * 1024, free: 104_909_188 * 1024 });
+        let want = Some(Capacity {
+            total: 495_911_220 * 1024,
+            free: 104_909_188 * 1024,
+        });
         assert_eq!(parse_df(gnu), want);
         // BusyBox: the same columns, the filesystem name may be long or contain spaces.
         let busybox = "Filesystem           1024-blocks    Used Available Capacity Mounted on\n/dev/root               495911220 382096892 104909188  79% /\n";
         assert_eq!(parse_df(busybox), want);
         let spaced = "Filesystem 1024-blocks Used Available Capacity Mounted on\nmy disk 10 4 6 40% /mnt/with 5% sign\n";
-        assert_eq!(parse_df(spaced), Some(Capacity { total: 10 * 1024, free: 6 * 1024 }));
+        assert_eq!(
+            parse_df(spaced),
+            Some(Capacity {
+                total: 10 * 1024,
+                free: 6 * 1024
+            })
+        );
         // BSD/macOS with -kP: POSIX columns, 1K blocks.
-        let bsd = "Filesystem  1024-blocks     Used Available Capacity  Mounted on\n/dev/disk3s1s1   494384795 11491048 307610816     4%    /\n";
-        assert_eq!(parse_df(bsd), Some(Capacity { total: 494_384_795 * 1024, free: 307_610_816 * 1024 }));
+        let bsd =
+            "Filesystem  1024-blocks     Used Available Capacity  Mounted on\n/dev/disk3s1s1   494384795 11491048 307610816     4%    /\n";
+        assert_eq!(
+            parse_df(bsd),
+            Some(Capacity {
+                total: 494_384_795 * 1024,
+                free: 307_610_816 * 1024
+            })
+        );
         // Long names wrapped by a non-POSIX df put the figures on the next line: still the last line.
-        assert_eq!(parse_df("Filesystem 1024-blocks Used Available Capacity Mounted on\nserver:/very/long\n   100 40 60 40% /n\n").map(|c| c.total), Some(100 * 1024));
+        assert_eq!(
+            parse_df("Filesystem 1024-blocks Used Available Capacity Mounted on\nserver:/very/long\n   100 40 60 40% /n\n")
+                .map(|c| c.total),
+            Some(100 * 1024)
+        );
         // No figures, or nothing: no capacity.
-        assert_eq!(parse_df("Filesystem 1024-blocks Used Available Capacity Mounted on\nfuse - - - - /mnt\n"), None);
+        assert_eq!(
+            parse_df("Filesystem 1024-blocks Used Available Capacity Mounted on\nfuse - - - - /mnt\n"),
+            None
+        );
         assert_eq!(parse_df("df: /nope: No such file or directory\n"), None);
         assert_eq!(parse_df(""), None);
     }
@@ -460,14 +522,35 @@ mod tests {
 
     #[test]
     fn failures_read_as_what_to_do() {
-        let r = SshRemote { host: "me@box".into(), path: "/srv".into() };
+        let r = SshRemote {
+            host: "me@box".into(),
+            path: "/srv".into(),
+        };
         let why = |code, records, stderr: &str| failure(&r, code, records, stderr).map(|e| e.to_string());
         assert_eq!(why(Some(0), 3, ""), None);
         assert_eq!(why(Some(1), 3, "find: './x': Permission denied"), None);
-        assert!(why(Some(255), 0, "me@box: Permission denied (publickey,password).").unwrap().contains("key or ssh-agent"));
-        assert!(why(Some(255), 0, "ssh: Could not resolve hostname box").unwrap().contains("ssh to me@box failed"));
-        assert_eq!(failure(&r, Some(1), 0, "find: unknown predicate `-printf'").unwrap().kind(), io::ErrorKind::Unsupported);
-        assert_eq!(failure(&r, Some(127), 0, "sh: find: not found").unwrap().kind(), io::ErrorKind::Unsupported);
-        assert!(why(Some(1), 0, "find: '/nope': No such file or directory").unwrap().contains("find on me@box failed"));
+        assert!(
+            why(Some(255), 0, "me@box: Permission denied (publickey,password).")
+                .unwrap()
+                .contains("key or ssh-agent")
+        );
+        assert!(
+            why(Some(255), 0, "ssh: Could not resolve hostname box")
+                .unwrap()
+                .contains("ssh to me@box failed")
+        );
+        assert_eq!(
+            failure(&r, Some(1), 0, "find: unknown predicate `-printf'").unwrap().kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            failure(&r, Some(127), 0, "sh: find: not found").unwrap().kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert!(
+            why(Some(1), 0, "find: '/nope': No such file or directory")
+                .unwrap()
+                .contains("find on me@box failed")
+        );
     }
 }

@@ -200,7 +200,12 @@ impl DashboardPage {
             .map(|(_, v)| {
                 let mounted = self.volumes.iter().find(|m| m.identity == v.identity);
                 let network = mounted.is_some_and(|m| m.network);
-                let categories = self.shown.as_ref().and_then(|s| s.volume(&v.identity)).map(|s| s.categories).unwrap_or_default();
+                let categories = self
+                    .shown
+                    .as_ref()
+                    .and_then(|s| s.volume(&v.identity))
+                    .map(|s| s.categories)
+                    .unwrap_or_default();
                 let indexed: u64 = categories.iter().sum();
                 let remote = v.remote();
                 let name = match (&remote, mounted) {
@@ -217,7 +222,11 @@ impl DashboardPage {
                 let no_capacity_note = match &remote {
                     // S3 has no capacity by nature: the indexed total is all there is.
                     Some(r @ ve_core::Remote::Ssh(_)) if v.last_synced.is_some() && v.capacity.is_none() => {
-                        Some(if ve_scan::remote::is_sftp_only(r) { "SFTP only: no df, no capacity" } else { "df unavailable: no capacity" })
+                        Some(if ve_scan::remote::is_sftp_only(r) {
+                            "SFTP only: no df, no capacity"
+                        } else {
+                            "df unavailable: no capacity"
+                        })
                     }
                     _ => None,
                 };
@@ -240,7 +249,11 @@ impl DashboardPage {
                     indexed,
                     capacity: v.capacity,
                     syncing: (v.online && syncing.contains(&v.mount)).then(|| self.shared.progress.entries()),
-                    members: vec![Member { identity: v.identity.clone(), mount: v.mount.clone(), indexed }],
+                    members: vec![Member {
+                        identity: v.identity.clone(),
+                        mount: v.mount.clone(),
+                        indexed,
+                    }],
                     no_capacity_note,
                 };
                 (location, mounted.map_or_else(String::new, |m| m.label.clone()))
@@ -276,7 +289,10 @@ impl DashboardPage {
                 if !device.is_empty() {
                     whole.name = device;
                 }
-                let fs = index.volume_with_identity(&whole.identity).and_then(|id| index.volume(id)).map(|v| v.fs_type.clone());
+                let fs = index
+                    .volume_with_identity(&whole.identity)
+                    .and_then(|id| index.volume(id))
+                    .map(|v| v.fs_type.clone());
                 whole.detail = format!("{} · {} Volumes", fs.unwrap_or_default(), whole.members.len());
                 whole
             })
@@ -316,8 +332,16 @@ impl DashboardPage {
             _ => "Evening",
         };
         let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default();
-        let name: String = user.chars().next().map(|c| c.to_uppercase().chain(user.chars().skip(1)).collect()).unwrap_or_default();
-        let hello = if name.is_empty() { part.to_owned() } else { format!("{part}, {name}") };
+        let name: String = user
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().chain(user.chars().skip(1)).collect())
+            .unwrap_or_default();
+        let hello = if name.is_empty() {
+            part.to_owned()
+        } else {
+            format!("{part}, {name}")
+        };
         let Some(summary) = &self.shown else {
             return (format!("{hello}."), "Reading the Index…".into());
         };
@@ -386,7 +410,9 @@ fn hatch(cx: &App) -> Rgba {
 
 /// "Today 21:58", "Yesterday 22:05", or the date.
 fn day(nanos: i64) -> String {
-    let Some(at) = Local.timestamp_nanos(nanos).into() else { return String::new() };
+    let Some(at) = Local.timestamp_nanos(nanos).into() else {
+        return String::new();
+    };
     let at: chrono::DateTime<Local> = at;
     let days = (Local::now().date_naive() - at.date_naive()).num_days();
     match days {
@@ -421,7 +447,12 @@ impl Render for DashboardPage {
                     Some(at) => format!("Index last synced {}, at {}.", ago(now, at), old.name),
                     None => format!("{} has not finished its first sync.", old.name),
                 };
-                format!("{} indexed across {} and {} Entries. {synced}", format::size(s.indexed()), locations_phrase(&locations), format::count(s.entries))
+                format!(
+                    "{} indexed across {} and {} Entries. {synced}",
+                    format::size(s.indexed()),
+                    locations_phrase(&locations),
+                    format::count(s.entries)
+                )
             }
             _ => sub,
         };
@@ -434,13 +465,7 @@ impl Render for DashboardPage {
             .child(
                 v_flex()
                     .min_w_0()
-                    .child(
-                        div()
-                            .font_family(SERIF_FAMILY)
-                            .text_size(px(48.))
-                            .line_height(px(54.))
-                            .child(title),
-                    )
+                    .child(div().font_family(SERIF_FAMILY).text_size(px(48.)).line_height(px(54.)).child(title))
                     .child(div().mt(px(6.)).text_color(p.muted).child(sub)),
             )
             .child(
@@ -470,20 +495,16 @@ impl Render for DashboardPage {
                     .child(self.largest_panel(&locations, cx))
                     .child(self.recent_panel(&locations, cx)),
             );
-        div()
-            .id("dashboard")
-            .size_full()
-            .overflow_y_scroll()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(COLUMN + 64.))
-                    .mx_auto()
-                    .pt(px(32.))
-                    .px(px(32.))
-                    .pb(px(48.))
-                    .child(body),
-            )
+        div().id("dashboard").size_full().overflow_y_scroll().child(
+            div()
+                .w_full()
+                .max_w(px(COLUMN + 64.))
+                .mx_auto()
+                .pt(px(32.))
+                .px(px(32.))
+                .pb(px(48.))
+                .child(body),
+        )
     }
 }
 
@@ -519,13 +540,11 @@ impl DashboardPage {
                 .on_click(cx.listener(move |_, _, _, cx| Self::explore(Some(query.clone()), cx)))
                 .child(h_flex().gap(px(8.)).items_center().mb(px(4.)).child(swatch(color)).child(name))
                 .child(div().text_size(px(32.)).line_height(px(38.)).child(format::size(size)))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(p.muted)
-                        .mb(px(14.))
-                        .child(format!("{} files · {} of the Index", format::count(files), share(size, 1))),
-                )
+                .child(div().text_size(px(13.)).text_color(p.muted).mb(px(14.)).child(format!(
+                    "{} files · {} of the Index",
+                    format::count(files),
+                    share(size, 1)
+                )))
                 .child(
                     div()
                         .mt_auto()
@@ -575,12 +594,34 @@ impl DashboardPage {
         let free: u64 = locations.iter().filter_map(|l| l.capacity).map(|c| c.free).sum();
         let hatch = hatch(cx);
         let outlined = move |d: Div| d.border_1().border_color(p.control);
-        let mut legend = h_flex().flex_wrap().gap_x(px(14.)).gap_y(px(4.)).mb(px(14.)).text_xs().text_color(p.muted);
+        let mut legend = h_flex()
+            .flex_wrap()
+            .gap_x(px(14.))
+            .gap_y(px(4.))
+            .mb(px(14.))
+            .text_xs()
+            .text_color(p.muted);
         for category in Category::ALL {
-            legend = legend.child(h_flex().gap(px(6.)).items_center().child(swatch(p.category(category))).child(category.name()));
+            legend = legend.child(
+                h_flex()
+                    .gap(px(6.))
+                    .items_center()
+                    .child(swatch(p.category(category)))
+                    .child(category.name()),
+            );
         }
         legend = legend
-            .child(h_flex().gap(px(6.)).items_center().child(outlined(swatch(p.surface).overflow_hidden().child(div().size_full().bg(pattern_slash(hatch, 1., 6.))))).child("Unindexed Space"))
+            .child(
+                h_flex()
+                    .gap(px(6.))
+                    .items_center()
+                    .child(outlined(
+                        swatch(p.surface)
+                            .overflow_hidden()
+                            .child(div().size_full().bg(pattern_slash(hatch, 1., 6.))),
+                    ))
+                    .child("Unindexed Space"),
+            )
             .child(h_flex().gap(px(6.)).items_center().child(outlined(swatch(p.free))).child("Free"));
 
         let mut lanes = v_flex().bg(p.raised).rounded(px(crate::theme::RADIUS_INNER)).px(px(20.)).py(px(4.));
@@ -588,7 +629,12 @@ impl DashboardPage {
             lanes = lanes.child(self.lane(ix, l, now, cx));
         }
         if locations.is_empty() {
-            lanes = lanes.child(div().py(px(16.)).text_color(p.muted).child("No Locations are indexed yet. Add one in Settings."));
+            lanes = lanes.child(
+                div()
+                    .py(px(16.))
+                    .text_color(p.muted)
+                    .child("No Locations are indexed yet. Add one in Settings."),
+            );
         }
         panel(cx)
             .flex_grow(9.)
@@ -620,7 +666,13 @@ impl DashboardPage {
         let total = l.lane.total().max(1) as f64;
         let wide = |bytes: u64| bytes as f64 / total >= SLIVER;
         let seg = |bytes: u64| div().h_full().min_w_0().flex_grow(bytes as f32).flex_basis(relative(0.));
-        let mut bar = h_flex().h(px(12.)).gap(px(1.)).rounded(px(3.)).overflow_hidden().bg(p.free).when(!l.online, |d| d.opacity(0.6));
+        let mut bar = h_flex()
+            .h(px(12.))
+            .gap(px(1.))
+            .rounded(px(3.))
+            .overflow_hidden()
+            .bg(p.free)
+            .when(!l.online, |d| d.opacity(0.6));
         for category in Category::ALL.into_iter().filter(|&c| wide(l.lane.categories[c as usize])) {
             let bytes = l.lane.categories[category as usize];
             // Widths may be scaled to fit the used space; the tooltip says what the files hold.
@@ -657,17 +709,34 @@ impl DashboardPage {
                 .child(format!("\u{a0}used of {}", format::size(c.total)))
                 .into_any_element(),
             // No capacity (a Remote whose server has no df): only what is indexed.
-            None => h_flex().child(strong(format::size(l.indexed))).child("\u{a0}indexed").into_any_element(),
+            None => h_flex()
+                .child(strong(format::size(l.indexed)))
+                .child("\u{a0}indexed")
+                .into_any_element(),
         };
-        let free = l.capacity.map(|c| format!("{} free", format::size(c.free))).or_else(|| l.no_capacity_note.map(str::to_owned));
+        let free = l
+            .capacity
+            .map(|c| format!("{} free", format::size(c.free)))
+            .or_else(|| l.no_capacity_note.map(str::to_owned));
         // A lane of several Volumes says which, and how much of it each indexed.
         let parts = (l.members.len() > 1).then(|| {
             let mut members: Vec<_> = l.members.iter().collect();
             members.sort_by_key(|m| m.mount.as_os_str().len());
-            let list = members.iter().map(|m| format!("{} {}", m.mount.display(), format::size(m.indexed))).collect::<Vec<_>>().join(" · ");
-            div().id(("members", ix)).mt(px(2.)).text_size(px(12.)).text_color(p.muted).truncate().child(list.clone()).tooltip(move |window, cx| {
-                Tooltip::new(format!("Volumes on this filesystem, with what each has indexed: {list}")).build(window, cx)
-            })
+            let list = members
+                .iter()
+                .map(|m| format!("{} {}", m.mount.display(), format::size(m.indexed)))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            div()
+                .id(("members", ix))
+                .mt(px(2.))
+                .text_size(px(12.))
+                .text_color(p.muted)
+                .truncate()
+                .child(list.clone())
+                .tooltip(move |window, cx| {
+                    Tooltip::new(format!("Volumes on this filesystem, with what each has indexed: {list}")).build(window, cx)
+                })
         });
 
         let who = v_flex()
@@ -690,7 +759,12 @@ impl DashboardPage {
         };
         let mut sync = v_flex().items_end().child(div().text_color(p.text).child(main));
         sync = if let Some(read) = l.syncing {
-            sync.child(div().text_size(px(13.)).text_color(p.accent).child(format!("Catching up — {} Entries read", format::count(read))))
+            sync.child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(p.accent)
+                    .child(format!("Catching up — {} Entries read", format::count(read))),
+            )
         } else if !l.online {
             let forget: Vec<_> = l.members.iter().map(|m| (m.identity.clone(), m.mount.clone())).collect();
             sync.child(
@@ -700,9 +774,7 @@ impl DashboardPage {
                     .text_color(p.accent)
                     .cursor_pointer()
                     .hover(|s| s.underline())
-                    .tooltip(|window, cx| {
-                        Tooltip::new("Remove this Offline Volume and its Entries from the Index").build(window, cx)
-                    })
+                    .tooltip(|window, cx| Tooltip::new("Remove this Offline Volume and its Entries from the Index").build(window, cx))
                     .child("Forget")
                     .on_click(cx.listener(move |_, _, _, cx| {
                         for (identity, mount) in &forget {
@@ -722,18 +794,22 @@ impl DashboardPage {
             .when(ix > 0, |d| d.border_t_1().border_color(p.rule))
             .child(div().w(px(176.)).flex_none().child(who))
             .child(
-                v_flex().flex_1().min_w_0().child(bar).child(
-                    h_flex()
-                        .mt(px(6.))
-                        .gap(px(8.))
-                        .justify_between()
-                        .text_size(px(13.))
-                        .text_color(p.muted)
-                        .whitespace_nowrap()
-                        .child(figures)
-                        .children(free),
-                )
-                .children(parts),
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(bar)
+                    .child(
+                        h_flex()
+                            .mt(px(6.))
+                            .gap(px(8.))
+                            .justify_between()
+                            .text_size(px(13.))
+                            .text_color(p.muted)
+                            .whitespace_nowrap()
+                            .child(figures)
+                            .children(free),
+                    )
+                    .children(parts),
             )
             .child(div().w(px(216.)).flex_none().child(sync))
     }
@@ -752,9 +828,19 @@ impl DashboardPage {
         };
         let trash = panel(cx)
             .child(div().font_weight(FontWeight::MEDIUM).child("Trash"))
-            .child(div().mt(px(12.)).text_size(px(32.)).line_height(px(38.)).child(size.map_or("…".to_owned(), format::size)))
+            .child(
+                div()
+                    .mt(px(12.))
+                    .text_size(px(32.))
+                    .line_height(px(38.))
+                    .child(size.map_or("…".to_owned(), format::size)),
+            )
             .child(div().text_xs().text_color(p.muted).mb(px(16.)).child(match self.trash.items() {
-                Some(n) => format!("{} item{}. Trashed bytes still occupy their Volume.", format::count(n), if n == 1 { "" } else { "s" }),
+                Some(n) => format!(
+                    "{} item{}. Trashed bytes still occupy their Volume.",
+                    format::count(n),
+                    if n == 1 { "" } else { "s" }
+                ),
                 None => "Trashed bytes still occupy their Volume.".to_owned(),
             }))
             .child(
@@ -773,7 +859,10 @@ impl DashboardPage {
                     format!(
                         "{}, {}: the oldest of {}.",
                         l.name,
-                        Local.timestamp_opt(at, 0).single().map_or_else(String::new, |t| t.format("%Y-%m-%d %H:%M").to_string()),
+                        Local
+                            .timestamp_opt(at, 0)
+                            .single()
+                            .map_or_else(String::new, |t| t.format("%Y-%m-%d %H:%M").to_string()),
                         locations_phrase(locations)
                     ),
                 ),
@@ -786,7 +875,9 @@ impl DashboardPage {
         let target = oldest(&online.iter().map(|l| l.last_synced).collect::<Vec<_>>()).map(|i| online[i]);
         let refresh_why = target.is_none().then_some("There is nothing to refresh");
         let label = target.map_or("Refresh".to_owned(), |l| format!("Refresh {}", l.name));
-        let refresh_ids: Vec<String> = target.map(|l| l.members.iter().map(|m| m.identity.clone()).collect()).unwrap_or_default();
+        let refresh_ids: Vec<String> = target
+            .map(|l| l.members.iter().map(|m| m.identity.clone()).collect())
+            .unwrap_or_default();
         let synced = panel(cx)
             .flex_1()
             .child(div().font_weight(FontWeight::MEDIUM).child("Index last synced"))
@@ -799,7 +890,12 @@ impl DashboardPage {
                         .build(cx, cx.listener(move |_, _, _, cx| cx.emit(Act::Refresh(refresh_ids.clone())))),
                 ),
             );
-        v_flex().flex_grow(3.).flex_basis(relative(0.)).gap(px(16.)).child(trash).child(synced)
+        v_flex()
+            .flex_grow(3.)
+            .flex_basis(relative(0.))
+            .gap(px(16.))
+            .child(trash)
+            .child(synced)
     }
 
     /// The right-hand cell of a Largest files row: Move to Trash, or why it cannot be.
@@ -849,7 +945,10 @@ impl DashboardPage {
                 .child(cell(132.).pl(px(12.)).child(third)),
         );
         for (ix, r) in rows.iter().enumerate() {
-            let place = locations.iter().find(|l| l.identity == r.volume).map_or(String::new(), |l| l.name.clone());
+            let place = locations
+                .iter()
+                .find(|l| l.identity == r.volume)
+                .map_or(String::new(), |l| l.name.clone());
             let folder = tilde(&r.folder);
             table = table.child(
                 h_flex()
@@ -923,7 +1022,12 @@ impl DashboardPage {
             self.recent_query.clone()
         };
         let link = |id: &'static str, label: &'static str| {
-            div().id(id).text_color(p.accent).cursor_pointer().hover(|s| s.underline()).child(label)
+            div()
+                .id(id)
+                .text_color(p.accent)
+                .cursor_pointer()
+                .hover(|s| s.underline())
+                .child(label)
         };
         let meta = h_flex()
             .gap(px(6.))
@@ -985,7 +1089,15 @@ impl DashboardPage {
                     .child(meta),
             )
             .children(editor)
-            .when_some(error, |d, e| d.child(div().mb(px(10.)).text_xs().text_color(p.warning).child(format!("This Query cannot be used: {e}"))))
+            .when_some(error, |d, e| {
+                d.child(
+                    div()
+                        .mb(px(10.))
+                        .text_xs()
+                        .text_color(p.warning)
+                        .child(format!("This Query cannot be used: {e}")),
+                )
+            })
             .child(table)
     }
 }

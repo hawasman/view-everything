@@ -14,8 +14,7 @@ use ve_core::{EntryId, EntryMeta, Index, SyncState, VolumeId};
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::{
-    FSCTL_CREATE_USN_JOURNAL, FSCTL_GET_NTFS_FILE_RECORD, FSCTL_QUERY_USN_JOURNAL,
-    FSCTL_READ_USN_JOURNAL,
+    FSCTL_CREATE_USN_JOURNAL, FSCTL_GET_NTFS_FILE_RECORD, FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL,
 };
 
 const ERROR_ACCESS_DENIED: i32 = 5;
@@ -56,10 +55,7 @@ fn query_journal(handle: &File) -> io::Result<Journal> {
     let mut out = [0u8; 80];
     let n = ioctl(handle, FSCTL_QUERY_USN_JOURNAL, &[], &mut out)?;
     if n < 24 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "short USN journal reply",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "short USN journal reply"));
     }
     Ok(Journal {
         id: u64::from_le_bytes(out[0..8].try_into().unwrap()),
@@ -128,12 +124,7 @@ fn read_changes(handle: &File, journal: &Journal, start: i64) -> io::Result<(Vec
 /// Fetches record `number` through the volume's own record API. `None` means it is gone.
 fn fetch_record(handle: &File, number: u64) -> io::Result<Option<Vec<u8>>> {
     let mut out = vec![0u8; 16 + 4096 * 4];
-    let n = match ioctl(
-        handle,
-        FSCTL_GET_NTFS_FILE_RECORD,
-        &(number as i64).to_le_bytes(),
-        &mut out,
-    ) {
+    let n = match ioctl(handle, FSCTL_GET_NTFS_FILE_RECORD, &(number as i64).to_le_bytes(), &mut out) {
         Ok(n) => n,
         // Past the end of the MFT, or a freed record.
         Err(e) if matches!(e.raw_os_error(), Some(2 | 87 | 1392 | 38)) => return Ok(None),
@@ -151,15 +142,9 @@ fn fetch_record(handle: &File, number: u64) -> io::Result<Option<Vec<u8>>> {
 }
 
 /// One changed file, merged across its extension records; `None` when deleted.
-fn current_record(
-    handle: &File,
-    geometry: &mft::Geometry,
-    number: u64,
-    extra: &mut Vec<u64>,
-) -> io::Result<Option<Record>> {
+fn current_record(handle: &File, geometry: &mft::Geometry, number: u64, extra: &mut Vec<u64>) -> io::Result<Option<Record>> {
     let parse = |number: u64| -> io::Result<Option<mft::Parsed>> {
-        Ok(fetch_record(handle, number)?
-            .and_then(|mut raw| mft::parse_record(number, &mut raw, false, false)))
+        Ok(fetch_record(handle, number)?.and_then(|mut raw| mft::parse_record(number, &mut raw, false, false)))
     };
     let Some(base) = parse(number)? else {
         return Ok(None);
@@ -177,9 +162,7 @@ fn volume_path(mount: &std::path::Path) -> Option<String> {
     let drive = text.trim_end_matches(['\\', '/']);
     let mut chars = drive.chars();
     match (chars.next(), chars.next(), chars.next()) {
-        (Some(letter), Some(':'), None) if letter.is_ascii_alphabetic() => {
-            Some(format!(r"\\.\{drive}"))
-        }
+        (Some(letter), Some(':'), None) if letter.is_ascii_alphabetic() => Some(format!(r"\\.\{drive}")),
         _ => None,
     }
 }
@@ -204,12 +187,7 @@ fn live(index: &Index, map: &HashMap<u64, Vec<EntryId>>, number: u64) -> Vec<Ent
 }
 
 /// Applies the current state of one file. Returns false when a parent is not in the Index yet.
-fn apply(
-    index: &mut Index,
-    map: &mut HashMap<u64, Vec<EntryId>>,
-    number: u64,
-    record: Option<&Record>,
-) -> bool {
+fn apply(index: &mut Index, map: &mut HashMap<u64, Vec<EntryId>>, number: u64, record: Option<&Record>) -> bool {
     let existing = live(index, map, number);
     let Some(record) = record else {
         for id in existing {
@@ -224,9 +202,7 @@ fn apply(
     }
     let meta = EntryMeta::from(record);
     // A file cannot turn into a folder in place: replace it.
-    let (mut existing, replaced): (Vec<EntryId>, Vec<EntryId>) = existing
-        .into_iter()
-        .partition(|&id| index.is_dir(id) == record.is_dir);
+    let (mut existing, replaced): (Vec<EntryId>, Vec<EntryId>) = existing.into_iter().partition(|&id| index.is_dir(id) == record.is_dir);
     for id in replaced {
         index.remove(id);
     }
@@ -238,19 +214,11 @@ fn apply(
         }
     }
     // Keep Entries whose (parent, name) still exists.
-    let mut wanted: Vec<(EntryId, &str)> = record
-        .names
-        .iter()
-        .zip(&parents)
-        .map(|(n, &p)| (p, n.name.as_str()))
-        .collect();
+    let mut wanted: Vec<(EntryId, &str)> = record.names.iter().zip(&parents).map(|(n, &p)| (p, n.name.as_str())).collect();
     let mut stale = Vec::new();
     for id in existing.drain(..) {
         let here = (index.parent(id), index.name(id).to_owned());
-        match wanted
-            .iter()
-            .position(|&(p, n)| Some(p) == here.0 && n == here.1)
-        {
+        match wanted.iter().position(|&(p, n)| Some(p) == here.0 && n == here.1) {
             Some(pos) => {
                 wanted.swap_remove(pos);
                 index.update(id, meta);
@@ -279,13 +247,7 @@ fn apply(
     true
 }
 
-fn catch_up(
-    index: &SharedIndex,
-    handle: &File,
-    root: EntryId,
-    journal: &Journal,
-    from: i64,
-) -> io::Result<Option<i64>> {
+fn catch_up(index: &SharedIndex, handle: &File, root: EntryId, journal: &Journal, from: i64) -> io::Result<Option<i64>> {
     let (mut changed, next) = read_changes(handle, journal, from)?;
     if changed.is_empty() {
         return Ok(Some(next));
@@ -317,11 +279,7 @@ fn catch_up(
 }
 
 /// Brings an NTFS Volume up to date. `Ok(false)` leaves the Volume to the portable walk.
-pub(crate) fn sync_windows(
-    index: &SharedIndex,
-    volume: VolumeId,
-    progress: &Progress,
-) -> io::Result<bool> {
+pub(crate) fn sync_windows(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::Result<bool> {
     let (root, mount, state) = {
         let r = index.read();
         let Some(v) = r.volume(volume) else {
@@ -338,11 +296,7 @@ pub(crate) fn sync_windows(
     let Some(path) = volume_path(&mount) else {
         return Ok(false);
     };
-    let handle = match OpenOptions::new()
-        .read(true)
-        .share_mode(SHARE_READ_WRITE)
-        .open(&path)
-    {
+    let handle = match OpenOptions::new().read(true).share_mode(SHARE_READ_WRITE).open(&path) {
         Ok(h) => h,
         Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => return Ok(false),
         Err(e) => return Err(e),
@@ -353,10 +307,7 @@ pub(crate) fn sync_windows(
         Err(e) => return Err(e),
     };
 
-    if let SyncState::Ntfs {
-        journal_id,
-        next_usn,
-    } = state
+    if let SyncState::Ntfs { journal_id, next_usn } = state
         && journal_id == journal.id
         && journal.first_usn <= next_usn
     {

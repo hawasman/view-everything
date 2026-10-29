@@ -66,9 +66,7 @@ impl Bound {
 
     /// Reads `1.5gb`; `None` when the text is not a plain size.
     fn parse(text: &str) -> Option<Bound> {
-        let split = text
-            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
-            .unwrap_or(text.len());
+        let split = text.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(text.len());
         let (amount, suffix) = text.split_at(split);
         amount.parse::<f64>().ok()?;
         Some(Bound {
@@ -81,10 +79,7 @@ impl Bound {
     fn term(&self) -> Option<String> {
         let amount = self.amount.trim();
         amount.parse::<f64>().ok()?;
-        Some(format!(
-            "{amount}{}",
-            self.unit.label().to_ascii_lowercase()
-        ))
+        Some(format!("{amount}{}", self.unit.label().to_ascii_lowercase()))
     }
 
     fn invalid(&self) -> bool {
@@ -157,12 +152,7 @@ impl Filters {
     /// Fills the field `clause` belongs to, unless that field is already filled or the clause
     /// says more than the field can.
     fn take(&mut self, clause: &ClauseSource) -> bool {
-        let modifier = |m: &str| {
-            clause
-                .words
-                .iter()
-                .all(|w| !w.negated && w.modifier == Some(m))
-        };
+        let modifier = |m: &str| clause.words.iter().all(|w| !w.negated && w.modifier == Some(m));
         let single = |m: &str| clause.words.len() == 1 && modifier(m);
         let value = &clause.words[0].value;
         if single("ext") && !self.ext.on {
@@ -179,24 +169,14 @@ impl Filters {
             let Some(range) = size_range(value) else {
                 return false;
             };
-            self.size = Field {
-                on: true,
-                value: range,
-            };
+            self.size = Field { on: true, value: range };
         } else if single("dm") && !self.modified.on {
             let Some(range) = date_range(value) else {
                 return false;
             };
-            self.modified = Field {
-                on: true,
-                value: range,
-            };
+            self.modified = Field { on: true, value: range };
         } else if modifier("type") && !self.categories.on {
-            let parsed: Option<Vec<Category>> = clause
-                .words
-                .iter()
-                .map(|w: &WordSource| Category::parse(&w.value))
-                .collect();
+            let parsed: Option<Vec<Category>> = clause.words.iter().map(|w: &WordSource| Category::parse(&w.value)).collect();
             let Some(categories) = parsed else {
                 return false;
             };
@@ -222,8 +202,7 @@ impl Filters {
 
     /// The terms of every field except Name, which is what "Filters · N" counts.
     fn terms(&self) -> impl Iterator<Item = String> {
-        let ext = (self.ext.on && !self.ext.value.trim().is_empty())
-            .then(|| format!("ext:{}", quoted(self.ext.value.trim())));
+        let ext = (self.ext.on && !self.ext.value.trim().is_empty()).then(|| format!("ext:{}", quoted(self.ext.value.trim())));
         let types = (self.categories.on && !self.categories.value.is_empty()).then(|| {
             let words: Vec<String> = self
                 .categories
@@ -253,8 +232,7 @@ impl Filters {
         } else {
             None
         };
-        let regex = (self.regex.on && !self.regex.value.is_empty())
-            .then(|| format!("regex:{}", quoted(&self.regex.value)));
+        let regex = (self.regex.on && !self.regex.value.is_empty()).then(|| format!("regex:{}", quoted(&self.regex.value)));
         [ext, types, size, modified, regex].into_iter().flatten()
     }
 
@@ -324,9 +302,8 @@ impl EventEmitter<String> for FiltersPanel {}
 
 impl FiltersPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let text = |hint: &'static str, window: &mut Window, cx: &mut Context<Self>| {
-            cx.new(|cx| InputState::new(window, cx).placeholder(hint))
-        };
+        let text =
+            |hint: &'static str, window: &mut Window, cx: &mut Context<Self>| cx.new(|cx| InputState::new(window, cx).placeholder(hint));
         let panel = Self {
             form: Filters::read(""),
             name: text("part of a name", window, cx),
@@ -338,11 +315,7 @@ impl FiltersPanel {
         };
         panel.watch(&panel.name, |f, v| f.name.value = v, cx);
         panel.watch(&panel.ext, |f, v| f.ext = Field { on: true, value: v }, cx);
-        panel.watch(
-            &panel.regex,
-            |f, v| f.regex = Field { on: true, value: v },
-            cx,
-        );
+        panel.watch(&panel.regex, |f, v| f.regex = Field { on: true, value: v }, cx);
         panel.watch(
             &panel.min,
             |f, v| {
@@ -363,24 +336,14 @@ impl FiltersPanel {
             let DatePickerEvent::Change(range) = event;
             let day = |d: Option<chrono::NaiveDateTime>| d.map(|d| d.date());
             let range = (day(range.start()), day(range.end()));
-            this.edit(cx, |f| {
-                f.modified = Field {
-                    on: true,
-                    value: range,
-                }
-            });
+            this.edit(cx, |f| f.modified = Field { on: true, value: range });
         })
         .detach();
         panel
     }
 
     /// Edits `field` of the form whenever its text input changes.
-    fn watch(
-        &self,
-        input: &Entity<InputState>,
-        set: impl Fn(&mut Filters, String) + 'static,
-        cx: &mut Context<Self>,
-    ) {
+    fn watch(&self, input: &Entity<InputState>, set: impl Fn(&mut Filters, String) + 'static, cx: &mut Context<Self>) {
         cx.subscribe(input, move |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 let value = input.read(cx).value().to_string();
@@ -448,8 +411,7 @@ impl FiltersPanel {
         set(&self.min, &form.size.value.0.amount, cx);
         set(&self.max, &form.size.value.1.amount, cx);
         let (from, to) = form.modified.value;
-        self.dates
-            .update(cx, |d, cx| d.set_date(Date::Range(from, to), window, cx));
+        self.dates.update(cx, |d, cx| d.set_date(Date::Range(from, to), window, cx));
         self.form = form;
         cx.notify();
     }
@@ -460,33 +422,17 @@ impl FiltersPanel {
     }
 
     fn set_dates(&mut self, range: Dates, window: &mut Window, cx: &mut Context<Self>) {
-        self.dates.update(cx, |d, cx| {
-            d.set_date(Date::Range(range.0, range.1), window, cx)
-        });
+        self.dates.update(cx, |d, cx| d.set_date(Date::Range(range.0, range.1), window, cx));
         self.edit(cx, |f| {
-            f.modified = Field {
-                on: true,
-                value: range,
-            };
+            f.modified = Field { on: true, value: range };
         });
     }
 
     fn row(label: impl IntoElement, body: impl IntoElement) -> Div {
-        h_flex()
-            .gap_3()
-            .items_center()
-            .child(div().w(px(130.)).child(label))
-            .child(body)
+        h_flex().gap_3().items_center().child(div().w(px(130.)).child(label)).child(body)
     }
 
-    fn toggle(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        on: bool,
-        set: fn(&mut Filters, bool),
-        cx: &mut Context<Self>,
-    ) -> Checkbox {
+    fn toggle(&self, id: &'static str, label: &'static str, on: bool, set: fn(&mut Filters, bool), cx: &mut Context<Self>) -> Checkbox {
         Checkbox::new(id)
             .label(label)
             .checked(on)
@@ -497,29 +443,24 @@ impl FiltersPanel {
     }
 
     fn categories(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .gap_1()
-            .flex_wrap()
-            .children(Category::ALL.map(|category| {
-                let on = self.form.categories.value.contains(&category);
-                let button = Button::new(("category", category as usize))
-                    .label(category.name())
-                    .small();
-                let button = if on { button.primary() } else { button.ghost() };
-                button.on_click(cx.listener(move |this, _, _, cx| {
-                    this.edit(cx, |f| {
-                        let list = &mut f.categories.value;
-                        if on {
-                            list.retain(|&c| c != category);
-                        } else {
-                            list.push(category);
-                            // Keep the written order stable whatever order they were picked in.
-                            list.sort_by_key(|c| Category::ALL.iter().position(|a| a == c));
-                        }
-                        f.categories.on = true;
-                    });
-                }))
+        h_flex().gap_1().flex_wrap().children(Category::ALL.map(|category| {
+            let on = self.form.categories.value.contains(&category);
+            let button = Button::new(("category", category as usize)).label(category.name()).small();
+            let button = if on { button.primary() } else { button.ghost() };
+            button.on_click(cx.listener(move |this, _, _, cx| {
+                this.edit(cx, |f| {
+                    let list = &mut f.categories.value;
+                    if on {
+                        list.retain(|&c| c != category);
+                    } else {
+                        list.push(category);
+                        // Keep the written order stable whatever order they were picked in.
+                        list.sort_by_key(|c| Category::ALL.iter().position(|a| a == c));
+                    }
+                    f.categories.on = true;
+                });
             }))
+        }))
     }
 
     fn bound(
@@ -538,21 +479,11 @@ impl FiltersPanel {
             .child(label)
             .child(div().w(px(90.)).child(Input::new(input)))
             .children(Unit::ALL.map(|unit| {
-                let button = Button::new((id, unit as usize))
-                    .label(unit.label())
-                    .xsmall();
-                let button = if bound.unit == unit {
-                    button.primary()
-                } else {
-                    button.ghost()
-                };
+                let button = Button::new((id, unit as usize)).label(unit.label()).xsmall();
+                let button = if bound.unit == unit { button.primary() } else { button.ghost() };
                 button.on_click(cx.listener(move |this, _, _, cx| {
                     this.edit(cx, |f| {
-                        let b = if max {
-                            &mut f.size.value.1
-                        } else {
-                            &mut f.size.value.0
-                        };
+                        let b = if max { &mut f.size.value.1 } else { &mut f.size.value.0 };
                         b.unit = unit;
                         f.size.on = true;
                     });
@@ -572,12 +503,7 @@ impl FiltersPanel {
             ("This year", (today.with_ordinal(1), None)),
             (
                 "Older than a year",
-                (
-                    None,
-                    today
-                        .with_year(today.year() - 1)
-                        .or(Some(today - Duration::days(365))),
-                ),
+                (None, today.with_year(today.year() - 1).or(Some(today - Duration::days(365)))),
             ),
         ];
         // The picker can only print a closed range; an open-ended one is shown as its placeholder.
@@ -598,17 +524,13 @@ impl FiltersPanel {
                             .label(label)
                             .ghost()
                             .small()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.set_dates(range, window, cx)
-                            }))
+                            .on_click(cx.listener(move |this, _, window, cx| this.set_dates(range, window, cx)))
                     })),
             )
             .child(
-                div().w(px(320.)).child(
-                    DatePicker::new(&self.dates)
-                        .cleanable(true)
-                        .placeholder(placeholder),
-                ),
+                div()
+                    .w(px(320.))
+                    .child(DatePicker::new(&self.dates).cleanable(true).placeholder(placeholder)),
             )
     }
 }
@@ -626,61 +548,28 @@ impl Render for FiltersPanel {
             .flex_col()
             .gap_3()
             .child(Self::row(
-                self.toggle(
-                    "on-name",
-                    "Name contains",
-                    f.name.on,
-                    |f, on| f.name.on = on,
-                    cx,
-                ),
-                v_flex()
-                    .gap_1()
-                    .child(wide(&self.name))
-                    .when(f.name_has_query_syntax(), |c| {
-                        c.child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child("Some terms are only editable as text."),
-                        )
-                    }),
+                self.toggle("on-name", "Name contains", f.name.on, |f, on| f.name.on = on, cx),
+                v_flex().gap_1().child(wide(&self.name)).when(f.name_has_query_syntax(), |c| {
+                    c.child(div().text_xs().text_color(muted).child("Some terms are only editable as text."))
+                }),
             ))
             .child(Self::row(
                 self.toggle("on-ext", "Extensions", f.ext.on, |f, on| f.ext.on = on, cx),
                 wide(&self.ext),
             ))
             .child(Self::row(
-                self.toggle(
-                    "on-type",
-                    "Category",
-                    f.categories.on,
-                    |f, on| f.categories.on = on,
-                    cx,
-                ),
+                self.toggle("on-type", "Category", f.categories.on, |f, on| f.categories.on = on, cx),
                 self.categories(cx),
             ))
             .child(Self::row(
                 self.toggle("on-size", "Size", f.size.on, |f, on| f.size.on = on, cx),
                 v_flex()
                     .gap_1()
-                    .child(self.bound(
-                        "at least",
-                        "min-unit",
-                        &self.min,
-                        &f.size.value.0,
-                        false,
-                        cx,
-                    ))
+                    .child(self.bound("at least", "min-unit", &self.min, &f.size.value.0, false, cx))
                     .child(self.bound("at most", "max-unit", &self.max, &f.size.value.1, true, cx)),
             ))
             .child(Self::row(
-                self.toggle(
-                    "on-dm",
-                    "Modified",
-                    f.modified.on,
-                    |f, on| f.modified.on = on,
-                    cx,
-                ),
+                self.toggle("on-dm", "Modified", f.modified.on, |f, on| f.modified.on = on, cx),
                 self.dates(cx),
             ))
             .child(Self::row(
@@ -702,10 +591,7 @@ mod tests {
         let form = Filters::read(text);
         assert_eq!(form.name.value, "holiday");
         assert_eq!(form.ext.value, "mp4;mkv");
-        assert_eq!(
-            form.categories.value,
-            vec![Category::Video, Category::Audio]
-        );
+        assert_eq!(form.categories.value, vec![Category::Video, Category::Audio]);
         assert_eq!(
             form.size.value.0,
             Bound {
@@ -732,16 +618,10 @@ mod tests {
         let text = r#"!*.tmp ext:mp4|type:video size:>1gb "a b" ext:jpg ext:png"#;
         let form = Filters::read(text);
         // A negation, a mixed OR, a strict comparison and the second ext: are left as typed.
-        assert_eq!(
-            form.name.value,
-            r#"!*.tmp ext:mp4|type:video size:>1gb "a b" ext:png"#
-        );
+        assert_eq!(form.name.value, r#"!*.tmp ext:mp4|type:video size:>1gb "a b" ext:png"#);
         assert_eq!(form.ext.value, "jpg");
         assert!(form.name_has_query_syntax());
-        assert_eq!(
-            form.write(),
-            r#"!*.tmp ext:mp4|type:video size:>1gb "a b" ext:png ext:jpg"#
-        );
+        assert_eq!(form.write(), r#"!*.tmp ext:mp4|type:video size:>1gb "a b" ext:png ext:jpg"#);
     }
 
     #[test]

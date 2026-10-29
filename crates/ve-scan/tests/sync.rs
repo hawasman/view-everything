@@ -50,10 +50,7 @@ fn first_sync_indexes_every_entry_with_its_sizes() {
     let (index, volume) = scan(dir.path());
     let index = index.read();
     let entries = snapshot(&index, volume);
-    let summary: Vec<(&str, bool, u64)> = entries
-        .iter()
-        .map(|(p, e)| (p.as_str(), e.0, e.1))
-        .collect();
+    let summary: Vec<(&str, bool, u64)> = entries.iter().map(|(p, e)| (p.as_str(), e.0, e.1)).collect();
     assert_eq!(
         summary,
         [
@@ -63,10 +60,7 @@ fn first_sync_indexes_every_entry_with_its_sizes() {
             ("/sub/empty", true, 0)
         ]
     );
-    assert!(
-        entries["/sub/b.bin"].2 >= 10_000,
-        "On-disk Size covers the data"
-    );
+    assert!(entries["/sub/b.bin"].2 >= 10_000, "On-disk Size covers the data");
     let totals = root_totals(&index, volume);
     assert_eq!((totals.logical, totals.files), (10_005, 2));
 }
@@ -76,11 +70,7 @@ fn a_hard_linked_file_counts_once() {
     let dir = tempfile::tempdir().unwrap();
     write(&dir.path().join("one/data.bin"), 4096);
     fs::create_dir_all(dir.path().join("two")).unwrap();
-    fs::hard_link(
-        dir.path().join("one/data.bin"),
-        dir.path().join("two/link.bin"),
-    )
-    .unwrap();
+    fs::hard_link(dir.path().join("one/data.bin"), dir.path().join("two/link.bin")).unwrap();
 
     let (index, volume) = scan(dir.path());
     let index = index.read();
@@ -109,10 +99,7 @@ fn change_everything(root: &Path) {
     write(&root.join("new/added.txt"), 7);
     fs::remove_dir_all(root.join("doomed")).unwrap();
     // Appending changes a file without touching its folder's modification time.
-    let mut grown = fs::OpenOptions::new()
-        .append(true)
-        .open(root.join("keep/grows.log"))
-        .unwrap();
+    let mut grown = fs::OpenOptions::new().append(true).open(root.join("keep/grows.log")).unwrap();
     std::io::Write::write_all(&mut grown, &[b'y'; 3000]).unwrap();
     fs::rename(root.join("old-name"), root.join("keep/new-name")).unwrap();
     fs::remove_file(root.join("becomes-dir")).unwrap();
@@ -136,14 +123,8 @@ fn catch_up_brings_the_index_level_with_a_fresh_scan() {
     ve_scan::sync(&index, volume, &Progress::default()).unwrap();
 
     let (fresh, fresh_volume) = scan(dir.path());
-    assert_eq!(
-        snapshot(&index.read(), volume),
-        snapshot(&fresh.read(), fresh_volume)
-    );
-    assert_eq!(
-        root_totals(&index.read(), volume),
-        root_totals(&fresh.read(), fresh_volume)
-    );
+    assert_eq!(snapshot(&index.read(), volume), snapshot(&fresh.read(), fresh_volume));
+    assert_eq!(root_totals(&index.read(), volume), root_totals(&fresh.read(), fresh_volume));
 }
 
 #[test]
@@ -160,10 +141,7 @@ fn catch_up_works_on_an_index_saved_and_loaded_from_disk() {
     ve_scan::sync(&loaded, volume, &Progress::default()).unwrap();
 
     let (fresh, fresh_volume) = scan(dir.path());
-    assert_eq!(
-        snapshot(&loaded.read(), volume),
-        snapshot(&fresh.read(), fresh_volume)
-    );
+    assert_eq!(snapshot(&loaded.read(), volume), snapshot(&fresh.read(), fresh_volume));
 }
 
 #[test]
@@ -185,8 +163,5 @@ fn unreadable_folders_are_kept_and_counted() {
     fs::set_permissions(dir.path().join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
 
     assert_eq!(progress.unreadable(), 1);
-    assert_eq!(
-        snapshot(&index.read(), volume).keys().collect::<Vec<_>>(),
-        ["/locked"]
-    );
+    assert_eq!(snapshot(&index.read(), volume).keys().collect::<Vec<_>>(), ["/locked"]);
 }

@@ -128,12 +128,7 @@ impl Settings {
     /// opt-in (removable or a mounted network share), not indexed, not declined, and not
     /// already in the Index (`in_index`, by identity: a returning Offline Volume catches up on
     /// its own).
-    pub fn index_offers(
-        &self,
-        before: &[VolumeInfo],
-        now: &[VolumeInfo],
-        in_index: impl Fn(&str) -> bool,
-    ) -> Vec<VolumeInfo> {
+    pub fn index_offers(&self, before: &[VolumeInfo], now: &[VolumeInfo], in_index: impl Fn(&str) -> bool) -> Vec<VolumeInfo> {
         now.iter()
             .filter(|v| v.opt_in() && !self.is_indexed(v))
             .filter(|v| !before.iter().any(|b| b.identity == v.identity))
@@ -154,13 +149,16 @@ impl Settings {
 
     /// The refresh interval of `volume`, in minutes.
     pub fn refresh_minutes_for(&self, volume: &VolumeInfo) -> u64 {
-        self.volume_refresh_minutes
-            .iter()
-            .find(|(k, _)| names(k, volume))
-            .map_or_else(
-                || if volume.network { NETWORK_REFRESH_MINUTES } else { self.refresh_minutes },
-                |(_, m)| *m,
-            )
+        self.volume_refresh_minutes.iter().find(|(k, _)| names(k, volume)).map_or_else(
+            || {
+                if volume.network {
+                    NETWORK_REFRESH_MINUTES
+                } else {
+                    self.refresh_minutes
+                }
+            },
+            |(_, m)| *m,
+        )
     }
 
     /// Adds a Remote (the same one twice is one). Returns whether it was new.
@@ -190,11 +188,21 @@ impl Settings {
     /// The refresh interval of each of `volumes`, and of each Remote, by mount point.
     pub fn intervals(&self, volumes: &[VolumeInfo]) -> HashMap<PathBuf, Duration> {
         // ponytail: Manual (0) is an interval too long to ever come due.
-        let every = |minutes: u64| if minutes == 0 { MANUAL_REFRESH } else { Duration::from_secs(minutes * 60) };
+        let every = |minutes: u64| {
+            if minutes == 0 {
+                MANUAL_REFRESH
+            } else {
+                Duration::from_secs(minutes * 60)
+            }
+        };
         volumes
             .iter()
             .map(|v| (v.mount.clone(), every(self.refresh_minutes_for(v))))
-            .chain(self.remotes.iter().map(|r| (PathBuf::from(r.identity()), every(self.remote_refresh_minutes(r)))))
+            .chain(
+                self.remotes
+                    .iter()
+                    .map(|r| (PathBuf::from(r.identity()), every(self.remote_refresh_minutes(r)))),
+            )
             .collect()
     }
 
@@ -281,7 +289,10 @@ mod tests {
         s.set_indexed(&nas, true);
         assert!(s.is_indexed(&nas) && s.exclude.is_empty());
         // Mounted elsewhere, it is the same share; its interval ignores the general default.
-        let moved = VolumeInfo { mount: "/media/nas".into(), ..nas.clone() };
+        let moved = VolumeInfo {
+            mount: "/media/nas".into(),
+            ..nas.clone()
+        };
         assert!(s.is_indexed(&moved));
         assert_eq!(s.refresh_minutes_for(&moved), 120);
         assert_eq!(s.refresh_minutes_for(&fixed), 30);
@@ -318,15 +329,29 @@ mod tests {
         s.add_remote(Remote::new("me@box", "/srv").unwrap(), 60);
         s.add_remote(Remote::S3(S3Remote::new("bkt", "", "", "us-east-1", false, "", "").unwrap()), 0);
         let text = toml::to_string(&s).unwrap();
-        assert!(!text.to_lowercase().contains("password") && !text.to_lowercase().contains("secret"), "{text}");
-        for field in ["host = \"ftp.example.com\"", "port = 2121", "user = \"me\"", "path = \"/pub\"", "tls = \"plain\""] {
+        assert!(
+            !text.to_lowercase().contains("password") && !text.to_lowercase().contains("secret"),
+            "{text}"
+        );
+        for field in [
+            "host = \"ftp.example.com\"",
+            "port = 2121",
+            "user = \"me\"",
+            "path = \"/pub\"",
+            "tls = \"plain\"",
+        ] {
             assert!(text.contains(field), "{field} in {text}");
         }
         let back: Settings = toml::from_str(&text).unwrap();
         assert_eq!(back.remotes, s.remotes, "each Remote comes back as the kind it was");
         // TLS mode is Explicit unless the file says otherwise.
         let file: Settings = toml::from_str("[[remotes]]\nhost = \"h\"\nport = 21\nuser = \"u\"\npath = \"/\"\n").unwrap();
-        assert_eq!(file.remotes, [Remote::Ftp(ve_core::FtpRemote::new("h", 21, "u", "/", ve_core::FtpTls::Explicit).unwrap())]);
+        assert_eq!(
+            file.remotes,
+            [Remote::Ftp(
+                ve_core::FtpRemote::new("h", 21, "u", "/", ve_core::FtpTls::Explicit).unwrap()
+            )]
+        );
         assert_eq!(s.remote_refresh_minutes(&ftp), 0);
     }
 
@@ -336,7 +361,10 @@ mod tests {
         s.add_remote(Remote::S3(S3Remote::new("b", "", "", "us-east-1", false, "work", "").unwrap()), 0);
         s.add_remote(Remote::S3(S3Remote::new("b", "", "", "us-east-1", false, "", "AKIA").unwrap()), 60);
         assert_eq!(s.remotes.len(), 1);
-        assert_eq!(s.remotes[0], Remote::S3(S3Remote::new("b", "", "", "us-east-1", false, "", "AKIA").unwrap()));
+        assert_eq!(
+            s.remotes[0],
+            Remote::S3(S3Remote::new("b", "", "", "us-east-1", false, "", "AKIA").unwrap())
+        );
     }
 
     #[test]
@@ -403,9 +431,7 @@ mod tests {
     fn a_new_removable_volume_is_offered_until_the_user_says_not_now() {
         let (usb, disk) = (volume("/mnt/usb", true), volume("/mnt/data", false));
         let mut s = Settings::default();
-        let offers = |s: &Settings, before: &[VolumeInfo], known: bool| {
-            s.index_offers(before, &[usb.clone(), disk.clone()], |_| known)
-        };
+        let offers = |s: &Settings, before: &[VolumeInfo], known: bool| s.index_offers(before, &[usb.clone(), disk.clone()], |_| known);
         // Newly mounted, never seen: offered. A fixed Volume is indexed already, never offered.
         assert_eq!(offers(&s, &[], false), vec![usb.clone()]);
         // Already mounted before this change, or already in the Index (returning): no prompt.
@@ -415,7 +441,10 @@ mod tests {
         s.decline(&usb);
         let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
         assert!(offers(&back, &[], false).is_empty());
-        let moved = VolumeInfo { mount: "/run/media/usb".into(), ..usb.clone() };
+        let moved = VolumeInfo {
+            mount: "/run/media/usb".into(),
+            ..usb.clone()
+        };
         assert!(back.index_offers(&[], &[moved], |_| false).is_empty());
         // Accepting later (Settings tick) clears the answer; Forget drops it too.
         s.set_indexed(&usb, true);
@@ -434,17 +463,33 @@ mod tests {
         let home = dirs::home_dir().expect("a home folder").display().to_string();
         let holds = |path: &str| {
             let name = path.rsplit('/').next().unwrap();
-            query.matches(&Candidate { name, path: Some(path), is_dir: false, logical: 0, modified: 0 })
+            query.matches(&Candidate {
+                name,
+                path: Some(path),
+                is_dir: false,
+                logical: 0,
+                modified: 0,
+            })
         };
         assert!(holds(&format!("{home}/Documents/a.pdf")));
         assert!(!holds(&format!("{home}/.cache/a.pdf")));
         assert!(!holds(&format!("{home}/Projects/.git/config")));
         assert!(!holds("/var/lib/other/a.pdf"));
         // An edited Query is saved with the settings and read back.
-        let edited = Settings { recent_query: Some("type:video".into()), ..default };
+        let edited = Settings {
+            recent_query: Some("type:video".into()),
+            ..default
+        };
         let back: Settings = toml::from_str(&toml::to_string_pretty(&edited).unwrap()).unwrap();
         assert_eq!(back.recent_query_text(), "type:video");
         // A blank one means the default again.
-        assert_eq!(Settings { recent_query: Some("  ".into()), ..back }.recent_query_text(), default_recent_query());
+        assert_eq!(
+            Settings {
+                recent_query: Some("  ".into()),
+                ..back
+            }
+            .recent_query_text(),
+            default_recent_query()
+        );
     }
 }

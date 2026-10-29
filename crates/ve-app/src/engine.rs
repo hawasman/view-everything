@@ -232,9 +232,7 @@ fn run_indexer(
         match Index::load(path) {
             Ok(index) => *shared.index.write() = index,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => shared.report("save", format!(
-                "The saved Index could not be used ({e}); building a new one"
-            )),
+            Err(e) => shared.report("save", format!("The saved Index could not be used ({e}); building a new one")),
         }
     }
     (shared.repaint)();
@@ -279,11 +277,7 @@ fn run_indexer(
             .collect();
         let timeout = {
             let wait = next_wait(&shared.index.read(), &intervals, now_secs());
-            if journaled.is_empty() {
-                wait
-            } else {
-                JOURNAL_POLL.min(wait)
-            }
+            if journaled.is_empty() { wait } else { JOURNAL_POLL.min(wait) }
         };
         quiet = false;
         match commands.recv_timeout(timeout) {
@@ -317,15 +311,7 @@ fn run_indexer(
                 let index = shared.index.read();
                 pending.retain(|&id| index.volume(id).is_some());
             }
-            Ok(Command::Refresh) => {
-                pending = shared
-                    .index
-                    .read()
-                    .volumes()
-                    .filter(|(_, v)| v.online)
-                    .map(|(id, _)| id)
-                    .collect()
-            }
+            Ok(Command::Refresh) => pending = shared.index.read().volumes().filter(|(_, v)| v.online).map(|(id, _)| id).collect(),
             Ok(Command::SetIntervals(new)) => {
                 intervals = new;
                 pending = Vec::new();
@@ -336,10 +322,7 @@ fn run_indexer(
             }
             Err(RecvTimeoutError::Timeout) => {
                 pending = stale_volumes(&shared.index.read(), &intervals, now_secs());
-                pending.retain(|id| {
-                    journaled.contains(id)
-                        || last_attempt.get(id).is_none_or(|t| t.elapsed() >= MIN_WAIT)
-                });
+                pending.retain(|id| journaled.contains(id) || last_attempt.get(id).is_none_or(|t| t.elapsed() >= MIN_WAIT));
                 quiet = pending.iter().all(|id| journaled.contains(id));
             }
         }
@@ -417,7 +400,10 @@ fn reconcile_volumes(shared: &Shared, mounted: &[VolumeInfo], wanted: &[VolumeIn
     let (mut added, failed) = ve_scan::reconcile(&shared.index, mounted, wanted);
     added.extend(ve_scan::reconcile_remotes(&shared.index, remotes));
     for (mount, e) in failed {
-        shared.report(format!("volume {}", mount.display()), format!("Cannot index {}: {e}", mount.display()));
+        shared.report(
+            format!("volume {}", mount.display()),
+            format!("Cannot index {}: {e}", mount.display()),
+        );
     }
     for &id in &added {
         let mount = shared.index.read().volume(id).map(|v| v.mount.clone());
@@ -484,11 +470,8 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
                             };
                             shared.index.write().mark_synced(*id, started, capacity);
                         }
-                        Err(e) if remote => {
-                            shared.report(cause, format!("Could not refresh {}: {e}", mount.display()))
-                        }
-                        Err(e) => shared
-                            .report(cause, format!("Could not read {}: {e}", mount.display())),
+                        Err(e) if remote => shared.report(cause, format!("Could not refresh {}: {e}", mount.display())),
+                        Err(e) => shared.report(cause, format!("Could not read {}: {e}", mount.display())),
                     }
                 });
             }
@@ -498,12 +481,7 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
 }
 
 /// Saves the Index if an Entry changed since the last save, or always when `force`.
-fn save_if_changed(
-    shared: &Shared,
-    path: Option<&Path>,
-    saved_generation: &mut u64,
-    force: bool,
-) {
+fn save_if_changed(shared: &Shared, path: Option<&Path>, saved_generation: &mut u64, force: bool) {
     let Some(path) = path else { return };
     let _saving = shared.saving.lock();
     let index = shared.index.read();
@@ -515,10 +493,7 @@ fn save_if_changed(
             *saved_generation = index.generation();
             shared.resolve("save");
         }
-        Err(e) => shared.report("save", format!(
-            "Could not save the Index to {}: {e}",
-            path.display()
-        )),
+        Err(e) => shared.report("save", format!("Could not save the Index to {}: {e}", path.display())),
     }
 }
 
@@ -534,8 +509,7 @@ fn run_viewer(shared: &Shared, queries: &Receiver<String>, categories: &Category
                 let parsed = if text.trim().is_empty() {
                     Ok(None)
                 } else {
-                    Query::parse(&text, &QueryContext::new(categories.clone(), Local::now()))
-                        .map(Some)
+                    Query::parse(&text, &QueryContext::new(categories.clone(), Local::now())).map(Some)
                 };
                 match parsed {
                     Ok(parsed) => {
@@ -556,9 +530,7 @@ fn run_viewer(shared: &Shared, queries: &Receiver<String>, categories: &Category
             continue;
         }
         let generation = shared.index.read().generation();
-        let up_to_date = computed
-            .as_ref()
-            .is_some_and(|(t, g)| *t == text && *g == generation);
+        let up_to_date = computed.as_ref().is_some_and(|(t, g)| *t == text && *g == generation);
         let only_index_moved = computed.as_ref().is_some_and(|(t, _)| *t == text);
         if up_to_date || (only_index_moved && last_compute.elapsed() < VIEW_THROTTLE) {
             continue;
@@ -596,7 +568,10 @@ mod tests {
 
     fn index_with_volumes(synced: &[Option<i64>]) -> Index {
         let mut index = Index::new();
-        let root = ve_core::EntryMeta { is_dir: true, ..Default::default() };
+        let root = ve_core::EntryMeta {
+            is_dir: true,
+            ..Default::default()
+        };
         for (i, at) in synced.iter().enumerate() {
             let id = index.add_volume(Path::new(&format!("/v{i}")), "ext4", &format!("v{i}"), root, SyncState::Walk);
             if let Some(at) = at {
@@ -636,7 +611,11 @@ mod tests {
         let remote = Remote::new("me@box", "/srv").unwrap();
         let id = index.add_remote(&remote);
         let root = index.volume(id).unwrap().root;
-        let file = ve_core::EntryMeta { logical: 10, on_disk: 4096, ..Default::default() };
+        let file = ve_core::EntryMeta {
+            logical: 10,
+            on_disk: 4096,
+            ..Default::default()
+        };
         let hit = index.insert(root, "quarterly-report.pdf", file);
         let categories = CategoryMap::builtin();
         let query = Query::parse("report", &QueryContext::new(categories.clone(), Local::now())).unwrap();
@@ -646,7 +625,9 @@ mod tests {
         // Never synced, Manual: launch Catch-up leaves it alone; with an interval it is due.
         let manual: Intervals = [(PathBuf::from(remote.identity()), ve_core::MANUAL_REFRESH)].into_iter().collect();
         assert!(!stale_volumes(&index, &manual, 100_000).contains(&id));
-        let hourly: Intervals = [(PathBuf::from(remote.identity()), Duration::from_secs(3600))].into_iter().collect();
+        let hourly: Intervals = [(PathBuf::from(remote.identity()), Duration::from_secs(3600))]
+            .into_iter()
+            .collect();
         assert!(stale_volumes(&index, &hourly, 100_000).contains(&id));
     }
 

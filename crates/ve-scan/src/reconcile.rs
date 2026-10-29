@@ -13,18 +13,11 @@ use ve_core::VolumeId;
 /// is mounted but no longer wanted is removed. Returns the Volumes newly added, and those that
 /// could not be added. The first list is every Volume to sync now: the new ones, and the ones
 /// that came back online (a remount may follow changes made elsewhere, so it catches up).
-pub fn reconcile(
-    index: &SharedIndex,
-    mounted: &[VolumeInfo],
-    wanted: &[VolumeInfo],
-) -> (Vec<VolumeId>, Vec<(PathBuf, io::Error)>) {
+pub fn reconcile(index: &SharedIndex, mounted: &[VolumeInfo], wanted: &[VolumeInfo]) -> (Vec<VolumeId>, Vec<(PathBuf, io::Error)>) {
     let (mut added, mut failed) = (Vec::new(), Vec::new());
     {
         let mut index = index.write();
-        let known: Vec<(VolumeId, String)> = index
-            .volumes()
-            .map(|(id, v)| (id, v.identity.clone()))
-            .collect();
+        let known: Vec<(VolumeId, String)> = index.volumes().map(|(id, v)| (id, v.identity.clone())).collect();
         for (id, identity) in known {
             // Remotes are not mounted; `reconcile_remotes` looks after them.
             if index.volume(id).is_some_and(|v| v.is_remote()) {

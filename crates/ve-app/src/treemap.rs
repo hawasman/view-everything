@@ -107,13 +107,7 @@ impl Layouter {
                             x1: request.size.0,
                             y1: request.size.1,
                         };
-                        layout(
-                            &index,
-                            &request.view.filter,
-                            &categories,
-                            request.root,
-                            area,
-                        )
+                        layout(&index, &request.view.filter, &categories, request.root, area)
                     };
                     if outbox.send((key, tiles)).is_err() {
                         return;
@@ -144,22 +138,12 @@ impl Layouter {
 }
 
 fn key_of(view: &View, root: EntryId, size: (f32, f32)) -> LayoutKey {
-    (
-        view.id,
-        root,
-        [size.0.round() as i32, size.1.round() as i32],
-    )
+    (view.id, root, [size.0.round() as i32, size.1.round() as i32])
 }
 
 /// Tiles for `root` laid out in `rect`. Folders are subdivided largest first, so when the tile
 /// budget runs out the detail missing is in the smallest folders.
-fn layout(
-    index: &Index,
-    filter: &Filter,
-    categories: &CategoryMap,
-    root: EntryId,
-    rect: Rect,
-) -> Vec<Tile> {
+fn layout(index: &Index, filter: &Filter, categories: &CategoryMap, root: EntryId, rect: Rect) -> Vec<Tile> {
     let mut tiles: Vec<Tile> = Vec::new();
     // A folder to subdivide: the folder, its area and the tile that stands for it.
     let mut folders = vec![(root, rect, None::<usize>)];
@@ -213,12 +197,7 @@ fn layout(
 const SAMPLE: usize = 200;
 
 /// The Category with the most On-disk Size among the first files found under `dir`.
-pub fn dominant_category(
-    index: &Index,
-    filter: &Filter,
-    categories: &CategoryMap,
-    dir: EntryId,
-) -> Category {
+pub fn dominant_category(index: &Index, filter: &Filter, categories: &CategoryMap, dir: EntryId) -> Category {
     let mut bytes = [0u64; Category::ALL.len()];
     let mut stack = vec![dir];
     let mut seen = 0;
@@ -310,9 +289,7 @@ fn squarify<T: Copy>(items: &[(f64, T)], area: Rect) -> Vec<(Rect, T)> {
 /// The largest aspect ratio in a row of `areas` laid along a side of length `side`.
 fn worst_ratio(areas: &[f64], side: f64) -> f64 {
     let sum: f64 = areas.iter().sum();
-    let (min, max) = areas
-        .iter()
-        .fold((f64::MAX, 0.0f64), |(lo, hi), &a| (lo.min(a), hi.max(a)));
+    let (min, max) = areas.iter().fold((f64::MAX, 0.0f64), |(lo, hi), &a| (lo.min(a), hi.max(a)));
     let side2 = side * side;
     let sum2 = sum * sum;
     (side2 * max / sum2).max(sum2 / (side2 * min))
@@ -329,11 +306,7 @@ fn hit(tiles: &[Tile], x: f32, y: f32) -> Option<&Tile> {
 }
 
 fn folder_of(index: &Index, id: EntryId) -> Option<EntryId> {
-    if index.is_dir(id) {
-        Some(id)
-    } else {
-        index.parent(id)
-    }
+    if index.is_dir(id) { Some(id) } else { index.parent(id) }
 }
 
 /// What a click on the Treemap asks of the rest of the Explorer.
@@ -392,8 +365,7 @@ impl Treemap {
 
     /// The folder shown: the View's focus, else the Volume with the most Filtered Size.
     fn root(&self, index: &Index, view: &View) -> Option<EntryId> {
-        let usable =
-            |id: EntryId| index.is_live(id) && index.is_dir(id) && view.filter.is_shown(id);
+        let usable = |id: EntryId| index.is_live(id) && index.is_dir(id) && view.filter.is_shown(id);
         view.focus.filter(|&id| usable(id)).or_else(|| {
             index
                 .volumes()
@@ -481,7 +453,14 @@ impl Treemap {
                 .when(!last, |d| d.min_w_0().truncate().text_color(muted))
                 .child(label)
         };
-        let mut row = h_flex().gap(px(6.)).items_center().min_w_0().overflow_hidden().text_xs().text_color(muted).mb(px(12.));
+        let mut row = h_flex()
+            .gap(px(6.))
+            .items_center()
+            .min_w_0()
+            .overflow_hidden()
+            .text_xs()
+            .text_color(muted)
+            .mb(px(12.));
         row = row.child(
             crumb("Index".into(), false)
                 .flex_none()
@@ -505,7 +484,12 @@ impl Treemap {
             .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child("Treemap"))
             .child(caption("Filtered Size · double-click a folder to zoom", cx));
         v_flex().child(title).child(
-            row.child(div().flex_none().ml(px(6.)).child(format::size(view.filter.totals(index, root).on_disk))),
+            row.child(
+                div()
+                    .flex_none()
+                    .ml(px(6.))
+                    .child(format::size(view.filter.totals(index, root).on_disk)),
+            ),
         )
     }
 
@@ -516,7 +500,13 @@ impl Treemap {
         for tile in self.tiles.iter().filter(|t| !t.subdivided) {
             seen[tile.category as usize] = true;
         }
-        let mut row = h_flex().flex_wrap().gap_x(px(14.)).gap_y(px(4.)).mt(px(12.)).text_xs().text_color(p.muted);
+        let mut row = h_flex()
+            .flex_wrap()
+            .gap_x(px(14.))
+            .gap_y(px(4.))
+            .mt(px(12.))
+            .text_xs()
+            .text_color(p.muted);
         for category in Category::ALL.into_iter().filter(|c| seen[*c as usize]) {
             row = row.child(
                 h_flex()
@@ -536,7 +526,11 @@ impl Treemap {
         let first = if index.is_dir(id) {
             format!("{} on disk · {} files", format::size(totals.on_disk), format::count(totals.files))
         } else {
-            format!("{} on disk · {}", format::size(totals.on_disk), self.categories.of_name(index.name(id)).name())
+            format!(
+                "{} on disk · {}",
+                format::size(totals.on_disk),
+                self.categories.of_name(index.name(id)).name()
+            )
         };
         let second = format!(
             "{} size · {:.1}%",
@@ -599,19 +593,18 @@ impl Render for Treemap {
         let surface = canvas(
             move |b, _, _| bounds.set(b),
             move |b, _, window, _| {
-                let at = |r: Rect| {
-                    Bounds::new(
-                        b.origin + point(px(r.x0), px(r.y0)),
-                        size(px(r.width()), px(r.height())),
-                    )
-                };
+                let at = |r: Rect| Bounds::new(b.origin + point(px(r.x0), px(r.y0)), size(px(r.width()), px(r.height())));
                 for tile in tiles.iter() {
                     // Folders that are subdivided show only through the gaps between their
                     // children, so they take the panel's own colour.
                     let fill = if tile.subdivided { free } else { cats[tile.category as usize] };
                     // 1px seams in the panel colour separate tiles; tiny ones have no room.
                     let big = tile.rect.width() > 3.0 && tile.rect.height() > 3.0;
-                    let radius = if big && !tile.subdivided && tile.rect.width() > 40.0 && tile.rect.height() > 40.0 { 4. } else { 0. };
+                    let radius = if big && !tile.subdivided && tile.rect.width() > 40.0 && tile.rect.height() > 40.0 {
+                        4.
+                    } else {
+                        0.
+                    };
                     window.paint_quad(quad(
                         at(tile.rect),
                         radius,
@@ -631,7 +624,11 @@ impl Render for Treemap {
 
         // Names and sizes on the tiles that have room for them, largest first.
         let mut labels = Vec::new();
-        for tile in self.tiles.iter().filter(|t| !t.subdivided && t.rect.width() > 70.0 && t.rect.height() > 40.0) {
+        for tile in self
+            .tiles
+            .iter()
+            .filter(|t| !t.subdivided && t.rect.width() > 70.0 && t.rect.height() > 40.0)
+        {
             if labels.len() >= 60 || !index.is_live(tile.id) {
                 continue;
             }

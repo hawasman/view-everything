@@ -1,18 +1,14 @@
 //! Small building blocks of the final design: tonal panels, pill controls, tags.
 
 use crate::theme::{RADIUS_CARD, palette};
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::h_flex;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 /// A tonal panel (`.panel`): surface fill, 22px radius, 20px padding.
 pub fn panel(cx: &App) -> Div {
-    div()
-        .bg(palette(cx).surface)
-        .rounded(px(RADIUS_CARD))
-        .p(px(20.))
-        .min_w_0()
+    div().bg(palette(cx).surface).rounded(px(RADIUS_CARD)).p(px(20.)).min_w_0()
 }
 
 /// A muted caption (12px).
@@ -73,11 +69,7 @@ impl Pill {
         self
     }
 
-    pub fn build(
-        self,
-        cx: &App,
-        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> Stateful<Div> {
+    pub fn build(self, cx: &App, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Stateful<Div> {
         let p = palette(cx);
         let (text, control, on_primary, primary) = (p.text, p.control, p.on_primary, p.primary);
         let muted = p.muted;
@@ -104,14 +96,8 @@ impl Pill {
             .font_weight(FontWeight::MEDIUM)
             .whitespace_nowrap()
             .when(off, |d| d.border_dashed())
-            .when(!off, |d| {
-                d.cursor_pointer()
-                    .hover(move |s| s.border_color(text))
-                    .on_click(on_click)
-            })
-            .when_some(self.icon, |d, path| {
-                d.child(svg().path(path).size(px(14.)).text_color(ink))
-            })
+            .when(!off, |d| d.cursor_pointer().hover(move |s| s.border_color(text)).on_click(on_click))
+            .when_some(self.icon, |d, path| d.child(svg().path(path).size(px(14.)).text_color(ink)))
             .child(self.label);
         if let Some(key) = self.kbd {
             el = el.child(

@@ -1,18 +1,18 @@
 //! The Settings page: which Volumes are indexed, how often they are re-read, and the theme.
 
+use crate::engine::{Intervals, last_synced_label};
 use crate::settings::{Settings, ThemeChoice};
 use crate::theme::{self, SERIF_FAMILY, palette};
-use crate::ui::{caption, panel, pill, tag, Tone};
-use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::Sizable as _;
-use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
+use crate::ui::{Tone, caption, panel, pill, tag};
 use gpui_kit::component::IndexPath;
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use crate::engine::{Intervals, last_synced_label};
-use gpui_kit::component::notification::Notification;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use ve_core::{FtpRemote, FtpTls, Remote, S3Remote};
@@ -63,14 +63,34 @@ struct S3Form {
 impl S3Form {
     fn new(window: &mut Window, cx: &mut Context<SettingsPage>) -> Self {
         let mut input = |hint: &'static str| cx.new(|cx| InputState::new(window, cx).placeholder(hint));
-        let (bucket, prefix, endpoint) = (input("my-bucket"), input("backups/2024 (optional)"), input("https://host:9000 (optional)"));
+        let (bucket, prefix, endpoint) = (
+            input("my-bucket"),
+            input("backups/2024 (optional)"),
+            input("https://host:9000 (optional)"),
+        );
         let (region, profile, key) = (input("us-east-1"), input("default"), input("AKIA..."));
         let secret = cx.new(|cx| InputState::new(window, cx).placeholder("stored in the OS keyring").masked(true));
-        Self { bucket, prefix, endpoint, region, profile, key, secret }
+        Self {
+            bucket,
+            prefix,
+            endpoint,
+            region,
+            profile,
+            key,
+            secret,
+        }
     }
 
     fn all(&self) -> [&Entity<InputState>; 7] {
-        [&self.bucket, &self.prefix, &self.endpoint, &self.region, &self.profile, &self.key, &self.secret]
+        [
+            &self.bucket,
+            &self.prefix,
+            &self.endpoint,
+            &self.region,
+            &self.profile,
+            &self.key,
+            &self.secret,
+        ]
     }
 
     /// The S3 Remote typed in, with its secret stored in the OS keyring. Empty Region and Endpoint
@@ -86,7 +106,15 @@ impl S3Form {
         if endpoint.is_empty() {
             endpoint = defaults.endpoint.unwrap_or_default();
         }
-        let remote = S3Remote::new(&text(&self.bucket), &text(&self.prefix), &endpoint, &region, path_style, &profile, &key)?;
+        let remote = S3Remote::new(
+            &text(&self.bucket),
+            &text(&self.prefix),
+            &endpoint,
+            &region,
+            path_style,
+            &profile,
+            &key,
+        )?;
         match (key.is_empty(), secret.is_empty()) {
             (false, true) => return Err("Enter the Secret key that goes with the Access key".into()),
             (true, false) => return Err("Enter the Access key that goes with the Secret key".into()),
@@ -113,7 +141,13 @@ impl FtpForm {
         let mut input = |hint: &'static str| cx.new(|cx| InputState::new(window, cx).placeholder(hint));
         let (host, port, user, path) = (input("ftp.example.com"), input("21"), input("anonymous"), input("/pub (optional)"));
         let password = cx.new(|cx| InputState::new(window, cx).placeholder("stored in the OS keyring").masked(true));
-        Self { host, port, user, password, path }
+        Self {
+            host,
+            port,
+            user,
+            password,
+            path,
+        }
     }
 
     fn all(&self) -> [&Entity<InputState>; 5] {
@@ -185,12 +219,7 @@ impl EventEmitter<Forget> for SettingsPage {}
 impl EventEmitter<Refresh> for SettingsPage {}
 
 impl SettingsPage {
-    pub fn new(
-        settings: Settings,
-        volumes: Vec<VolumeInfo>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(settings: Settings, volumes: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let refresh = Self::refresh_select(settings.refresh_minutes, None, window, cx);
         let volume_refresh = volumes
             .iter()
@@ -289,21 +318,12 @@ impl SettingsPage {
 
     /// Saves the settings and tells the window what to apply.
     fn commit(&mut self, cx: &mut Context<Self>) {
-        self.problem = self
-            .settings
-            .save()
-            .err()
-            .map(|e| format!("Could not save settings: {e}"));
+        self.problem = self.settings.save().err().map(|e| format!("Could not save settings: {e}"));
         self.emit_changed(cx);
     }
 
     fn emit_changed(&mut self, cx: &mut Context<Self>) {
-        let indexed: Vec<VolumeInfo> = self
-            .volumes
-            .iter()
-            .filter(|v| self.settings.is_indexed(v))
-            .cloned()
-            .collect();
+        let indexed: Vec<VolumeInfo> = self.volumes.iter().filter(|v| self.settings.is_indexed(v)).cloned().collect();
         cx.emit(Changed {
             mounted: self.volumes.clone(),
             remotes: self.settings.remotes.clone(),
@@ -482,15 +502,18 @@ impl SettingsPage {
             )
             .child(self.refresh_field(&self.volume_refresh[ix]))
             .child(
-                div().w(px(36.)).flex_none().child(
-                    Switch::new(("volume", ix))
-                        .checked(self.settings.is_indexed(volume))
-                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                            let volume = this.volumes[ix].clone();
-                            this.settings.set_indexed(&volume, *checked);
-                            this.commit(cx);
-                        })),
-                ),
+                div()
+                    .w(px(36.))
+                    .flex_none()
+                    .child(
+                        Switch::new(("volume", ix))
+                            .checked(self.settings.is_indexed(volume))
+                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                                let volume = this.volumes[ix].clone();
+                                this.settings.set_indexed(&volume, *checked);
+                                this.commit(cx);
+                            })),
+                    ),
             )
             // Room for the Forget link of an Offline Volume.
             .child(div().w(px(64.)).flex_none())
@@ -537,23 +560,34 @@ impl SettingsPage {
         let (form, ftp_form) = (self.s3.clone(), self.ftp.clone());
         let page = cx.entity();
         window.open_dialog(cx, move |dialog, _, cx| {
-            let (host, path, every, page, form, ftp_form) =
-                (host.clone(), path.clone(), every.clone(), page.clone(), form.clone(), ftp_form.clone());
+            let (host, path, every, page, form, ftp_form) = (
+                host.clone(),
+                path.clone(),
+                every.clone(),
+                page.clone(),
+                form.clone(),
+                ftp_form.clone(),
+            );
             let (shown_tab, path_style, plain) = page.read_with(cx, |p, _| (p.remote_tab, p.s3_path_style, p.ftp_plain));
             let p = palette(cx);
             let (surface, ground, border, muted, text) = (p.surface, p.ground, p.border, p.muted, p.text);
             let field = |label: &'static str, input: &Entity<InputState>| {
-                v_flex().flex_1().min_w_0().gap(px(8.)).child(div().font_weight(FontWeight::MEDIUM).child(label)).child(
-                    h_flex()
-                        .h(px(38.))
-                        .px(px(6.))
-                        .items_center()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(p.control)
-                        .bg(ground)
-                        .child(Input::new(input).appearance(false).bordered(false)),
-                )
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(8.))
+                    .child(div().font_weight(FontWeight::MEDIUM).child(label))
+                    .child(
+                        h_flex()
+                            .h(px(38.))
+                            .px(px(6.))
+                            .items_center()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(p.control)
+                            .bg(ground)
+                            .child(Input::new(input).appearance(false).bordered(false)),
+                    )
             };
             let seg = |label: &'static str, on: bool| {
                 div()
@@ -576,63 +610,92 @@ impl SettingsPage {
                 })
             };
             let refresh = Select::new(&every).w_full();
-            let refresh = v_flex().gap(px(8.)).child(div().font_weight(FontWeight::MEDIUM).child("Refresh")).child(refresh);
-            let body = if shown_tab == RemoteTab::S3 {
-                v_flex()
-                    .gap(px(11.))
-                    .child(h_flex().gap(px(12.)).child(field("Bucket", &form.bucket)).child(field("Prefix", &form.prefix)))
-                    .child(h_flex().gap(px(12.)).child(field("Endpoint", &form.endpoint)).child(field("Region", &form.region)))
-                    .child(field("Profile", &form.profile))
-                    .child(
-                        h_flex().gap(px(12.)).child(field("Access key", &form.key)).child(field("Secret", &form.secret)),
-                    )
-                    .child(
-                        h_flex()
-                            .gap(px(10.))
-                            .items_center()
-                            .child(Switch::new("s3-path-style").checked(path_style).on_click({
-                                let page = page.clone();
-                                move |checked: &bool, _, cx| page.update(cx, |page, _| page.s3_path_style = *checked)
-                            }))
-                            .child(div().text_color(muted).child("Path-style URLs (MinIO and most custom endpoints)")),
-                    )
-                    .child(refresh)
-            } else if shown_tab == RemoteTab::Ftp {
-                v_flex()
-                    .gap(px(11.))
-                    .child(
-                        h_flex()
-                            .gap(px(12.))
-                            .child(field("Host", &ftp_form.host))
-                            .child(div().w(px(96.)).child(field("Port", &ftp_form.port))),
-                    )
-                    .child(h_flex().gap(px(12.)).child(field("User", &ftp_form.user)).child(field("Password", &ftp_form.password)))
-                    .child(field("Path", &ftp_form.path))
-                    .child(
-                        h_flex()
-                            .gap(px(10.))
-                            .items_center()
-                            .child(Switch::new("ftp-allow-plain").checked(plain).on_click({
-                                let page = page.clone();
-                                move |checked: &bool, _, cx| page.update(cx, |page, _| page.ftp_plain = *checked)
-                            }))
-                            .child(div().text_color(muted).child("Allow plain FTP (no encryption)")),
-                    )
-                    .when(plain, |d| {
-                        d.child(
-                            div()
-                                .text_xs()
-                                .text_color(p.warning)
-                                .child("The password and every file name cross the network in clear text. Use only on a network you trust."),
+            let refresh = v_flex()
+                .gap(px(8.))
+                .child(div().font_weight(FontWeight::MEDIUM).child("Refresh"))
+                .child(refresh);
+            let body =
+                if shown_tab == RemoteTab::S3 {
+                    v_flex()
+                        .gap(px(11.))
+                        .child(
+                            h_flex()
+                                .gap(px(12.))
+                                .child(field("Bucket", &form.bucket))
+                                .child(field("Prefix", &form.prefix)),
                         )
-                    })
-                    .child(refresh)
-            } else {
-                v_flex().gap(px(11.)).child(field("Host", &host)).child(field("Path", &path)).child(refresh)
-            };
+                        .child(
+                            h_flex()
+                                .gap(px(12.))
+                                .child(field("Endpoint", &form.endpoint))
+                                .child(field("Region", &form.region)),
+                        )
+                        .child(field("Profile", &form.profile))
+                        .child(
+                            h_flex()
+                                .gap(px(12.))
+                                .child(field("Access key", &form.key))
+                                .child(field("Secret", &form.secret)),
+                        )
+                        .child(
+                            h_flex()
+                                .gap(px(10.))
+                                .items_center()
+                                .child(Switch::new("s3-path-style").checked(path_style).on_click({
+                                    let page = page.clone();
+                                    move |checked: &bool, _, cx| page.update(cx, |page, _| page.s3_path_style = *checked)
+                                }))
+                                .child(div().text_color(muted).child("Path-style URLs (MinIO and most custom endpoints)")),
+                        )
+                        .child(refresh)
+                } else if shown_tab == RemoteTab::Ftp {
+                    v_flex()
+                        .gap(px(11.))
+                        .child(
+                            h_flex()
+                                .gap(px(12.))
+                                .child(field("Host", &ftp_form.host))
+                                .child(div().w(px(96.)).child(field("Port", &ftp_form.port))),
+                        )
+                        .child(
+                            h_flex()
+                                .gap(px(12.))
+                                .child(field("User", &ftp_form.user))
+                                .child(field("Password", &ftp_form.password)),
+                        )
+                        .child(field("Path", &ftp_form.path))
+                        .child(
+                            h_flex()
+                                .gap(px(10.))
+                                .items_center()
+                                .child(Switch::new("ftp-allow-plain").checked(plain).on_click({
+                                    let page = page.clone();
+                                    move |checked: &bool, _, cx| page.update(cx, |page, _| page.ftp_plain = *checked)
+                                }))
+                                .child(div().text_color(muted).child("Allow plain FTP (no encryption)")),
+                        )
+                        .when(plain, |d| {
+                            d.child(div().text_xs().text_color(p.warning).child(
+                                "The password and every file name cross the network in clear text. Use only on a network you trust.",
+                            ))
+                        })
+                        .child(refresh)
+                } else {
+                    v_flex()
+                        .gap(px(11.))
+                        .child(field("Host", &host))
+                        .child(field("Path", &path))
+                        .child(refresh)
+                };
             let add = {
-                let (host, path, every, page, form, ftp_form) =
-                    (host.clone(), path.clone(), every.clone(), page.clone(), form.clone(), ftp_form.clone());
+                let (host, path, every, page, form, ftp_form) = (
+                    host.clone(),
+                    path.clone(),
+                    every.clone(),
+                    page.clone(),
+                    form.clone(),
+                    ftp_form.clone(),
+                );
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                     let (tab, path_style, plain) = page.read_with(cx, |p, _| (p.remote_tab, p.s3_path_style, p.ftp_plain));
                     let remote = match tab {
@@ -669,10 +732,20 @@ impl SettingsPage {
                 .child(
                     v_flex()
                         .gap(px(11.))
-                        .child(div().text_color(muted).child("Remotes are read-only: listed and sized, never changed, no Trash."))
+                        .child(
+                            div()
+                                .text_color(muted)
+                                .child("Remotes are read-only: listed and sized, never changed, no Trash."),
+                        )
                         .child(
                             h_flex().child(
-                                h_flex().p(px(3.)).rounded_full().bg(surface).child(tab("tab-ssh", "SSH", RemoteTab::Ssh)).child(tab("tab-s3", "S3", RemoteTab::S3)).child(tab("tab-ftp", "FTP", RemoteTab::Ftp)),
+                                h_flex()
+                                    .p(px(3.))
+                                    .rounded_full()
+                                    .bg(surface)
+                                    .child(tab("tab-ssh", "SSH", RemoteTab::Ssh))
+                                    .child(tab("tab-s3", "S3", RemoteTab::S3))
+                                    .child(tab("tab-ftp", "FTP", RemoteTab::Ftp)),
                             ),
                         )
                         .child(body),
@@ -715,8 +788,9 @@ impl Render for SettingsPage {
         let p = palette(cx);
         let (rule, muted, border) = (p.rule, p.muted, p.border);
         let rows: Vec<_> = (0..self.volumes.len()).map(|ix| self.volume_row(ix, cx)).collect();
-        let remotes: Vec<_> =
-            (0..self.settings.remotes.len()).map(|ix| self.remote_row(ix, rows.is_empty() && ix == 0, cx)).collect();
+        let remotes: Vec<_> = (0..self.settings.remotes.len())
+            .map(|ix| self.remote_row(ix, rows.is_empty() && ix == 0, cx))
+            .collect();
         let offline: Vec<_> = (0..self.offline.len())
             .map(|ix| self.offline_row(ix, rows.is_empty() && remotes.is_empty() && ix == 0, cx))
             .collect();
@@ -741,9 +815,15 @@ impl Render for SettingsPage {
             .border_t_1()
             .border_color(rule)
             .child(
-                v_flex().flex_1().child(div().font_weight(FontWeight::MEDIUM).child("Default refresh interval")).child(
-                    div().text_xs().text_color(muted).child("For Volumes without their own interval, re-read while running"),
-                ),
+                v_flex()
+                    .flex_1()
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Default refresh interval"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("For Volumes without their own interval, re-read while running"),
+                    ),
             )
             .child(self.refresh_field(&self.refresh))
             .child(div().w(px(36.)).flex_none())

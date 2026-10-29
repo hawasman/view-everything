@@ -89,7 +89,10 @@ fn ntfs_volumes_always_catch_up() {
         "NTFS",
         "guid:c",
         root(),
-        SyncState::Ntfs { journal_id: 1, next_usn: 0 },
+        SyncState::Ntfs {
+            journal_id: 1,
+            next_usn: 0,
+        },
     );
     index.mark_synced(id, 1_000_000, None);
     assert!(index.volume(id).unwrap().needs_catch_up(1_000_000, 30 * MINUTE));

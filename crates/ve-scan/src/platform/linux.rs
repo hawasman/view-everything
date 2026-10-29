@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 /// Filesystems backed by local storage. Everything else (pseudo, overlay and image filesystems
 /// such as squashfs) is never indexed, except the network ones below.
 const LOCAL_FILESYSTEMS: &[&str] = &[
-    "ext2", "ext3", "ext4", "btrfs", "xfs", "f2fs", "zfs", "bcachefs", "jfs", "reiserfs", "nilfs2",
-    "ntfs", "ntfs3", "fuseblk", "vfat", "exfat", "hfsplus",
+    "ext2", "ext3", "ext4", "btrfs", "xfs", "f2fs", "zfs", "bcachefs", "jfs", "reiserfs", "nilfs2", "ntfs", "ntfs3", "fuseblk", "vfat",
+    "exfat", "hfsplus",
 ];
 
 /// Network filesystems, offered as Volumes the user can opt into.
@@ -47,10 +47,7 @@ fn volumes_in(text: &str) -> Vec<VolumeInfo> {
     let mut kept: Vec<Mount> = Vec::new();
     for mount in mounts {
         // Network shares are told apart by identity later; they have no device to compare.
-        let repeats_kept = !mount.is_network()
-            && kept
-                .iter()
-                .any(|k| k.device == mount.device && is_within(&mount.root, &k.root));
+        let repeats_kept = !mount.is_network() && kept.iter().any(|k| k.device == mount.device && is_within(&mount.root, &k.root));
         if !repeats_kept {
             kept.push(mount);
         }
@@ -60,7 +57,11 @@ fn volumes_in(text: &str) -> Vec<VolumeInfo> {
         .map(|m| VolumeInfo {
             removable: !m.is_network() && is_removable(&m.device),
             network: m.is_network(),
-            identity: if m.is_network() { share_identity(&m.source) } else { identity(&m, uuids) },
+            identity: if m.is_network() {
+                share_identity(&m.source)
+            } else {
+                identity(&m, uuids)
+            },
             label: m.source,
             mount: m.mount,
             fs_type: m.fs_type,
@@ -95,11 +96,7 @@ fn uuid_of(name: &std::ffi::OsStr, by_uuid: &Path) -> Option<String> {
 
 /// Whether filesystem path `inner` is `outer` or lies beneath it.
 fn is_within(inner: &str, outer: &str) -> bool {
-    outer == "/"
-        || inner == outer
-        || inner
-            .strip_prefix(outer)
-            .is_some_and(|rest| rest.starts_with('/'))
+    outer == "/" || inner == outer || inner.strip_prefix(outer).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Parses one line of `/proc/self/mountinfo` (see proc_pid_mountinfo(5)).

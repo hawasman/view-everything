@@ -40,8 +40,5 @@ pub fn time(unix_nanos: i64) -> String {
     if unix_nanos == 0 {
         return String::new();
     }
-    Local
-        .timestamp_nanos(unix_nanos)
-        .format("%Y-%m-%d %H:%M")
-        .to_string()
+    Local.timestamp_nanos(unix_nanos).format("%Y-%m-%d %H:%M").to_string()
 }

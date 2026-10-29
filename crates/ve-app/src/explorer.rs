@@ -4,8 +4,8 @@
 use crate::engine::Shared;
 use crate::selection::Selection;
 use crate::{format, view::View};
-use gpui_kit::component::table::{Column, TableDelegate, TableState};
 use gpui_kit::component::h_flex;
+use gpui_kit::component::table::{Column, TableDelegate, TableState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashMap;
@@ -115,12 +115,7 @@ impl TableDelegate for FlatList {
         if numeric { column.text_right() } else { column }
     }
 
-    fn render_tr(
-        &mut self,
-        row: usize,
-        _: &mut Window,
-        cx: &mut Context<TableState<Self>>,
-    ) -> Stateful<Div> {
+    fn render_tr(&mut self, row: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> Stateful<Div> {
         if self.rows.len() > CACHED_ROWS {
             self.rows.clear();
         }
@@ -134,9 +129,7 @@ impl TableDelegate for FlatList {
                 } else {
                     String::new()
                 };
-                let folder = index
-                    .parent(id)
-                    .map(|p| index.path(p).display().to_string());
+                let folder = index.parent(id).map(|p| index.path(p).display().to_string());
                 self.rows.insert(
                     row,
                     [
@@ -164,12 +157,7 @@ impl TableDelegate for FlatList {
             }))
     }
 
-    fn render_th(
-        &mut self,
-        col_ix: usize,
-        _: &mut Window,
-        cx: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
+    fn render_th(&mut self, col_ix: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
         let text = crate::theme::palette(cx).text;
         div()
             .size_full()
@@ -178,30 +166,16 @@ impl TableDelegate for FlatList {
             .child(self.column(col_ix, cx).name.clone())
     }
 
-    fn render_last_empty_col(
-        &mut self,
-        _: &mut Window,
-        _: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
+    fn render_last_empty_col(&mut self, _: &mut Window, _: &mut Context<TableState<Self>>) -> impl IntoElement {
         div().w_0()
     }
 
-    fn render_td(
-        &mut self,
-        row: usize,
-        col: usize,
-        _: &mut Window,
-        cx: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
+    fn render_td(&mut self, row: usize, col: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
         let Some(text) = self.rows.get(&row).map(|cells| cells[col].clone()) else {
             return div().into_any_element();
         };
         let muted = crate::theme::palette(cx).muted;
-        let cell = h_flex()
-            .size_full()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_size(px(13.));
+        let cell = h_flex().size_full().overflow_hidden().whitespace_nowrap().text_size(px(13.));
         match col {
             1 => cell.text_color(muted),
             0 => cell,

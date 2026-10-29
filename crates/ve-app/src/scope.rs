@@ -62,8 +62,15 @@ mod tests {
         let mut index = Index::default();
         let volume = index.add_remote(&Remote::new("me@box", "/srv").unwrap());
         let root = index.volume(volume).unwrap().root;
-        let dir = EntryMeta { is_dir: true, ..Default::default() };
-        let file = EntryMeta { logical: 10, on_disk: 4096, ..Default::default() };
+        let dir = EntryMeta {
+            is_dir: true,
+            ..Default::default()
+        };
+        let file = EntryMeta {
+            logical: 10,
+            on_disk: 4096,
+            ..Default::default()
+        };
         let a = index.insert(root, "a \"q\"", dir);
         let b = index.insert(a, "b", dir);
         let x = index.insert(b, "x.rs", file);

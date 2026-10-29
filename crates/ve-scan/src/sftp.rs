@@ -228,7 +228,10 @@ pub fn walk(input: impl Read, output: impl Write, root: &str, mut emit: impl FnM
         _ => return Err(bad("reply to LSTAT")),
     };
     if !attrs.is_dir() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{root} is not a folder on the server")));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{root} is not a folder on the server"),
+        ));
     }
     emit(attrs.record(String::new()));
 
@@ -260,7 +263,11 @@ pub fn walk(input: impl Read, output: impl Write, root: &str, mut emit: impl FnM
                         continue;
                     }
                     let text = String::from_utf8_lossy(name);
-                    let rel = if dir.rel.is_empty() { text.into_owned() } else { format!("{}/{text}", dir.rel) };
+                    let rel = if dir.rel.is_empty() {
+                        text.into_owned()
+                    } else {
+                        format!("{}/{text}", dir.rel)
+                    };
                     if attrs.is_dir() {
                         let mut path = dir.path.clone();
                         if path.last() != Some(&b'/') {
@@ -305,7 +312,14 @@ mod tests {
         b.extend(string(b"k"));
         b.extend(string(b"v"));
         let attrs = Body(&b).attrs().unwrap();
-        assert_eq!(attrs, Attrs { size: Some(7), permissions: Some(S_IFDIR | 0o755), mtime: Some(1_700_000_000) });
+        assert_eq!(
+            attrs,
+            Attrs {
+                size: Some(7),
+                permissions: Some(S_IFDIR | 0o755),
+                mtime: Some(1_700_000_000)
+            }
+        );
         assert!(attrs.is_dir() && !attrs.is_symlink());
         assert!(Body(&b[..10]).attrs().is_err());
     }
@@ -315,7 +329,10 @@ mod tests {
         let walk_of = |bytes: &[u8]| walk(bytes, io::sink(), "/x", |_| {}).unwrap_err().kind();
         assert_eq!(walk_of(&[]), io::ErrorKind::UnexpectedEof);
         // VERSION, then a packet claiming more bytes than the server sent.
-        assert_eq!(walk_of(&[0, 0, 0, 5, 2, 0, 0, 0, 3, 0, 0, 0, 50, 105]), io::ErrorKind::UnexpectedEof);
+        assert_eq!(
+            walk_of(&[0, 0, 0, 5, 2, 0, 0, 0, 3, 0, 0, 0, 50, 105]),
+            io::ErrorKind::UnexpectedEof
+        );
         assert_eq!(walk_of(&[0xff, 0xff, 0xff, 0xff]), io::ErrorKind::InvalidData);
     }
 }

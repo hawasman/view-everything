@@ -144,14 +144,9 @@ pub fn decode_runs(data: &[u8]) -> io::Result<Vec<Run>> {
                 delta |= -1i64 << (8 * off_size);
             }
             pos += off_size;
-            lcn = lcn
-                .checked_add(delta)
-                .ok_or_else(|| invalid("corrupt NTFS runlist"))?;
+            lcn = lcn.checked_add(delta).ok_or_else(|| invalid("corrupt NTFS runlist"))?;
             let start = u64::try_from(lcn).map_err(|_| invalid("negative cluster in runlist"))?;
-            runs.push(Run {
-                lcn: Some(start),
-                len,
-            });
+            runs.push(Run { lcn: Some(start), len });
         }
     }
     Ok(runs)
@@ -160,13 +155,7 @@ pub fn decode_runs(data: &[u8]) -> io::Result<Vec<Run>> {
 /// Reads `len` bytes at byte `offset` of an attribute's value described by `runs`. The
 /// underlying reads are cluster aligned, as raw volume handles require. Sparse holes and
 /// anything beyond the last run read as zeros.
-pub fn read_runs<R: Read + Seek>(
-    reader: &mut R,
-    geometry: &Geometry,
-    runs: &[Run],
-    offset: u64,
-    len: usize,
-) -> io::Result<Vec<u8>> {
+pub fn read_runs<R: Read + Seek>(reader: &mut R, geometry: &Geometry, runs: &[Run], offset: u64, len: usize) -> io::Result<Vec<u8>> {
     let cluster = u64::from(geometry.bytes_per_cluster);
     let start = offset / cluster * cluster;
     let end = (offset + len as u64).div_ceil(cluster) * cluster;
@@ -200,16 +189,11 @@ pub enum AttrList {
 }
 
 impl AttrList {
-    pub fn bytes<R: Read + Seek>(
-        &self,
-        reader: &mut R,
-        geometry: &Geometry,
-    ) -> io::Result<Vec<u8>> {
+    pub fn bytes<R: Read + Seek>(&self, reader: &mut R, geometry: &Geometry) -> io::Result<Vec<u8>> {
         match self {
             AttrList::Resident(bytes) => Ok(bytes.clone()),
             AttrList::NonResident { runs, size } => {
-                let size =
-                    usize::try_from(*size).map_err(|_| invalid("attribute list too large"))?;
+                let size = usize::try_from(*size).map_err(|_| invalid("attribute list too large"))?;
                 if size > 64 << 20 {
                     return Err(invalid("attribute list too large"));
                 }
@@ -279,19 +263,11 @@ impl Parsed {
         if !self.in_use || self.names.is_empty() {
             return None;
         }
-        let (logical, on_disk) = if self.is_dir {
-            (0, 0)
-        } else {
-            self.data.unwrap_or((0, 0))
-        };
+        let (logical, on_disk) = if self.is_dir { (0, 0) } else { self.data.unwrap_or((0, 0)) };
         Some(Record {
             number: self.number,
             is_dir: self.is_dir,
-            names: self
-                .names
-                .into_iter()
-                .map(|(parent, name)| FileName { parent, name })
-                .collect(),
+            names: self.names.into_iter().map(|(parent, name)| FileName { parent, name }).collect(),
             modified: self.modified.unwrap_or(0),
             logical,
             on_disk,
@@ -389,14 +365,10 @@ pub fn parse_record(number: u64, buf: &mut [u8], strict: bool, keep_runs: bool) 
                     if namespace != NAMESPACE_DOS
                         && let Some(raw) = value.get(0x42..0x42 + chars * 2)
                     {
-                        let units: Vec<u16> = raw
-                            .chunks_exact(2)
-                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                            .collect();
-                        parsed.names.push((
-                            record_number(u64_at(value, 0)),
-                            String::from_utf16_lossy(&units),
-                        ));
+                        let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                        parsed
+                            .names
+                            .push((record_number(u64_at(value, 0)), String::from_utf16_lossy(&units)));
                     }
                 }
                 ATTR_DATA if !named => parsed.data = Some((value_len as u64, 0)),
@@ -411,22 +383,13 @@ pub fn parse_record(number: u64, buf: &mut [u8], strict: bool, keep_runs: bool) 
             let runs_off = usize::from(u16_at(attr, 32));
             let allocated = u64_at(attr, 40);
             let size = u64_at(attr, 48);
-            let runs = || {
-                attr.get(runs_off..)
-                    .map(decode_runs)
-                    .transpose()
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default()
-            };
+            let runs = || attr.get(runs_off..).map(decode_runs).transpose().ok().flatten().unwrap_or_default();
             if kind == ATTR_LIST {
                 parsed.attr_list = Some(AttrList::NonResident { runs: runs(), size });
                 continue;
             }
             if start_vcn == 0 {
-                let packed = attr_flags & (ATTR_COMPRESSED | ATTR_SPARSE) != 0
-                    && runs_off >= 72
-                    && len >= 72;
+                let packed = attr_flags & (ATTR_COMPRESSED | ATTR_SPARSE) != 0 && runs_off >= 72 && len >= 72;
                 let on_disk = if packed { u64_at(attr, 64) } else { allocated };
                 parsed.data = Some((size, on_disk));
             }
@@ -456,13 +419,7 @@ fn read_record_at<R: Read + Seek>(
     keep_runs: bool,
 ) -> io::Result<Option<Parsed>> {
     let size = geometry.record_size as usize;
-    let mut buf = read_runs(
-        reader,
-        geometry,
-        runs,
-        number * u64::from(geometry.record_size),
-        size,
-    )?;
+    let mut buf = read_runs(reader, geometry, runs, number * u64::from(geometry.record_size), size)?;
     Ok(parse_record(number, &mut buf, true, keep_runs))
 }
 
@@ -471,19 +428,13 @@ fn mft_extents<R: Read + Seek>(reader: &mut R, geometry: &Geometry) -> io::Resul
     let mut buf = vec![0u8; geometry.record_size as usize];
     reader.seek(SeekFrom::Start(geometry.mft_offset))?;
     reader.read_exact(&mut buf)?;
-    let mut record0 =
-        parse_record(0, &mut buf, true, true).ok_or_else(|| invalid("$MFT record is corrupt"))?;
+    let mut record0 = parse_record(0, &mut buf, true, true).ok_or_else(|| invalid("$MFT record is corrupt"))?;
     let mut segments = std::mem::take(&mut record0.segments);
     if let Some(list) = &record0.attr_list {
         let bytes = list.bytes(reader, geometry)?;
-        let mut known: Vec<Run> = segments
-            .iter()
-            .filter(|s| s.start_vcn == 0)
-            .flat_map(|s| s.runs.clone())
-            .collect();
+        let mut known: Vec<Run> = segments.iter().filter(|s| s.start_vcn == 0).flat_map(|s| s.runs.clone()).collect();
         for number in list_extension_records(&bytes, Some(ATTR_DATA), 0) {
-            let ext = read_record_at(reader, geometry, &known, number, true)?
-                .ok_or_else(|| invalid("$MFT extension record is corrupt"))?;
+            let ext = read_record_at(reader, geometry, &known, number, true)?.ok_or_else(|| invalid("$MFT extension record is corrupt"))?;
             segments.extend(ext.segments);
             known = {
                 let mut all: Vec<&DataSegment> = segments.iter().collect();
@@ -540,13 +491,7 @@ pub fn read_all<R: Read + Seek>(reader: &mut R) -> io::Result<Vec<Record>> {
     let mut first = 0;
     while first < total {
         let count = per_chunk.min(total - first);
-        let mut chunk = read_runs(
-            reader,
-            &geometry,
-            &runs,
-            first * record_size,
-            (count * record_size) as usize,
-        )?;
+        let mut chunk = read_runs(reader, &geometry, &runs, first * record_size, (count * record_size) as usize)?;
         for (i, raw) in chunk.chunks_exact_mut(record_size as usize).enumerate() {
             let Some(parsed) = parse_record(first + i as u64, raw, true, false) else {
                 continue;
@@ -562,11 +507,7 @@ pub fn read_all<R: Read + Seek>(reader: &mut R) -> io::Result<Vec<Record>> {
         }
         first += count;
     }
-    let index: HashMap<u64, usize> = bases
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.number, i))
-        .collect();
+    let index: HashMap<u64, usize> = bases.iter().enumerate().map(|(i, p)| (p.number, i)).collect();
     for ext in extensions {
         if let Some(&i) = index.get(&ext.base) {
             bases[i].merge(ext);

@@ -34,17 +34,13 @@ pub(crate) fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -
         (volume.root, volume.mount.clone())
     };
     let metadata = fs::metadata(&mount)?;
-    index
-        .write()
-        .update(root, entry_meta(&metadata, || mount.clone()));
+    index.write().update(root, entry_meta(&metadata, || mount.clone()));
     let walk = Walk {
         index,
         progress,
         device: device(&metadata),
     };
-    let threads = std::thread::available_parallelism()
-        .map_or(4, |n| n.get() * 2)
-        .min(32);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get() * 2).min(32);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .thread_name(|i| format!("ve-scan-{i}"))
@@ -110,35 +106,20 @@ impl<'a> Walk<'a> {
             let os_name = entry.file_name();
             let name = os_name.to_string_lossy().into_owned();
             let meta = entry_meta(&metadata, || entry.path());
-            listed.push(Listed {
-                os_name,
-                name,
-                meta,
-            });
+            listed.push(Listed { os_name, name, meta });
         }
-        self.progress
-            .entries
-            .fetch_add(listed.len() as u64, Ordering::Relaxed);
+        self.progress.entries.fetch_add(listed.len() as u64, Ordering::Relaxed);
         Some(listed)
     }
 }
 
 /// Makes the Index children of `dir` equal to `listing`. Returns the folders to visit next.
 fn apply(index: &mut Index, dir: EntryId, listing: Vec<Listed>) -> Vec<(EntryId, OsString)> {
-    let mut existing: HashMap<String, EntryId> = index
-        .children(dir)
-        .iter()
-        .map(|&c| (index.name(c).to_owned(), c))
-        .collect();
+    let mut existing: HashMap<String, EntryId> = index.children(dir).iter().map(|&c| (index.name(c).to_owned(), c)).collect();
     let mut subfolders = Vec::new();
     let mut replaced = Vec::new();
     let mut added = Vec::new();
-    for Listed {
-        os_name,
-        name,
-        meta,
-    } in listing
-    {
+    for Listed { os_name, name, meta } in listing {
         let id = match existing.remove(&name) {
             Some(id) if index.is_dir(id) == meta.is_dir => {
                 index.update(id, meta);

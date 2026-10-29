@@ -1,24 +1,24 @@
 //! The window: sidebar, the pages (Explorer with its Query bar, lists, panels and Treemap,
 //! Settings) and the status bar.
 
-use crate::engine::{Engine, Phase, Repaint, last_synced_label};
 use crate::categories::CategoryPanel;
 use crate::dashboard::{Act, DashboardPage};
+use crate::engine::{Engine, Phase, Repaint, last_synced_label};
 use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
 use crate::format;
 use crate::settings::Settings;
 use crate::settings_page::{Changed, Forget, Refresh, SettingsPage};
 use crate::theme::{palette, tabular};
-use crate::ui::{caption, dot, pill};
-use crate::tree::TreeList;
 use crate::trash::{self, Trash};
+use crate::tree::TreeList;
 use crate::treemap::{Treemap, TreemapEvent};
-use gpui_kit::component::notification::Notification;
+use crate::ui::{caption, dot, pill};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::table::{DataTable, TableEvent, TableState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -79,36 +79,49 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let indexed: Vec<VolumeInfo> = volumes
-            .iter()
-            .filter(|v| settings.is_indexed(v))
-            .cloned()
-            .collect();
+        let indexed: Vec<VolumeInfo> = volumes.iter().filter(|v| settings.is_indexed(v)).cloned().collect();
         let intervals = settings.intervals(&indexed);
         // One pending wake-up is enough: the window then reads everything that changed.
         let (wake, woken) = async_channel::bounded::<()>(1);
         let repaint: Repaint = Arc::new(move || {
             let _ = wake.try_send(());
         });
-        let engine =
-            Engine::start(repaint.clone(), volumes.clone(), indexed, settings.remotes.clone(), intervals, categories.clone());
+        let engine = Engine::start(
+            repaint.clone(),
+            volumes.clone(),
+            indexed,
+            settings.remotes.clone(),
+            intervals,
+            categories.clone(),
+        );
 
         let trash = Trash::new(engine.shared.clone(), repaint.clone());
 
         let dashboard = cx.new(|cx| {
-            let mut page =
-                DashboardPage::new(engine.shared.clone(), trash.clone(), categories.clone(), &settings, repaint, window, cx);
+            let mut page = DashboardPage::new(
+                engine.shared.clone(),
+                trash.clone(),
+                categories.clone(),
+                &settings,
+                repaint,
+                window,
+                cx,
+            );
             page.set_context(&settings, volumes.clone(), cx);
             page
         });
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
-        cx.subscribe_in(&dashboard, window, |this, _, act: &Act, window, cx| this.dashboard_act(act, window, cx))
-            .detach();
+        cx.subscribe_in(&dashboard, window, |this, _, act: &Act, window, cx| {
+            this.dashboard_act(act, window, cx)
+        })
+        .detach();
         cx.subscribe(&settings_page, |this, _, changed: &Changed, cx| {
-            this.engine.set_volumes(changed.mounted.clone(), changed.indexed.clone(), changed.remotes.clone());
+            this.engine
+                .set_volumes(changed.mounted.clone(), changed.indexed.clone(), changed.remotes.clone());
             this.engine.set_intervals(changed.intervals.clone());
             let settings = this.settings_page.read(cx).settings().clone();
-            this.dashboard.update(cx, |d, cx| d.set_context(&settings, changed.mounted.clone(), cx));
+            this.dashboard
+                .update(cx, |d, cx| d.set_context(&settings, changed.mounted.clone(), cx));
             // Saved fine, so the settings file read at startup has been replaced.
             if !this.settings_page.read(cx).has_problem() {
                 this.startup_problems.retain(|p| !p.starts_with("Settings ignored"));
@@ -118,12 +131,12 @@ impl Shell {
         .detach();
         cx.subscribe(&settings_page, |this, _, forget: &Forget, _| this.engine.forget(forget.0.clone()))
             .detach();
-        cx.subscribe(&settings_page, |this, _, refresh: &Refresh, _| this.engine.refresh_location(refresh.0.clone()))
-            .detach();
+        cx.subscribe(&settings_page, |this, _, refresh: &Refresh, _| {
+            this.engine.refresh_location(refresh.0.clone())
+        })
+        .detach();
 
-        let query = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Find a file by name")
-        });
+        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Find a file by name"));
         let filters = cx.new(|cx| FiltersPanel::new(window, cx));
         cx.subscribe_in(&query, window, |this, query, event: &InputEvent, window, cx| {
             if matches!(event, InputEvent::Change) {
@@ -300,7 +313,12 @@ impl Shell {
     fn mounts_changed(&mut self, now: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) {
         let before = std::mem::replace(&mut self.volumes, now.clone());
         // An unmounted Volume's 'Index this?' no longer applies; a replug asks again.
-        let gone: Vec<String> = self.offered.iter().filter(|id| !now.iter().any(|v| &v.identity == *id)).cloned().collect();
+        let gone: Vec<String> = self
+            .offered
+            .iter()
+            .filter(|id| !now.iter().any(|v| &v.identity == *id))
+            .cloned()
+            .collect();
         for id in gone {
             window.remove_notification1::<Shell>(id.clone(), cx);
             self.offered.remove(&id);
@@ -324,7 +342,11 @@ impl Shell {
     /// A non-blocking notification: Index adds the Volume, Not now remembers the answer.
     fn offer_to_index(&mut self, volume: VolumeInfo, window: &mut Window, cx: &mut Context<Self>) {
         let shell = cx.entity().downgrade();
-        let name = if volume.label.is_empty() { volume.mount.display().to_string() } else { volume.label.clone() };
+        let name = if volume.label.is_empty() {
+            volume.mount.display().to_string()
+        } else {
+            volume.label.clone()
+        };
         let note = Notification::info(format!("{name} was mounted. Index it so its files can be searched and sized?"))
             .title("Index this?")
             .id1::<Shell>(volume.identity.clone())
@@ -351,10 +373,7 @@ impl Shell {
 
     fn answer_offer(&mut self, volume: &VolumeInfo, index_it: bool, cx: &mut Context<Self>) {
         self.settings_page.update(cx, |page, cx| {
-            page.apply(
-                |s| if index_it { s.set_indexed(volume, true) } else { s.decline(volume) },
-                cx,
-            )
+            page.apply(|s| if index_it { s.set_indexed(volume, true) } else { s.decline(volume) }, cx)
         });
     }
 
@@ -477,7 +496,8 @@ impl Shell {
                 self.page = Page::Explorer;
             }
             Act::Forget(identity, mount) => {
-                self.settings_page.update(cx, |page, cx| page.apply(|s| s.forget(identity, mount), cx));
+                self.settings_page
+                    .update(cx, |page, cx| page.apply(|s| s.forget(identity, mount), cx));
                 self.engine.forget(identity.clone());
             }
             Act::Refresh(identities) => {
@@ -487,7 +507,8 @@ impl Shell {
             }
             Act::MoveToTrash(id) => self.trash.ask_trash(&[*id], &self.volumes, window, cx),
             Act::SaveQuery(text) => {
-                self.settings_page.update(cx, |page, cx| page.apply(|s| s.recent_query = text.clone(), cx));
+                self.settings_page
+                    .update(cx, |page, cx| page.apply(|s| s.recent_query = text.clone(), cx));
             }
         }
         cx.notify();
@@ -518,7 +539,11 @@ impl Shell {
             Phase::LoadingIndex => {
                 bar = bar.child(item().child(dot(accent)).child("Loading the saved Index…"));
             }
-            Phase::Syncing { volumes, catching_up, started } => {
+            Phase::Syncing {
+                volumes,
+                catching_up,
+                started,
+            } => {
                 let what = if *catching_up { "Catching up" } else { "Scanning" };
                 let names: Vec<_> = volumes.iter().map(|v| v.display().to_string()).collect();
                 bar = bar.child(item().child(dot(accent)).child(format!(
@@ -563,12 +588,14 @@ impl Shell {
             bar = bar.child(sep()).child(div().text_color(warn).child(problem));
         }
         bar.child(div().flex_1())
-            .child(item().child(
-                h_flex()
-                    .gap(px(4.))
-                    .child(div().text_color(text).child(format::count(shared.index.read().live_count() as u64)))
-                    .child("Entries"),
-            ))
+            .child(
+                item().child(
+                    h_flex()
+                        .gap(px(4.))
+                        .child(div().text_color(text).child(format::count(shared.index.read().live_count() as u64)))
+                        .child("Entries"),
+                ),
+            )
             .child(sep())
             .child(self.trash_controls(cx))
     }
@@ -587,10 +614,7 @@ impl Shell {
                 .hover(move |s| s.bg(hover).text_color(text))
                 .child(label)
                 .tooltip(|window, cx| {
-                    Tooltip::new(
-                        "Trashed files still take up space until the Trash is emptied. Click to open the Trash.",
-                    )
-                    .build(window, cx)
+                    Tooltip::new("Trashed files still take up space until the Trash is emptied. Click to open the Trash.").build(window, cx)
                 })
                 .on_click(cx.listener(|this, _, window, cx| this.trash.open(window, cx))),
         );
@@ -715,7 +739,9 @@ impl Shell {
                 .child(dot(state))
                 .child(div().min_w_0().truncate().child(name))
         });
-        let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "user".into());
+        let user = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "user".into());
         let initial = user.chars().next().map_or('U', |c| c.to_ascii_uppercase());
         let display_name = format!("{initial}{}", user.chars().skip(1).collect::<String>());
         let entries = self.engine.shared.index.read().live_count() as u64;
@@ -724,9 +750,36 @@ impl Shell {
             .relative()
             .size(px(22.))
             .flex_none()
-            .child(div().absolute().left(px(1.)).top(px(1.)).w(px(12.)).h(px(20.)).rounded(px(2.)).bg(text))
-            .child(div().absolute().left(px(15.)).top(px(1.)).w(px(6.)).h(px(9.)).rounded(px(2.)).bg(accent))
-            .child(div().absolute().left(px(15.)).top(px(12.)).w(px(6.)).h(px(9.)).rounded(px(2.)).bg(control));
+            .child(
+                div()
+                    .absolute()
+                    .left(px(1.))
+                    .top(px(1.))
+                    .w(px(12.))
+                    .h(px(20.))
+                    .rounded(px(2.))
+                    .bg(text),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(15.))
+                    .top(px(1.))
+                    .w(px(6.))
+                    .h(px(9.))
+                    .rounded(px(2.))
+                    .bg(accent),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(15.))
+                    .top(px(12.))
+                    .w(px(6.))
+                    .h(px(9.))
+                    .rounded(px(2.))
+                    .bg(control),
+            );
         let find = h_flex()
             .h(px(32.))
             .mt(px(12.))
@@ -739,7 +792,12 @@ impl Shell {
             .border_1()
             .border_color(border)
             .bg(surface)
-            .child(div().flex_1().min_w_0().child(Input::new(&self.query).appearance(false).bordered(false).small()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Input::new(&self.query).appearance(false).bordered(false).small()),
+            )
             .child(div().text_xs().text_color(muted).child("/"));
 
         v_flex()
@@ -781,7 +839,10 @@ impl Shell {
             .child(self.nav_row("nav-explorer", "Explorer", IconName::Folder, Page::Explorer, cx))
             .child(div().mt(px(30.)).mb(px(8.)).px(px(12.)).child(caption("Locations", cx)))
             .child(v_flex().id("locations").flex_1().min_h_0().overflow_y_scroll().children(locations))
-            .child(self.nav_row("nav-settings", "Settings", IconName::Settings, Page::Settings, cx).mt(px(16.)))
+            .child(
+                self.nav_row("nav-settings", "Settings", IconName::Settings, Page::Settings, cx)
+                    .mt(px(16.)),
+            )
             .child(
                 h_flex()
                     .mt(px(8.))
@@ -885,7 +946,11 @@ impl Shell {
             .absolute()
             .size_full();
         let active = self.filters.read(cx).active();
-        let label = if active > 0 { format!("Filters · {active}") } else { "Filters".into() };
+        let label = if active > 0 {
+            format!("Filters · {active}")
+        } else {
+            "Filters".into()
+        };
         let filters = pill("filters", label)
             .icon("icons/filters.svg")
             .small()
@@ -913,13 +978,28 @@ impl Shell {
                 .gap(px(4.))
                 .text_xs()
                 .text_color(muted)
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(text).child(selected.len().to_string()))
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(text)
+                        .child(selected.len().to_string()),
+                )
                 .child(format!("selected · {}", format::size(selected_size)))
         });
         let list = if self.show_tree {
-            DataTable::new(&self.tree).small().bordered(false).stripe(false).header_row_height(px(30.)).into_any_element()
+            DataTable::new(&self.tree)
+                .small()
+                .bordered(false)
+                .stripe(false)
+                .header_row_height(px(30.))
+                .into_any_element()
         } else {
-            DataTable::new(&self.table).small().bordered(false).stripe(false).header_row_height(px(30.)).into_any_element()
+            DataTable::new(&self.table)
+                .small()
+                .bordered(false)
+                .stripe(false)
+                .header_row_height(px(30.))
+                .into_any_element()
         };
         let grow = |weight: f32| v_flex().min_w_0().h_full().gap(px(16.)).flex_grow(weight).flex_basis(relative(0.));
         let left = grow(7.)
@@ -976,7 +1056,16 @@ impl Shell {
                             .child(h_flex().gap(px(12.)).items_center().children(selection).child(filters).child(trash)),
                     )
                     .child(self.tabs(summary, cx))
-                    .child(h_flex().flex_1().min_h_0().gap(px(16.)).pt(px(16.)).pb(px(16.)).child(left).child(right)),
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .gap(px(16.))
+                            .pt(px(16.))
+                            .pb(px(16.))
+                            .child(left)
+                            .child(right),
+                    ),
             )
             .child(self.status_bar(cx))
     }
@@ -991,8 +1080,8 @@ impl Render for Shell {
         };
         let p = palette(cx);
         // Problems have no status bar to sit in outside the Explorer.
-        let problems = self.page != Page::Explorer
-            && (!self.startup_problems.is_empty() || !self.engine.shared.status.lock().problems.is_empty());
+        let problems =
+            self.page != Page::Explorer && (!self.startup_problems.is_empty() || !self.engine.shared.status.lock().problems.is_empty());
         h_flex()
             .size_full()
             .bg(p.ground)

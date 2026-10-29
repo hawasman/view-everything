@@ -113,8 +113,18 @@ fn list_line(style: Style, name: &str, node: &Node) -> String {
     let (h, mi) = (modify[8..10].parse::<u32>().unwrap(), &modify[10..12]);
     match style {
         Style::Dos => {
-            let kind = if matches!(node, Node::Dir) { "<DIR>".to_owned() } else { size.to_string() };
-            format!("{:02}-{d}-{}  {:02}:{mi}{} {kind:>10} {name}", mo, &y[2..], if h % 12 == 0 { 12 } else { h % 12 }, if h >= 12 { "PM" } else { "AM" })
+            let kind = if matches!(node, Node::Dir) {
+                "<DIR>".to_owned()
+            } else {
+                size.to_string()
+            };
+            format!(
+                "{:02}-{d}-{}  {:02}:{mi}{} {kind:>10} {name}",
+                mo,
+                &y[2..],
+                if h % 12 == 0 { 12 } else { h % 12 },
+                if h >= 12 { "PM" } else { "AM" }
+            )
         }
         _ => {
             let month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][mo - 1];
@@ -142,13 +152,19 @@ fn serve(state: Arc<State>, stream: TcpStream) {
         let line = line.trim_end().to_owned();
         let (verb, arg) = line.split_once(' ').unwrap_or((&line, ""));
         let verb = verb.to_ascii_uppercase();
-        state.log.lock().unwrap().push(if verb == "PASS" { "PASS".into() } else { line.clone() });
+        state
+            .log
+            .lock()
+            .unwrap()
+            .push(if verb == "PASS" { "PASS".into() } else { line.clone() });
         let style = *state.style.lock().unwrap();
         match verb.as_str() {
             "AUTH" => match &state.tls {
                 Some(config) => {
                     say(&mut control, "234 AUTH TLS OK");
-                    let Stream::Plain(tcp) = std::mem::replace(control.get_mut(), Stream::Plain(stream.try_clone().unwrap())) else { unreachable!() };
+                    let Stream::Plain(tcp) = std::mem::replace(control.get_mut(), Stream::Plain(stream.try_clone().unwrap())) else {
+                        unreachable!()
+                    };
                     let conn = ServerConnection::new(config.clone()).unwrap();
                     control = BufReader::new(Stream::Tls(Box::new(StreamOwned::new(conn, tcp))));
                 }
@@ -169,13 +185,21 @@ fn serve(state: Arc<State>, stream: TcpStream) {
                 say(&mut control, if logged_in { "230 welcome" } else { "530 Login incorrect" });
             }
             "FEAT" => {
-                let mlst = if matches!(style, Style::Mlsd | Style::MlsdBroken) { " MLST type*;size*;modify*;\r\n" } else { "" };
+                let mlst = if matches!(style, Style::Mlsd | Style::MlsdBroken) {
+                    " MLST type*;size*;modify*;\r\n"
+                } else {
+                    ""
+                };
                 say(&mut control, &format!("211-Features:\r\n UTF8\r\n{mlst} PASV\r\n211 End"));
             }
             "TYPE" => say(&mut control, "200 type set"),
             "CWD" if !logged_in => say(&mut control, "530 log in first"),
             "CWD" => {
-                let target = if arg.starts_with('/') { arg.to_owned() } else { format!("{}/{arg}", cwd.trim_end_matches('/')) };
+                let target = if arg.starts_with('/') {
+                    arg.to_owned()
+                } else {
+                    format!("{}/{arg}", cwd.trim_end_matches('/'))
+                };
                 if state.tree.lock().unwrap().contains_key(&target) && !state.forbidden.lock().unwrap().contains(&target) {
                     cwd = target;
                     say(&mut control, "250 ok");
@@ -188,7 +212,10 @@ fn serve(state: Arc<State>, stream: TcpStream) {
                 let port = listener.local_addr().unwrap().port();
                 pasv = Some(listener);
                 // The address announced is deliberately wrong: the client must dial the control address.
-                say(&mut control, &format!("227 Entering Passive Mode (10,255,255,1,{},{})", port / 256, port % 256));
+                say(
+                    &mut control,
+                    &format!("227 Entering Passive Mode (10,255,255,1,{},{})", port / 256, port % 256),
+                );
                 let _ = local;
             }
             "MLSD" | "LIST" => {
@@ -205,14 +232,23 @@ fn serve(state: Arc<State>, stream: TcpStream) {
                     .iter()
                     // IIS has no symlinks.
                     .filter(|(_, node)| !(style == Style::Dos && matches!(node, Node::Link)))
-                    .map(|(name, node)| if verb == "MLSD" { mlsd_line(name, node) } else { list_line(style, name, node) })
+                    .map(|(name, node)| {
+                        if verb == "MLSD" {
+                            mlsd_line(name, node)
+                        } else {
+                            list_line(style, name, node)
+                        }
+                    })
                     .chain((verb == "LIST" && style != Style::Dos).then(|| "drwxr-xr-x 2 ftp ftp 4096 Jan  1  2024 .".to_owned()))
-                                .collect();
+                    .collect();
                 drop(tree);
                 say(&mut control, "150 here it comes");
                 let (data, _) = listener.accept().unwrap();
                 let mut out = match (&state.tls, secure_data) {
-                    (Some(config), true) => Stream::Tls(Box::new(StreamOwned::new(ServerConnection::new(config.clone()).unwrap(), data.try_clone().unwrap()))),
+                    (Some(config), true) => Stream::Tls(Box::new(StreamOwned::new(
+                        ServerConnection::new(config.clone()).unwrap(),
+                        data.try_clone().unwrap(),
+                    ))),
                     _ => Stream::Plain(data.try_clone().unwrap()),
                 };
                 for line in lines.iter().filter(|l| !l.is_empty()) {
@@ -248,7 +284,13 @@ fn start_with(tls: Option<Arc<ServerConfig>>, style: Style) -> Server {
                 ("empty".to_owned(), Node::Dir),
             ],
         ),
-        ("/pub/docs".to_owned(), vec![("a.txt".to_owned(), Node::File(10, "20230630235959")), ("ünï.md".to_owned(), Node::File(20, "20250601120000"))]),
+        (
+            "/pub/docs".to_owned(),
+            vec![
+                ("a.txt".to_owned(), Node::File(10, "20230630235959")),
+                ("ünï.md".to_owned(), Node::File(20, "20250601120000")),
+            ],
+        ),
         ("/pub/empty".to_owned(), vec![]),
     ]);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -326,18 +368,26 @@ fn assert_indexed(index: &SharedIndex, id: ve_core::VolumeId, server: &Server) {
     assert_eq!(names(&index, index.child_named(root, "empty").unwrap()), Vec::<String>::new());
     let totals = Filter::compute(&index, None).totals(&index, root);
     assert_eq!((totals.logical, totals.on_disk), (5030, 5030));
-    assert_eq!(index.path(movie).to_string_lossy(), format!("ftp://me@127.0.0.1:{}/pub/movie one.mkv", server.port));
+    assert_eq!(
+        index.path(movie).to_string_lossy(),
+        format!("ftp://me@127.0.0.1:{}/pub/movie one.mkv", server.port)
+    );
 }
 
 /// Nothing but reading commands, in passive mode, and the password only after USER.
 fn assert_read_only(server: &Server) {
     let log = server.state.log.lock().unwrap();
-    let allowed = ["AUTH", "PBSZ", "PROT", "USER", "PASS", "FEAT", "TYPE", "CWD", "PASV", "MLSD", "LIST", "QUIT", "OPTS"];
+    let allowed = [
+        "AUTH", "PBSZ", "PROT", "USER", "PASS", "FEAT", "TYPE", "CWD", "PASV", "MLSD", "LIST", "QUIT", "OPTS",
+    ];
     for line in log.iter() {
         let verb = line.split(' ').next().unwrap().to_ascii_uppercase();
         assert!(allowed.contains(&verb.as_str()), "unexpected command {line}");
     }
-    assert!(log.iter().any(|l| l == "PASV") && !log.iter().any(|l| l.starts_with("PORT") || l.starts_with("EPRT")), "passive mode only");
+    assert!(
+        log.iter().any(|l| l == "PASV") && !log.iter().any(|l| l.starts_with("PORT") || l.starts_with("EPRT")),
+        "passive mode only"
+    );
 }
 
 #[test]
@@ -367,7 +417,9 @@ fn an_mlsd_server_is_walked_with_mlsd_and_a_refresh_applies_differences() {
     {
         let mut tree = server.state.tree.lock().unwrap();
         tree.get_mut("/pub/docs").unwrap().retain(|(n, _)| n != "a.txt");
-        tree.get_mut("/pub").unwrap().push(("new.bin".into(), Node::File(7, "20260101000000")));
+        tree.get_mut("/pub")
+            .unwrap()
+            .push(("new.bin".into(), Node::File(7, "20260101000000")));
         tree.get_mut("/pub").unwrap().retain(|(n, _)| n != "empty");
         tree.remove("/pub/empty");
     }
@@ -428,14 +480,25 @@ fn an_unreadable_folder_is_counted_and_nothing_is_pruned_after_it() {
     assert_eq!(index.read().live_count(), 6, "root, docs, empty, the movie and docs' two files");
     // docs becomes unreadable at the same time as a file elsewhere is deleted.
     server.state.forbidden.lock().unwrap().push("/pub/docs".into());
-    server.state.tree.lock().unwrap().get_mut("/pub").unwrap().retain(|(n, _)| n != "movie one.mkv");
+    server
+        .state
+        .tree
+        .lock()
+        .unwrap()
+        .get_mut("/pub")
+        .unwrap()
+        .retain(|(n, _)| n != "movie one.mkv");
     let progress = Progress::default();
     sync(&index, id, &remote, &progress).unwrap();
     assert_eq!(progress.unreadable(), 1);
     {
         let index = index.read();
         let root = index.volume(id).unwrap().root;
-        assert_eq!(names(&index, root), ["docs", "empty", "movie one.mkv"], "an incomplete listing prunes nothing");
+        assert_eq!(
+            names(&index, root),
+            ["docs", "empty", "movie one.mkv"],
+            "an incomplete listing prunes nothing"
+        );
         assert_eq!(names(&index, index.child_named(root, "docs").unwrap()), ["a.txt", "ünï.md"]);
     }
     // Once the folder reads again the next complete listing prunes.
@@ -453,7 +516,14 @@ fn a_wrong_password_a_missing_keyring_entry_and_a_missing_folder_say_what_to_do(
     let err = sync_with(&index, id, &Progress::default(), &|_| Ok("wrong".into()), no_trust()).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     assert!(err.to_string().contains("rejected the login"), "{err}");
-    let err = sync_with(&index, id, &Progress::default(), &|_| Err("the password is not in the OS keyring".into()), no_trust()).unwrap_err();
+    let err = sync_with(
+        &index,
+        id,
+        &Progress::default(),
+        &|_| Err("the password is not in the OS keyring".into()),
+        no_trust(),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("keyring"), "{err}");
     assert_eq!(index.read().live_count(), 1);
     // The root must exist.
@@ -477,7 +547,10 @@ fn certified() -> (Arc<ServerConfig>, RootCertStore) {
         .with_safe_default_protocol_versions()
         .unwrap()
         .with_no_client_auth()
-        .with_single_cert(vec![der.clone()], PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.signing_key.serialize_der())))
+        .with_single_cert(
+            vec![der.clone()],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.signing_key.serialize_der())),
+        )
         .unwrap();
     let mut roots = RootCertStore::empty();
     roots.add(der).unwrap();
@@ -496,7 +569,10 @@ fn explicit_ftps_secures_the_control_and_data_channels_and_is_refused_where_it_c
     // A certificate no root vouches for is a failure that names FTPS, and nothing was sent in the clear.
     let err = sync_with(&index, id, &Progress::default(), &good, no_trust()).unwrap_err();
     assert!(err.to_string().contains("FTPS handshake"), "{err}");
-    assert!(server.state.passwords.lock().unwrap().is_empty(), "the password never went out unprotected");
+    assert!(
+        server.state.passwords.lock().unwrap().is_empty(),
+        "the password never went out unprotected"
+    );
     // Trusted, it lists through TLS on both channels.
     let r = sync_with(&index, id, &Progress::default(), &good, client_config(roots));
     r.unwrap();
@@ -508,8 +584,15 @@ fn explicit_ftps_secures_the_control_and_data_channels_and_is_refused_where_it_c
         assert_eq!(names(&index, docs), ["a.txt", "ünï.md"]);
     }
     let log = server.state.log.lock().unwrap().clone();
-    let at = |needle: &str| log.iter().position(|l| l == needle).unwrap_or_else(|| panic!("{needle} not sent: {log:?}"));
-    assert!(at("AUTH TLS") < at("USER me") && at("PROT P") < at("USER me"), "secured before the login");
+    let at = |needle: &str| {
+        log.iter()
+            .position(|l| l == needle)
+            .unwrap_or_else(|| panic!("{needle} not sent: {log:?}"))
+    };
+    assert!(
+        at("AUTH TLS") < at("USER me") && at("PROT P") < at("USER me"),
+        "secured before the login"
+    );
     drop(log);
 
     // A server that offers no FTPS is refused unless plain FTP was allowed on purpose.

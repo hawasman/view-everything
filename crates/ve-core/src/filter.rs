@@ -63,10 +63,7 @@ impl Filter {
                         continue;
                     }
                     let counts = matched.contains(child.index())
-                        || (captured
-                            && query.is_none_or(|q| {
-                                q.passes_exclusions(&candidate(index, q, child, &mut scratch))
-                            }));
+                        || (captured && query.is_none_or(|q| q.passes_exclusions(&candidate(index, q, child, &mut scratch))));
                     if !counts {
                         continue;
                     }
@@ -157,12 +154,7 @@ impl Filter {
     }
 }
 
-fn candidate<'a>(
-    index: &'a Index,
-    query: &Query,
-    id: EntryId,
-    scratch: &'a mut (String, Vec<EntryId>),
-) -> Candidate<'a> {
+fn candidate<'a>(index: &'a Index, query: &Query, id: EntryId, scratch: &'a mut (String, Vec<EntryId>)) -> Candidate<'a> {
     let path = if query.needs_path() {
         index.write_match_path(id, &mut scratch.0, &mut scratch.1);
         Some(scratch.0.as_str())
@@ -182,27 +174,23 @@ fn match_all(index: &Index, query: &Query) -> BitSet {
     let n = index.capacity();
     const WORDS_PER_TASK: usize = 64;
     let mut words = vec![0u64; n.div_ceil(64)];
-    words
-        .par_chunks_mut(WORDS_PER_TASK)
-        .enumerate()
-        .for_each_init(
-            || (String::new(), Vec::new()),
-            |scratch, (task, chunk)| {
-                let first = task * WORDS_PER_TASK * 64;
-                for (w, word) in chunk.iter_mut().enumerate() {
-                    for bit in 0..64 {
-                        let i = first + w * 64 + bit;
-                        if i >= n {
-                            return;
-                        }
-                        let id = EntryId(i as u32);
-                        if index.is_live(id) && query.matches(&candidate(index, query, id, scratch))
-                        {
-                            *word |= 1 << bit;
-                        }
+    words.par_chunks_mut(WORDS_PER_TASK).enumerate().for_each_init(
+        || (String::new(), Vec::new()),
+        |scratch, (task, chunk)| {
+            let first = task * WORDS_PER_TASK * 64;
+            for (w, word) in chunk.iter_mut().enumerate() {
+                for bit in 0..64 {
+                    let i = first + w * 64 + bit;
+                    if i >= n {
+                        return;
+                    }
+                    let id = EntryId(i as u32);
+                    if index.is_live(id) && query.matches(&candidate(index, query, id, scratch)) {
+                        *word |= 1 << bit;
                     }
                 }
-            },
-        );
+            }
+        },
+    );
     BitSet::from_words(words, n)
 }

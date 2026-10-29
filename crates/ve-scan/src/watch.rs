@@ -19,14 +19,17 @@ const POLL: Duration = Duration::from_secs(3);
 /// Starts a thread that calls `on_change` with the Volumes mounted now whenever they differ
 /// from the last look, the first being `initial`.
 pub fn watch(initial: Vec<VolumeInfo>, on_change: impl FnMut(Vec<VolumeInfo>) + Send + 'static) {
-    let spawned = thread::Builder::new()
-        .name("ve-watch".into())
-        .spawn(move || {
-            let mut wait = mount_waiter();
-            // One look as soon as the wait is armed, for a mount between `initial` and now.
-            let mut armed = false;
-            run(initial, move || std::mem::replace(&mut armed, true).then(&mut wait).unwrap_or(true), discover_volumes, on_change)
-        });
+    let spawned = thread::Builder::new().name("ve-watch".into()).spawn(move || {
+        let mut wait = mount_waiter();
+        // One look as soon as the wait is armed, for a mount between `initial` and now.
+        let mut armed = false;
+        run(
+            initial,
+            move || std::mem::replace(&mut armed, true).then(&mut wait).unwrap_or(true),
+            discover_volumes,
+            on_change,
+        )
+    });
     if let Err(e) = spawned {
         eprintln!("Cannot watch for new Volumes: {e}");
     }
@@ -126,7 +129,10 @@ mod tests {
     #[test]
     fn a_returning_offline_volume_is_queued_for_catch_up_by_the_event() {
         let dir = tempfile::tempdir().unwrap();
-        let usb = VolumeInfo { mount: dir.path().into(), ..volume("/x") };
+        let usb = VolumeInfo {
+            mount: dir.path().into(),
+            ..volume("/x")
+        };
         let index = crate::SharedIndex::new(ve_core::Index::new());
         crate::reconcile(&index, std::slice::from_ref(&usb), std::slice::from_ref(&usb));
         let first = vec![usb.clone()];

@@ -2,9 +2,9 @@
 
 use crate::engine::Shared;
 use crate::format;
+use crate::selection::Selection;
 use crate::theme::palette;
 use crate::ui::swatch;
-use crate::selection::Selection;
 use crate::view::{self, View};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::{Icon, IconName, h_flex};
@@ -251,13 +251,7 @@ impl TableDelegate for TreeList {
         }
     }
 
-    fn perform_sort(
-        &mut self,
-        col: usize,
-        sort: ColumnSort,
-        _: &mut Window,
-        _: &mut Context<TableState<Self>>,
-    ) {
+    fn perform_sort(&mut self, col: usize, sort: ColumnSort, _: &mut Window, _: &mut Context<TableState<Self>>) {
         self.sort = Sort {
             on_disk: col != 2,
             descending: sort != ColumnSort::Ascending,
@@ -265,34 +259,22 @@ impl TableDelegate for TreeList {
         self.rebuild();
     }
 
-    fn render_th(
-        &mut self,
-        col_ix: usize,
-        _: &mut Window,
-        cx: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
+    fn render_th(&mut self, col_ix: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
         let text = crate::theme::palette(cx).text;
         div()
             .size_full()
             .text_size(px(12.))
-            .when(col_ix == if self.sort.on_disk { 1 } else { 2 }, |d| d.text_color(text).font_weight(FontWeight::MEDIUM))
+            .when(col_ix == if self.sort.on_disk { 1 } else { 2 }, |d| {
+                d.text_color(text).font_weight(FontWeight::MEDIUM)
+            })
             .child(self.column(col_ix, cx).name.clone())
     }
 
-    fn render_last_empty_col(
-        &mut self,
-        _: &mut Window,
-        _: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
+    fn render_last_empty_col(&mut self, _: &mut Window, _: &mut Context<TableState<Self>>) -> impl IntoElement {
         div().w_0()
     }
 
-    fn render_tr(
-        &mut self,
-        row: usize,
-        _: &mut Window,
-        cx: &mut Context<TableState<Self>>,
-    ) -> Stateful<Div> {
+    fn render_tr(&mut self, row: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> Stateful<Div> {
         if self.cells.len() > CACHED_ROWS {
             self.cells.clear();
         }
@@ -308,11 +290,7 @@ impl TableDelegate for TreeList {
                     Some(p) => view.filter.totals(&index, p).on_disk,
                     None => view.total.on_disk,
                 };
-                let share = if parent > 0 {
-                    totals.on_disk as f64 / parent as f64
-                } else {
-                    1.0
-                };
+                let share = if parent > 0 { totals.on_disk as f64 / parent as f64 } else { 1.0 };
                 let is_dir = index.is_dir(id);
                 Some(Cells {
                     depth,
@@ -323,23 +301,14 @@ impl TableDelegate for TreeList {
                     category: match (is_dir, index.parent(id)) {
                         (_, None) => None,
                         (false, _) => Some(self.categories.of_name(index.name(id))),
-                        (true, _) => Some(crate::treemap::dominant_category(
-                            &index,
-                            &view.filter,
-                            &self.categories,
-                            id,
-                        )),
+                        (true, _) => Some(crate::treemap::dominant_category(&index, &view.filter, &self.categories, id)),
                     },
                     share: share as f32,
                     texts: [
                         format::size(totals.on_disk),
                         format::size(totals.logical),
                         format!("{:.1}%", share * 100.0),
-                        if is_dir {
-                            format::count(totals.files)
-                        } else {
-                            String::new()
-                        },
+                        if is_dir { format::count(totals.files) } else { String::new() },
                         format::time(index.modified(id)),
                     ],
                 })
@@ -361,13 +330,7 @@ impl TableDelegate for TreeList {
             }))
     }
 
-    fn render_td(
-        &mut self,
-        row: usize,
-        col: usize,
-        _: &mut Window,
-        cx: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
+    fn render_td(&mut self, row: usize, col: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
         let Some(c) = self.cells.get(&row) else {
             return div().into_any_element();
         };
