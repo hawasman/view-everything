@@ -47,7 +47,7 @@ impl Record {
         let modified = parse_time(std::str::from_utf8(fields.next()?).ok()?)?;
         let kind = fields.next()?;
         let path = String::from_utf8_lossy(fields.next()?).into_owned();
-        Some(Record { inode, links, size, on_disk: blocks * 512, modified, is_dir: kind == b"d", path })
+        Some(Record { inode, links, size, on_disk: blocks.checked_mul(512)?, modified, is_dir: kind == b"d", path })
     }
 
     fn meta(&self) -> EntryMeta {
@@ -81,7 +81,7 @@ fn shell_quote(text: &str) -> String {
 }
 
 fn command_line(root: &str) -> String {
-    format!("find {} -xdev -printf {}", shell_quote(root), shell_quote(FORMAT))
+    format!("find -H {} -xdev -printf {}", shell_quote(root), shell_quote(FORMAT))
 }
 
 /// Adds Remotes in `wanted` that the Index lacks and removes Remotes it holds that are no longer
@@ -448,10 +448,15 @@ mod tests {
     }
 
     #[test]
+    fn a_record_with_absurd_blocks_is_malformed() {
+        assert!(Record::parse(b"1\t1\t1\t36028797018963969\t1.0\tf\tx").is_none());
+    }
+
+    #[test]
     fn the_command_line_quotes_the_root() {
         assert_eq!(
             command_line("/srv/it's"),
-            r"find '/srv/it'\''s' -xdev -printf '%i\t%n\t%s\t%b\t%T@\t%y\t%P\0'"
+            r"find -H '/srv/it'\''s' -xdev -printf '%i\t%n\t%s\t%b\t%T@\t%y\t%P\0'"
         );
     }
 

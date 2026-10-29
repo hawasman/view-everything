@@ -149,6 +149,23 @@ fn df_over_the_same_ssh_gives_the_remote_a_capacity_and_a_failing_df_clears_it()
 }
 
 #[test]
+fn a_root_that_is_a_symlink_is_listed_through() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    fs::create_dir_all(&tree).unwrap();
+    fs::write(tree.join("a.txt"), "a").unwrap();
+    let link = dir.path().join("root-link");
+    std::os::unix::fs::symlink(&tree, &link).unwrap();
+    let ssh = script(dir.path(), "ssh", LOCAL);
+    let index = SharedIndex::new(Index::new());
+    let id = add(&index, link.to_str().unwrap());
+    remote::sync_with(ssh.to_str().unwrap(), &index, id, &Progress::default()).unwrap();
+    let index = index.read();
+    assert_eq!(names(&index, index.volume(id).unwrap().root), ["a.txt"]);
+}
+
+#[test]
 fn a_remote_survives_a_save_and_is_not_swept_up_as_an_offline_volume() {
     let index = SharedIndex::new(Index::new());
     let remote = Remote::new("me@box", "/srv/backup/").unwrap();

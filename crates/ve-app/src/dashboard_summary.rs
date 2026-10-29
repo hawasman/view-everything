@@ -174,9 +174,14 @@ fn summarize_with(
         // A Query few of the newest files satisfy: look through every file for the newest ones.
         if ids.len() < LIST_LEN && truncated {
             let mut best = Best::new(LIST_LEN);
+            let mut seen_links = HashSet::new();
             for i in 0..index.capacity() {
                 let id = EntryId(i as u32);
                 if !index.is_live(id) || index.is_dir(id) || !best.wants(index.modified(id)) {
+                    continue;
+                }
+                // A hard link to a file already listed (in its Volume) adds nothing.
+                if index.is_hardlinked(id) && !seen_links.insert((index.volume_of(id), index.key(id))) {
                     continue;
                 }
                 if matches(index, query, id, &mut scratch) {

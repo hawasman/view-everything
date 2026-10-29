@@ -771,13 +771,12 @@ impl DashboardPage {
             },
             None => ("—".to_owned(), "No Locations yet.".to_owned()),
         };
-        let refresh_why = match old {
-            None => Some("There is nothing to refresh"),
-            Some(l) if !l.online => Some("An Offline Volume cannot be refreshed"),
-            _ => None,
-        };
-        let label = old.map_or("Refresh".to_owned(), |l| format!("Refresh {}", l.name));
-        let refresh_ids: Vec<String> = old.map(|l| l.members.iter().map(|m| m.identity.clone()).collect()).unwrap_or_default();
+        // The button refreshes the oldest Location that can be reached: an Offline one cannot.
+        let online: Vec<&Location> = locations.iter().filter(|l| l.online).collect();
+        let target = oldest(&online.iter().map(|l| l.last_synced).collect::<Vec<_>>()).map(|i| online[i]);
+        let refresh_why = target.is_none().then_some("There is nothing to refresh");
+        let label = target.map_or("Refresh".to_owned(), |l| format!("Refresh {}", l.name));
+        let refresh_ids: Vec<String> = target.map(|l| l.members.iter().map(|m| m.identity.clone()).collect()).unwrap_or_default();
         let synced = panel(cx)
             .flex_1()
             .child(div().font_weight(FontWeight::MEDIUM).child("Index last synced"))
