@@ -1,0 +1,19 @@
+#!/bin/sh
+# Runs cargo for this repo on a machine with little RAM: one build at a time across every
+# worktree, at most 4 jobs, and a memory cap, so a runaway link is killed instead of freezing
+# the desktop. Usage: .githooks/cargo [+toolchain] <cargo args>
+# VE_BUILD_LOCK_HELD=1 skips the lock (the caller holds it); VE_BUILD_MEMORY_MAX sets the cap.
+set -e
+
+lock=/tmp/view-everything-build.lock
+if [ -z "$VE_BUILD_LOCK_HELD" ] && command -v flock >/dev/null 2>&1; then
+    VE_BUILD_LOCK_HELD=1 exec flock "$lock" "$0" "$@"
+fi
+
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+cap="${VE_BUILD_MEMORY_MAX:-7G}"
+if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope -q true 2>/dev/null; then
+    # MemoryHigh throttles the build before MemoryMax kills it.
+    exec systemd-run --user --scope -q -p MemoryHigh=5G -p MemoryMax="$cap" -p MemorySwapMax=2G cargo "$@"
+fi
+exec cargo "$@"
