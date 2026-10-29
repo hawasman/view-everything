@@ -286,7 +286,7 @@ fn run_indexer(
             // The format changed (a new column, say): say so rather than show a bare error.
             Err(e) if e.kind() == std::io::ErrorKind::Unsupported && e.to_string().contains("needs rebuild") => shared.report(
                 "Index format",
-                "This version of View Everything stores more about each Entry, so the saved Index is being rebuilt. Search works as Locations finish scanning.".to_owned(),
+                "The Index format changed, so it is being rebuilt; search works as Locations finish.".to_owned(),
             ),
             Err(e) => shared.report("save", format!("The saved Index could not be used ({e}); building a new one")),
         }
