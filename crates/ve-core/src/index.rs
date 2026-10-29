@@ -42,15 +42,108 @@ pub struct EntryMeta {
 
 /// An SSH Remote: a folder on another machine, indexed over `ssh` without mounting it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Remote {
+pub struct SshRemote {
     /// `user@host` or an `~/.ssh/config` alias, as given to `ssh`.
     pub host: String,
     /// Absolute folder on the server.
     pub path: String,
 }
 
+/// An S3 Remote: a bucket, or a prefix in one, listed over the S3 API. It holds no secret: typed
+/// keys keep their secret in the OS keyring, under the Remote's identity.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct S3Remote {
+    pub bucket: String,
+    /// Folder-like prefix without leading or trailing `/`; empty for the whole bucket.
+    #[serde(default)]
+    pub prefix: String,
+    /// `https://host[:port]` of a custom endpoint (R2, MinIO, B2, Wasabi); `None` is AWS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    pub region: String,
+    /// `endpoint/bucket/key` rather than `bucket.endpoint/key`.
+    #[serde(default)]
+    pub path_style: bool,
+    /// A named profile of `~/.aws`; `None` is the standard chain (environment, then `default`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Access key ID of keys typed into the dialog; its secret is in the keyring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_key: Option<String>,
+}
+
+impl S3Remote {
+    /// A Remote from what the user typed. `endpoint` may omit the scheme (https is assumed).
+    pub fn new(
+        bucket: &str,
+        prefix: &str,
+        endpoint: &str,
+        region: &str,
+        path_style: bool,
+        profile: &str,
+        access_key: &str,
+    ) -> Result<S3Remote, String> {
+        let bucket = bucket.trim();
+        if bucket.is_empty() || bucket.contains(|c: char| c == '/' || c.is_whitespace()) {
+            return Err("Bucket must be a bucket name, without slashes".into());
+        }
+        let region = region.trim();
+        if region.is_empty() || region.contains(|c: char| c == '/' || c.is_whitespace()) {
+            return Err("Region is required, such as us-east-1 (auto for Cloudflare R2)".into());
+        }
+        let endpoint = endpoint.trim().trim_end_matches('/');
+        let endpoint = match endpoint {
+            "" => None,
+            e if e.contains(char::is_whitespace) => return Err("Endpoint must be a URL or host name".into()),
+            e if e.starts_with("http://") || e.starts_with("https://") => Some(e.to_owned()),
+            e if e.contains("://") => return Err("Endpoint must be http:// or https://".into()),
+            e => Some(format!("https://{e}")),
+        };
+        let some = |text: &str| Some(text.trim().to_owned()).filter(|t| !t.is_empty());
+        Ok(S3Remote {
+            bucket: bucket.into(),
+            prefix: prefix.trim().trim_matches('/').into(),
+            endpoint,
+            region: region.into(),
+            path_style,
+            profile: some(profile),
+            access_key: some(access_key),
+        })
+    }
+
+    /// `host[:port]` of the endpoint, or the AWS host of the region.
+    pub fn endpoint_host(&self) -> String {
+        match &self.endpoint {
+            Some(e) => e.split_once("://").map_or(e.as_str(), |(_, rest)| rest).trim_end_matches('/').to_owned(),
+            None => format!("s3.{}.amazonaws.com", self.region),
+        }
+    }
+
+    /// `s3:<endpoint-host>/<bucket>/<prefix>`: the same Location wherever it is listed.
+    pub fn identity(&self) -> String {
+        format!("s3:{}/{}/{}", self.endpoint_host(), self.bucket, self.prefix)
+    }
+
+    /// `s3://bucket/prefix`, with the host of a custom endpoint, for display.
+    pub fn label(&self) -> String {
+        let name = format!("s3://{}/{}", self.bucket, self.prefix);
+        match &self.endpoint {
+            Some(_) => format!("{name} ({})", self.endpoint_host()),
+            None => name,
+        }
+    }
+}
+
+/// A Remote Location: storage reached over a network protocol, read-only.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Remote {
+    Ssh(SshRemote),
+    S3(S3Remote),
+}
+
 impl Remote {
-    /// A Remote from what the user typed. The host must be safe to hand to `ssh` as an
+    /// An SSH Remote from what the user typed. The host must be safe to hand to `ssh` as an
     /// argument and the path absolute (the server's shell would not expand `~` in quotes).
     pub fn new(host: &str, path: &str) -> Result<Remote, String> {
         let (host, path) = (host.trim(), path.trim());
@@ -61,17 +154,32 @@ impl Remote {
             return Err("Path must be an absolute folder, such as /srv/backup".into());
         }
         let path = if path.len() > 1 { path.trim_end_matches('/') } else { path };
-        Ok(Remote { host: host.into(), path: if path.is_empty() { "/".into() } else { path.into() } })
+        Ok(Remote::Ssh(SshRemote { host: host.into(), path: if path.is_empty() { "/".into() } else { path.into() } }))
     }
 
-    /// What makes this Remote the same Location wherever it is listed: `ssh:user@host:/path`.
+    /// What makes this Remote the same Location wherever it is listed: `ssh:user@host:/path` or
+    /// `s3:host/bucket/prefix`.
     pub fn identity(&self) -> String {
-        format!("ssh:{}:{}", self.host, self.path)
+        match self {
+            Remote::Ssh(r) => format!("ssh:{}:{}", r.host, r.path),
+            Remote::S3(r) => r.identity(),
+        }
     }
 
-    /// `user@host:/path`, for display.
+    /// `user@host:/path` or `s3://bucket/prefix`, for display.
     pub fn label(&self) -> String {
-        format!("{}:{}", self.host, self.path)
+        match self {
+            Remote::Ssh(r) => format!("{}:{}", r.host, r.path),
+            Remote::S3(r) => r.label(),
+        }
+    }
+
+    /// The protocol, for the Remote · tag.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Remote::Ssh(_) => "SSH",
+            Remote::S3(_) => "S3",
+        }
     }
 }
 
@@ -84,9 +192,11 @@ pub enum SyncState {
     /// Re-walk the folder tree and apply differences.
     Walk,
     /// A Remote: re-run `find` over ssh and apply differences.
-    Ssh(Remote),
+    Ssh(SshRemote),
     /// Read the NTFS change journal from `next_usn`.
     Ntfs { journal_id: u64, next_usn: i64 },
+    /// A Remote: list the bucket again and apply differences. Last, to keep older Indexes readable.
+    S3(S3Remote),
 }
 
 /// A Volume's total and free bytes, as measured at a sync.
@@ -118,16 +228,17 @@ pub struct Volume {
 
 impl Volume {
     /// The Remote this Location is, if it is one.
-    pub fn remote(&self) -> Option<&Remote> {
+    pub fn remote(&self) -> Option<Remote> {
         match &self.sync {
-            SyncState::Ssh(remote) => Some(remote),
+            SyncState::Ssh(remote) => Some(Remote::Ssh(remote.clone())),
+            SyncState::S3(remote) => Some(Remote::S3(remote.clone())),
             _ => None,
         }
     }
 
     /// A read-only Remote rather than a mounted Volume.
     pub fn is_remote(&self) -> bool {
-        matches!(self.sync, SyncState::Ssh(_))
+        matches!(self.sync, SyncState::Ssh(_) | SyncState::S3(_))
     }
 
     /// Whether Catch-up should run at `now` (seconds since the Unix epoch): the Last Synced is
@@ -236,11 +347,16 @@ impl Index {
     }
 
     /// Adds a Remote as a Location with only its root, ready for a sync. It is always online;
-    /// its root Entry is named by its identity, so paths read `ssh:user@host:/path/...`.
+    /// its root Entry is named by its identity, so paths read `ssh:user@host:/path/...` or
+    /// `s3:host/bucket/prefix/...`.
     pub fn add_remote(&mut self, remote: &Remote) -> VolumeId {
         let identity = remote.identity();
         let meta = EntryMeta { is_dir: true, ..EntryMeta::default() };
-        self.add_volume(Path::new(&identity), "ssh", &identity, meta, SyncState::Ssh(remote.clone()))
+        let (fs_type, sync) = match remote {
+            Remote::Ssh(r) => ("ssh", SyncState::Ssh(r.clone())),
+            Remote::S3(r) => ("s3", SyncState::S3(r.clone())),
+        };
+        self.add_volume(Path::new(&identity), fs_type, &identity, meta, sync)
     }
 
     pub fn remove_volume(&mut self, id: VolumeId) {

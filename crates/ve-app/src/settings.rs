@@ -32,7 +32,7 @@ pub struct Settings {
     /// Light, Dark, or following the system.
     #[serde(default)]
     pub theme: ThemeChoice,
-    /// The SSH Remotes the user added. Their refresh interval is in `volume_refresh_minutes`
+    /// The Remotes (SSH and S3) the user added. Their refresh interval is in `volume_refresh_minutes`
     /// under their identity; Manual unless set.
     #[serde(default)]
     pub remotes: Vec<Remote>,
@@ -246,6 +246,7 @@ pub fn load_categories() -> Result<CategoryMap, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ve_core::S3Remote;
 
     fn volume(mount: &str, removable: bool) -> VolumeInfo {
         VolumeInfo {
@@ -284,6 +285,25 @@ mod tests {
         assert_eq!(s.refresh_minutes_for(&nas), 10);
         s.set_indexed(&nas, false);
         assert!(s.include.is_empty() && !s.is_indexed(&nas));
+    }
+
+    #[test]
+    fn an_s3_remote_is_saved_without_any_secret_and_an_ssh_one_still_loads() {
+        let secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+        let s3 = S3Remote::new("bkt", "a/b", "minio.lan:9000", "us-east-1", true, "", "AKIAEXAMPLE").unwrap();
+        let mut s = Settings::default();
+        s.add_remote(Remote::S3(s3.clone()), 0);
+        s.add_remote(Remote::new("me@box", "/srv").unwrap(), 60);
+        let text = toml::to_string(&s).unwrap();
+        // The typed secret is not a field of anything saved; only the key ID and the connection are.
+        assert!(!text.contains(secret) && !text.to_lowercase().contains("secret"), "{text}");
+        assert!(text.contains("access_key = \"AKIAEXAMPLE\""));
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(back.remotes, s.remotes);
+        assert_eq!(back.remotes[0], Remote::S3(s3));
+        // A settings file from before S3 Remotes has only SSH ones, in their old shape.
+        let old: Settings = toml::from_str("[[remotes]]\nhost = \"me@box\"\npath = \"/srv\"\n").unwrap();
+        assert_eq!(old.remotes, [Remote::new("me@box", "/srv").unwrap()]);
     }
 
     #[test]

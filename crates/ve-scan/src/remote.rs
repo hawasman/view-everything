@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
-use ve_core::{Capacity, EntryId, EntryMeta, Remote, SyncState, VolumeId};
+use ve_core::{Capacity, EntryId, EntryMeta, Remote, SshRemote, SyncState, VolumeId};
 
 /// One record per Entry, NUL-terminated so a name may hold anything but NUL; the name is last
 /// so that a tab inside it stays inside it. Fields: inode, link count, size in bytes, 512-byte
@@ -88,13 +88,7 @@ fn command_line(root: &str) -> String {
 /// wanted. A Remote is always online. Returns the Remotes newly added, to sync now.
 pub fn reconcile_remotes(index: &SharedIndex, wanted: &[Remote]) -> Vec<VolumeId> {
     let mut index = index.write();
-    let known: Vec<_> = index
-        .volumes()
-        .filter_map(|(id, v)| match &v.sync {
-            SyncState::Ssh(r) => Some((id, r.clone())),
-            _ => None,
-        })
-        .collect();
+    let known: Vec<_> = index.volumes().filter_map(|(id, v)| Some((id, v.remote()?))).collect();
     for (id, remote) in &known {
         if wanted.contains(remote) {
             let mount = index.volume(*id).map(|v| v.mount.clone());
@@ -112,13 +106,14 @@ pub fn reconcile_remotes(index: &SharedIndex, wanted: &[Remote]) -> Vec<VolumeId
 
 /// Brings a Remote's Entries up to date with what its server lists now.
 pub fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::Result<()> {
-    sync_with("ssh", index, volume, progress)
+    let s3 = matches!(index.read().volume(volume).map(|v| &v.sync), Some(SyncState::S3(_)));
+    if s3 { crate::s3::sync(index, volume, progress) } else { sync_with("ssh", index, volume, progress) }
 }
 
 /// Remotes known to lack GNU `find -printf`, so the next sync goes straight to SFTP.
 ///
 /// ponytail: remembered for the session only; persisting it needs a field on `Remote` in ve-core.
-static SFTP_ONLY: Mutex<Vec<Remote>> = Mutex::new(Vec::new());
+static SFTP_ONLY: Mutex<Vec<SshRemote>> = Mutex::new(Vec::new());
 
 /// [`sync`] through the `ssh` program `program` (a test double, or the system one): over remote
 /// `find`, or over SFTP when the server has no GNU `find -printf` (remembered per Remote).
@@ -140,11 +135,11 @@ pub fn sync_with(program: &str, index: &SharedIndex, volume: VolumeId, progress:
 
 /// Whether the Remote's server is known to lack GNU `find -printf` (it is indexed over SFTP).
 pub fn is_sftp_only(remote: &Remote) -> bool {
-    SFTP_ONLY.lock().contains(remote)
+    matches!(remote, Remote::Ssh(r) if SFTP_ONLY.lock().contains(r))
 }
 
-fn list(program: &str, index: &SharedIndex, root: EntryId, remote: &Remote, progress: &Progress) -> io::Result<()> {
-    if !is_sftp_only(remote) {
+fn list(program: &str, index: &SharedIndex, root: EntryId, remote: &SshRemote, progress: &Progress) -> io::Result<()> {
+    if !SFTP_ONLY.lock().contains(remote) {
         match sync_find(program, index, root, remote, progress) {
             Err(e) if e.kind() == io::ErrorKind::Unsupported => {}
             done => return done,
@@ -160,7 +155,7 @@ fn list(program: &str, index: &SharedIndex, root: EntryId, remote: &Remote, prog
 
 /// The capacity of the filesystem holding the Remote's root, from `df -kP` run over `program`
 /// (ssh) with the options the listing uses; so it works on SFTP-only hosts that can run `df`.
-pub fn df_with(program: &str, remote: &Remote) -> io::Result<Capacity> {
+pub fn df_with(program: &str, remote: &SshRemote) -> io::Result<Capacity> {
     let mut child = spawn(program, remote, false, &format!("df -kP {}", shell_quote(&remote.path)), Stdio::null())?;
     let stderr = drain_stderr(&mut child);
     let mut out = String::new();
@@ -189,7 +184,7 @@ pub fn parse_df(text: &str) -> Option<Capacity> {
 
 /// Starts `program` (ssh) with the options every run shares; `command` runs on the server, or
 /// with `subsystem` names the subsystem to request.
-fn spawn(program: &str, remote: &Remote, subsystem: bool, command: &str, stdin: Stdio) -> io::Result<Child> {
+fn spawn(program: &str, remote: &SshRemote, subsystem: bool, command: &str, stdin: Stdio) -> io::Result<Child> {
     let mut ssh = Command::new(program);
     ssh.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15"]);
     if subsystem {
@@ -217,7 +212,7 @@ fn drain_stderr(child: &mut Child) -> std::thread::JoinHandle<String> {
     })
 }
 
-fn sync_find(program: &str, index: &SharedIndex, root: EntryId, remote: &Remote, progress: &Progress) -> io::Result<()> {
+fn sync_find(program: &str, index: &SharedIndex, root: EntryId, remote: &SshRemote, progress: &Progress) -> io::Result<()> {
     let mut child = spawn(program, remote, false, &command_line(&remote.path), Stdio::null())?;
     let stderr = drain_stderr(&mut child);
     let mut applier = Applier::new(index, root, progress);
@@ -233,7 +228,7 @@ fn sync_find(program: &str, index: &SharedIndex, root: EntryId, remote: &Remote,
                     buf.pop();
                 }
                 match Record::parse(&buf) {
-                    Some(record) => batch.push(record),
+                    Some(record) => batch.push((record.path.clone(), record.meta())),
                     None => malformed = true,
                 }
                 if batch.len() >= BATCH {
@@ -269,14 +264,14 @@ fn sync_find(program: &str, index: &SharedIndex, root: EntryId, remote: &Remote,
 
 /// Indexes a Remote over `ssh -s host sftp`. As with find, Entries are pruned only after a
 /// listing that reached every folder.
-fn sync_sftp(program: &str, index: &SharedIndex, root: EntryId, remote: &Remote, progress: &Progress) -> io::Result<()> {
+fn sync_sftp(program: &str, index: &SharedIndex, root: EntryId, remote: &SshRemote, progress: &Progress) -> io::Result<()> {
     let mut child = spawn(program, remote, true, "sftp", Stdio::piped())?;
     let stderr = drain_stderr(&mut child);
     let (stdin, stdout) = (child.stdin.take().expect("piped"), child.stdout.take().expect("piped"));
     let mut applier = Applier::new(index, root, progress);
     let mut batch = Vec::new();
     let walked = sftp::walk(BufReader::new(stdout), stdin, &remote.path, |record| {
-        batch.push(record);
+        batch.push((record.path.clone(), record.meta()));
         if batch.len() >= BATCH {
             applier.apply(&mut batch);
         }
@@ -298,7 +293,7 @@ fn sync_sftp(program: &str, index: &SharedIndex, root: EntryId, remote: &Remote,
 }
 
 /// Why the run failed, in words for the user, or `None` if it produced a listing.
-fn failure(remote: &Remote, code: Option<i32>, records: u64, stderr: &str) -> Option<io::Error> {
+fn failure(remote: &SshRemote, code: Option<i32>, records: u64, stderr: &str) -> Option<io::Error> {
     let message = stderr.trim().lines().last().unwrap_or("").trim();
     let host = &remote.host;
     let err = |kind, text: String| Some(io::Error::new(kind, text));
@@ -323,7 +318,7 @@ fn failure(remote: &Remote, code: Option<i32>, records: u64, stderr: &str) -> Op
 ///
 /// ponytail: a refresh maps every existing Entry by (parent, name) in memory; a stream-diff
 /// would need less but the Remotes this is for are one machine's folders.
-struct Applier<'a> {
+pub(crate) struct Applier<'a> {
     index: &'a SharedIndex,
     progress: &'a Progress,
     root: EntryId,
@@ -331,11 +326,11 @@ struct Applier<'a> {
     dirs: HashMap<String, EntryId>,
     /// Entries already in the Index that the listing has not mentioned yet.
     unseen: HashMap<(EntryId, String), EntryId>,
-    records: u64,
+    pub(crate) records: u64,
 }
 
 impl<'a> Applier<'a> {
-    fn new(index: &'a SharedIndex, root: EntryId, progress: &'a Progress) -> Self {
+    pub(crate) fn new(index: &'a SharedIndex, root: EntryId, progress: &'a Progress) -> Self {
         let mut dirs = HashMap::from([(String::new(), root)]);
         let mut unseen = HashMap::new();
         {
@@ -355,20 +350,19 @@ impl<'a> Applier<'a> {
         Applier { index, progress, root, dirs, unseen, records: 0 }
     }
 
-    fn apply(&mut self, batch: &mut Vec<Record>) {
+    pub(crate) fn apply(&mut self, batch: &mut Vec<(String, EntryMeta)>) {
         if batch.is_empty() {
             return;
         }
         let mut index = self.index.write();
-        for record in batch.drain(..) {
+        for (path, meta) in batch.drain(..) {
             self.records += 1;
             self.progress.entries.fetch_add(1, Ordering::Relaxed);
-            let meta = record.meta();
-            if record.path.is_empty() {
+            if path.is_empty() {
                 index.update(self.root, meta);
                 continue;
             }
-            let (parent_path, name) = record.path.rsplit_once('/').unwrap_or(("", &record.path));
+            let (parent_path, name) = path.rsplit_once('/').unwrap_or(("", &path));
             let Some(&parent) = self.dirs.get(parent_path) else { continue };
             let id = match self.unseen.get(&(parent, name.to_owned())) {
                 Some(&id) if index.is_dir(id) == meta.is_dir => {
@@ -380,13 +374,13 @@ impl<'a> Applier<'a> {
                 _ => index.insert(parent, name, meta),
             };
             if meta.is_dir {
-                self.dirs.insert(record.path, id);
+                self.dirs.insert(path, id);
             }
         }
     }
 
     /// Removes Entries the listing no longer has.
-    fn prune(self) {
+    pub(crate) fn prune(self) {
         let gone: std::collections::HashSet<EntryId> = self.unseen.values().copied().collect();
         let mut by_parent: HashMap<EntryId, Vec<EntryId>> = HashMap::new();
         let mut index = self.index.write();
@@ -462,7 +456,7 @@ mod tests {
 
     #[test]
     fn failures_read_as_what_to_do() {
-        let r = Remote::new("me@box", "/srv").unwrap();
+        let r = SshRemote { host: "me@box".into(), path: "/srv".into() };
         let why = |code, records, stderr: &str| failure(&r, code, records, stderr).map(|e| e.to_string());
         assert_eq!(why(Some(0), 3, ""), None);
         assert_eq!(why(Some(1), 3, "find: './x': Permission denied"), None);

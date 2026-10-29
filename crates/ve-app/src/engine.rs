@@ -657,6 +657,9 @@ mod tests {
         let remote = index.add_remote(&Remote::new("me@box", "/srv").unwrap());
         assert_eq!(refresh_target(&index, &ids[1].1), Some(ids[1].0));
         assert_eq!(refresh_target(&index, "ssh:me@box:/srv"), Some(remote));
+        let s3 = Remote::S3(ve_core::S3Remote::new("b", "p", "minio.lan:9000", "us-east-1", true, "", "AKIA").unwrap());
+        let s3_id = index.add_remote(&s3);
+        assert_eq!(refresh_target(&index, &s3.identity()), Some(s3_id));
         assert_eq!(refresh_target(&index, "nobody"), None);
         index.set_mount(ids[0].0, None);
         assert_eq!(refresh_target(&index, &ids[0].1), None);

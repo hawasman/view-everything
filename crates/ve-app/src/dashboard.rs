@@ -189,19 +189,20 @@ impl DashboardPage {
                 let categories = self.shown.as_ref().and_then(|s| s.volume(&v.identity)).map(|s| s.categories).unwrap_or_default();
                 let indexed: u64 = categories.iter().sum();
                 let remote = v.remote();
-                let name = match (remote, mounted) {
+                let name = match (&remote, mounted) {
                     (Some(r), _) => r.label(),
                     (None, Some(m)) => volume_name(m),
                     (None, None) => v.mount.display().to_string(),
                 };
-                let detail = match remote {
+                let detail = match &remote {
                     Some(r) if ve_scan::remote::is_sftp_only(r) => "SSH · SFTP · read-only".to_owned(),
-                    Some(_) => "SSH · read-only".to_owned(),
+                    Some(r) => format!("{} · read-only", r.kind()),
                     None if network => format!("Network share · {}", v.mount.display()),
                     None => format!("{} · {}", v.fs_type, v.mount.display()),
                 };
-                let no_capacity_note = match remote {
-                    Some(r) if v.last_synced.is_some() && v.capacity.is_none() => {
+                let no_capacity_note = match &remote {
+                    // S3 has no capacity by nature: the indexed total is all there is.
+                    Some(r @ ve_core::Remote::Ssh(_)) if v.last_synced.is_some() && v.capacity.is_none() => {
                         Some(if ve_scan::remote::is_sftp_only(r) { "SFTP only: no df, no capacity" } else { "df unavailable: no capacity" })
                     }
                     _ => None,
