@@ -22,8 +22,13 @@ const LIBEXEC: &str = "/usr/libexec/view-everything";
 
 /// The helper pkexec will run: it must have an absolute path.
 pub fn find_helper() -> Option<PathBuf> {
+    // Only the packaged path is trusted with root; a helper beside the app is for development.
+    let packaged = Path::new(LIBEXEC).join(HELPER);
+    if packaged.is_file() {
+        return Some(packaged);
+    }
     let beside = std::env::current_exe().ok()?.with_file_name(HELPER);
-    [beside, Path::new(LIBEXEC).join(HELPER)].into_iter().find(|p| p.is_file())
+    (cfg!(debug_assertions) && beside.is_file()).then_some(beside)
 }
 
 /// What a helper that ended without being asked to means for the user.
@@ -69,6 +74,13 @@ impl Helper {
         let stdout = child.stdout.take().expect("stdout was piped");
         let stopped = Arc::new(AtomicBool::new(false));
         let flag = stopped.clone();
+        let live = stopped.clone();
+        // A helper switched off while the password prompt was open must not report as ready.
+        let ready = move || {
+            if !live.load(Ordering::Relaxed) {
+                ready();
+            }
+        };
         thread::Builder::new().name("ve-fanotify".into()).spawn(move || {
             read_events(
                 BufReader::new(stdout),

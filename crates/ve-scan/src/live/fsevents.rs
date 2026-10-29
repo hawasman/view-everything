@@ -66,6 +66,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn dispatch_queue_create(label: *const c_char, attr: *const c_void) -> *mut c_void;
     fn dispatch_release(object: *mut c_void);
+    fn dispatch_sync_f(queue: *mut c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
 }
 
 /// The current event id: what to replay from at the next launch if nothing was applied yet.
@@ -155,11 +156,15 @@ impl Drop for Stream {
             FSEventStreamStop(self.stream);
             FSEventStreamInvalidate(self.stream);
             FSEventStreamRelease(self.stream);
+            // A callback already running on the queue finishes before the sender is freed.
+            dispatch_sync_f(self.queue, std::ptr::null_mut(), nothing);
             dispatch_release(self.queue);
             drop(Box::from_raw(self.sender));
         }
     }
 }
+
+extern "C" fn nothing(_: *mut c_void) {}
 
 extern "C" fn deliver(_: *const c_void, info: *mut c_void, count: usize, paths: *mut c_void, flags: *const Flags, ids: *const Id) {
     // SAFETY: `info` is the sender given at creation; FSEvents passes `count` C-string paths,

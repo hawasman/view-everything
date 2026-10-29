@@ -109,7 +109,24 @@ fn init() -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// Whether `path` is the root of a mounted filesystem: only those are watched, whatever the
+/// caller asks for.
+fn is_mount_point(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(here), Ok(above)) = (std::fs::metadata(path), std::fs::metadata(path.join(".."))) else {
+        return false;
+    };
+    path == Path::new("/") || here.dev() != above.dev()
+}
+
 fn mark(fan: &OwnedFd, mount: &Path) -> io::Result<Mark> {
+    if !is_mount_point(mount) {
+        return Err(io::Error::other("not a mount point"));
+    }
+    mark_filesystem(fan, mount)
+}
+
+fn mark_filesystem(fan: &OwnedFd, mount: &Path) -> io::Result<Mark> {
     let dir = open_dir(mount)?;
     // SAFETY: zeroed statfs is a valid output buffer; `dir` is an open descriptor.
     let mut st: libc::statfs = unsafe { std::mem::zeroed() };
@@ -202,11 +219,16 @@ pub fn run(mounts: Vec<OsString>) -> i32 {
         }
     };
     let mut marks = Vec::new();
+    let asked = mounts.len();
     for mount in mounts {
         match mark(&fan, Path::new(&mount)) {
             Ok(m) => marks.push(m),
             Err(e) => eprintln!("ve-fanotify: {}: {e}", mount.to_string_lossy()),
         }
+    }
+    if asked > 0 && marks.is_empty() {
+        eprintln!("ve-fanotify: no filesystem could be watched");
+        return 2;
     }
     let mut out = io::stdout().lock();
     if out.write_all(b"!ready\0").and_then(|()| out.flush()).is_err() {
@@ -262,6 +284,7 @@ pub fn run(mounts: Vec<OsString>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
 
     /// One event: metadata, then a DFID_NAME record for `dir_handle` and `name`.
     fn event(mask: u64, fsid: [i32; 2], handle_bytes: &[u8], name: &str) -> Vec<u8> {
@@ -308,12 +331,22 @@ mod tests {
         assert!(parse(&buf).is_empty());
     }
 
+    #[test]
+    fn only_mount_points_are_watched() {
+        assert!(is_mount_point(Path::new("/")));
+        assert!(
+            !is_mount_point(Path::new("/usr/bin"))
+                || std::fs::metadata("/usr").unwrap().dev() != std::fs::metadata("/usr/bin").unwrap().dev()
+        );
+        assert!(!is_mount_point(Path::new("/nonexistent")));
+    }
+
     /// Real fanotify needs CAP_SYS_ADMIN: skipped (with this message) when run unprivileged.
     #[test]
     fn real_fanotify_reports_a_created_file() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
-        let marks = match init().and_then(|fan| mark(&fan, &root).map(|m| (fan, m))) {
+        let marks = match init().and_then(|fan| mark_filesystem(&fan, &root).map(|m| (fan, m))) {
             Ok(ok) => ok,
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
                 eprintln!("skipped: watching a filesystem is not permitted here ({e}); run the tests as root to check it");

@@ -6,7 +6,7 @@ use super::{Command, Shared};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use ve_core::{SyncState, VolumeId};
@@ -21,6 +21,9 @@ pub(super) struct Live {
     events: Sender<Event>,
     /// Whether a source is running now, so the Volumes in `watched` are followed live.
     active: Arc<AtomicBool>,
+    /// Volumes count as followed only if walked after this time (Unix seconds): a source without
+    /// replay misses what changed before it started.
+    followed_since: Arc<AtomicI64>,
     /// The local Volumes' mount points a source was given.
     watched: Vec<PathBuf>,
     /// For the Refresh a source's failure calls for.
@@ -68,6 +71,7 @@ impl Live {
         Live {
             events,
             active: Arc::new(AtomicBool::new(false)),
+            followed_since: Arc::new(AtomicI64::new(0)),
             watched: Vec::new(),
             #[cfg(target_os = "linux")]
             commands,
@@ -87,10 +91,16 @@ impl Live {
         if !self.active.load(Ordering::Relaxed) {
             return HashSet::new();
         }
+        let since = self.followed_since.load(Ordering::Relaxed);
         let index = self.shared.index.read();
         index
             .volumes()
-            .filter(|(_, v)| v.online && v.last_synced.is_some() && matches!(v.sync, SyncState::Walk) && self.watched.contains(&v.mount))
+            .filter(|(_, v)| {
+                v.online
+                    && v.last_synced.is_some_and(|at| at >= since)
+                    && matches!(v.sync, SyncState::Walk)
+                    && self.watched.contains(&v.mount)
+            })
             .map(|(id, _)| id)
             .collect()
     }
@@ -175,14 +185,19 @@ impl Live {
         let (ready, ended) = (self.active.clone(), self.active.clone());
         let (shared, commands, gone) = (self.shared.clone(), self.commands.clone(), self.helper_ended.clone());
         let on_ready = self.shared.clone();
+        let (since, refresh) = (self.followed_since.clone(), self.commands.clone());
         let started = {
             live::fanotify::Helper::start(
                 &program,
                 &self.watched,
                 self.events.clone(),
                 move || {
+                    // Nothing is replayed: walk once now that changes are being reported, and
+                    // count the Volumes as followed from that walk on.
+                    since.store(super::now_secs(), Ordering::Relaxed);
                     ready.store(true, Ordering::Relaxed);
                     on_ready.resolve("live");
+                    let _ = refresh.send(Command::Refresh);
                 },
                 move |why| {
                     ended.store(false, Ordering::Relaxed);
@@ -211,7 +226,7 @@ pub(super) fn saved_position(index: &Path) -> Option<u64> {
         .trim()
         .parse()
         .ok()
-        .filter(|&p| p != 0)
+        .filter(|&p| p != 0 && p <= live::fsevents::current_id())
 }
 
 /// Saves the event id the Index now reflects.
