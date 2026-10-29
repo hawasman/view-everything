@@ -1,0 +1,92 @@
+# The built-in Cleanup Rules, in the same format as the user's cleanup.toml.
+#
+# [[rule]]
+#   name       what the Cleaner calls it
+#   group      temp (Temporary Files), cache (Caches) or build (Build Artefacts)
+#   platforms  linux, macos and/or windows; every platform when left out
+#   query      a Query that selects what the rule found. {home}, {cache} and {temp} stand for the
+#              user's folders of those names
+#   markers    paths relative to the match ("../Cargo.toml" is a sibling, "CACHEDIR.TAG" is inside);
+#              at least one must be a plain file. Left out: the Query alone decides
+#   files      true: files match too, not only folders
+#   tick       false: never pre-ticked
+#   command    removes by running this argv, without a shell, in the matched folder
+#   estimate   command rules: a path inside the matched folder whose size is shown as the estimate
+
+[[rule]]
+name = "User temp folder"
+group = "temp"
+query = 'parent:"{temp}" !regex:^\.'
+files = true
+
+[[rule]]
+name = "Crash dumps"
+group = "temp"
+platforms = ["windows"]
+query = 'parent:"{home}/AppData/Local/CrashDumps"'
+files = true
+
+[[rule]]
+name = "User cache folder"
+group = "cache"
+platforms = ["linux", "macos"]
+query = 'parent:"{cache}"'
+files = true
+tick = false
+
+[[rule]]
+name = "npm cache"
+group = "cache"
+platforms = ["linux", "macos"]
+query = 'parent:"{home}" regex:^\.npm$'
+command = ["npm", "cache", "clean", "--force"]
+
+[[rule]]
+name = "npm cache"
+group = "cache"
+platforms = ["windows"]
+query = 'parent:"{cache}" regex:^npm-cache$'
+command = ["npm.cmd", "cache", "clean", "--force"]
+
+[[rule]]
+name = "Rust build artefacts"
+group = "build"
+query = 'regex:^target$'
+markers = ["../Cargo.toml", "CACHEDIR.TAG"]
+
+[[rule]]
+name = "Next.js build output"
+group = "build"
+query = 'regex:^\.next$'
+markers = ["../package.json"]
+
+[[rule]]
+name = "Other JavaScript tool output"
+group = "build"
+query = 'regex:^\.nuxt$|regex:^\.svelte-kit$|regex:^\.turbo$|regex:^\.parcel-cache$'
+markers = ["../package.json"]
+
+[[rule]]
+name = "node_modules"
+group = "build"
+query = 'regex:^node_modules$'
+markers = ["../package.json"]
+tick = false
+
+[[rule]]
+name = "Gradle build output"
+group = "build"
+query = 'regex:^build$'
+markers = ["../build.gradle", "../build.gradle.kts"]
+
+[[rule]]
+name = "Maven build output"
+group = "build"
+query = 'regex:^target$'
+markers = ["../pom.xml"]
+
+[[rule]]
+name = "Xcode DerivedData"
+group = "build"
+platforms = ["macos"]
+query = 'parent:"{home}/Library/Developer/Xcode/DerivedData"'

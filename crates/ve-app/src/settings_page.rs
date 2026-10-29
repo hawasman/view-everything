@@ -58,6 +58,27 @@ fn refresh_items(minutes: u64) -> (Vec<Every>, IndexPath) {
     (items, IndexPath::new(at))
 }
 
+/// The age limit choices of the Cleaner, in days.
+const DAY_CHOICES: [u64; 7] = [1, 3, 7, 14, 30, 60, 90];
+
+#[derive(Clone)]
+struct Days(u64);
+
+impl SelectItem for Days {
+    type Value = u64;
+    fn value(&self) -> &u64 {
+        &self.0
+    }
+    fn title(&self) -> SharedString {
+        match self.0 {
+            1 => "1 day".into(),
+            d => format!("{d} days").into(),
+        }
+    }
+}
+
+type DaysSelect = Entity<SelectState<Vec<Days>>>;
+
 /// The fields of the Add Remote dialog's S3 tab.
 #[derive(Clone)]
 struct S3Form {
@@ -265,6 +286,9 @@ pub struct SettingsPage {
     refresh: RefreshSelect,
     /// One refresh-interval select per Volume, in `volumes` order.
     volume_refresh: Vec<RefreshSelect>,
+    /// The Cleaner's age limits for pre-ticking temporary files and build artefacts.
+    temp_days: DaysSelect,
+    build_days: DaysSelect,
     /// Set when the settings file could not be written.
     problem: Option<String>,
     /// Fields of the Remote dialog.
@@ -315,6 +339,8 @@ impl SettingsPage {
             .iter()
             .map(|v| Self::refresh_select(settings.refresh_minutes_for(v), Some(v.identity.clone()), window, cx))
             .collect();
+        let temp_days = Self::days_select(settings.cleaner_temp_days, false, window, cx);
+        let build_days = Self::days_select(settings.cleaner_build_days, true, window, cx);
         let remote_host = cx.new(|cx| InputState::new(window, cx).placeholder("user@host or ssh config alias"));
         let remote_path = cx.new(|cx| InputState::new(window, cx).placeholder("/srv/backup"));
         let (items, manual) = refresh_items(0);
@@ -336,6 +362,8 @@ impl SettingsPage {
             volumes,
             refresh,
             volume_refresh,
+            temp_days,
+            build_days,
             problem: None,
             remote_host,
             remote_path,
@@ -502,6 +530,56 @@ impl SettingsPage {
         })
         .detach();
         select
+    }
+
+    /// A select of day counts (plus the stored one if it is not a choice) that stores the pick as
+    /// the Cleaner's age limit for build artefacts, or for temporary files.
+    fn days_select(days: u64, build: bool, window: &mut Window, cx: &mut Context<Self>) -> DaysSelect {
+        let mut items: Vec<Days> = DAY_CHOICES.map(Days).into();
+        if !DAY_CHOICES.contains(&days) {
+            items.push(Days(days));
+            items.sort_by_key(|d| d.0);
+        }
+        let at = items.iter().position(|d| d.0 == days).expect("days is among the items");
+        let select = cx.new(|cx| SelectState::new(items, Some(IndexPath::new(at)), window, cx));
+        cx.subscribe(&select, move |this, _, event: &SelectEvent<Vec<Days>>, cx| {
+            let SelectEvent::Confirm(Some(d)) = event else { return };
+            *if build {
+                &mut this.settings.cleaner_build_days
+            } else {
+                &mut this.settings.cleaner_temp_days
+            } = *d;
+            this.commit(cx);
+        })
+        .detach();
+        select
+    }
+
+    fn cleaner_limits(&self, cx: &App) -> Div {
+        let row = |title: &'static str, note: &'static str, select: &DaysSelect| {
+            h_flex()
+                .gap(px(16.))
+                .items_center()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .child(div().font_weight(FontWeight::MEDIUM).child(title))
+                        .child(caption(note, cx)),
+                )
+                .child(div().w(px(150.)).flex_none().child(Select::new(select).w_full().small()))
+        };
+        v_flex()
+            .gap(px(12.))
+            .child(row(
+                "Temporary files",
+                "Pre-ticked when nothing in them changed for this long",
+                &self.temp_days,
+            ))
+            .child(row(
+                "Build artefacts",
+                "Pre-ticked when nothing in the project changed for this long",
+                &self.build_days,
+            ))
     }
 
     pub fn has_problem(&self) -> bool {
@@ -1190,7 +1268,14 @@ impl Render for SettingsPage {
                 cx,
             ))
             .child(div().h(px(1.)).bg(border))
-            .child(section("Theme", "System follows the operating system and changes with it.", theme, cx));
+            .child(section("Theme", "System follows the operating system and changes with it.", theme, cx))
+            .child(div().h(px(1.)).bg(border))
+            .child(section(
+                "Cleaner",
+                "The Cleaner pre-ticks only what has been left alone long enough. Caches and node_modules are never pre-ticked.",
+                panel(cx).child(self.cleaner_limits(cx)),
+                cx,
+            ));
         #[cfg(feature = "updater")]
         {
             let updates = self.updates(cx);

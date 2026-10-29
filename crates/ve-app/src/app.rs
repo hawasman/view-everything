@@ -132,7 +132,7 @@ impl Shell {
             page.set_context(&settings, volumes.clone(), cx);
             page
         });
-        let cleaner = cx.new(|_| CleanerPage::new(engine.shared.clone(), repaint.clone(), volumes.clone()));
+        let cleaner = cx.new(|_| CleanerPage::new(engine.shared.clone(), repaint.clone(), volumes.clone(), &settings));
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
         cx.subscribe_in(&dashboard, window, |this, _, act: &Act, window, cx| {
             this.dashboard_act(act, window, cx)
@@ -145,6 +145,7 @@ impl Shell {
             let settings = this.settings_page.read(cx).settings().clone();
             this.dashboard
                 .update(cx, |d, cx| d.set_context(&settings, changed.mounted.clone(), cx));
+            this.cleaner.update(cx, |c, cx| c.set_settings(&settings, cx));
             // Saved fine, so the settings file read at startup has been replaced.
             if !this.settings_page.read(cx).has_problem() {
                 this.startup_problems.retain(|p| !p.starts_with("Settings ignored"));

@@ -48,6 +48,20 @@ pub struct Settings {
     /// Queries the user saved under a name, in the order saved.
     #[serde(default)]
     pub saved_queries: Vec<SavedQuery>,
+    /// The Cleaner pre-ticks temporary files only when nothing in them changed for this many days.
+    #[serde(default = "default_temp_days")]
+    pub cleaner_temp_days: u64,
+    /// The same for build artefacts, judged by the project's newest file.
+    #[serde(default = "default_build_days")]
+    pub cleaner_build_days: u64,
+}
+
+fn default_temp_days() -> u64 {
+    7
+}
+
+fn default_build_days() -> u64 {
+    30
 }
 
 fn default_true() -> bool {
@@ -91,6 +105,8 @@ impl Default for Settings {
             update_checks: true,
             last_update_check: None,
             saved_queries: Vec::new(),
+            cleaner_temp_days: default_temp_days(),
+            cleaner_build_days: default_build_days(),
         }
     }
 }
@@ -318,6 +334,11 @@ fn settings_path() -> Option<PathBuf> {
 
 pub fn categories_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join(APP_DIR).join("categories.toml"))
+}
+
+/// The user's own Cleanup Rules, next to `settings.toml`.
+pub fn cleanup_path() -> Option<PathBuf> {
+    Some(dirs::config_dir()?.join(APP_DIR).join("cleanup.toml"))
 }
 
 pub fn index_path() -> Option<PathBuf> {
