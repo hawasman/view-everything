@@ -106,8 +106,12 @@ pub fn reconcile_remotes(index: &SharedIndex, wanted: &[Remote]) -> Vec<VolumeId
 
 /// Brings a Remote's Entries up to date with what its server lists now.
 pub fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::Result<()> {
-    let s3 = matches!(index.read().volume(volume).map(|v| &v.sync), Some(SyncState::S3(_)));
-    if s3 { crate::s3::sync(index, volume, progress) } else { sync_with("ssh", index, volume, progress) }
+    let state = index.read().volume(volume).map(|v| v.sync.clone());
+    match state {
+        Some(SyncState::S3(_)) => crate::s3::sync(index, volume, progress),
+        Some(SyncState::Ftp(_)) => crate::ftp::sync(index, volume, progress),
+        _ => sync_with("ssh", index, volume, progress),
+    }
 }
 
 /// Remotes known to lack GNU `find -printf`, so the next sync goes straight to SFTP.

@@ -5,6 +5,7 @@
 //! A freshly added Volume holds only its root, so its first sync is a full scan.
 
 mod capacity;
+pub mod ftp;
 pub mod ntfs;
 mod platform;
 mod reconcile;
