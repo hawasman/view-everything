@@ -11,6 +11,19 @@ if [ -z "$VE_BUILD_LOCK_HELD" ] && command -v flock >/dev/null 2>&1; then
 fi
 
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+
+# Worktrees may share one CARGO_TARGET_DIR to build dependencies once. Cargo names a workspace
+# crate's artefacts by its path relative to the workspace root, so every worktree maps to the
+# same files and an older source tree can look up to date. When the building worktree changes,
+# touch this tree's crate sources so cargo rebuilds them from here.
+tree="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+target="${CARGO_TARGET_DIR:-$tree/target}"
+mkdir -p "$target"
+if [ "$(cat "$target/.ve-last-tree" 2>/dev/null)" != "$tree" ]; then
+    (cd "$tree" && git ls-files -z crates packaging/icons | xargs -0 touch)
+    printf '%s\n' "$tree" >"$target/.ve-last-tree"
+fi
+
 cap="${VE_BUILD_MEMORY_MAX:-7G}"
 if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope -q true 2>/dev/null; then
     # MemoryHigh throttles the build before MemoryMax kills it.
