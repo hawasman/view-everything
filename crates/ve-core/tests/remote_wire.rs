@@ -48,10 +48,7 @@ fn a_saved_index_keeps_every_sync_state_and_their_variant_order() {
             journal_id: 7,
             next_usn: 9,
         },
-        SyncState::S3(
-            // All optional fields set: bincode cannot read back a skipped `None` (a known gap, see the report).
-            S3Remote::new("b", "p", "minio.lan:9000", "us-east-1", false, "work", "AKIA").unwrap(),
-        ),
+        SyncState::S3(S3Remote::new("b", "p", "minio.lan:9000", "us-east-1", false, "work", "AKIA").unwrap()),
         SyncState::Ftp(FtpRemote::new("h", 21, "u", "/", FtpTls::Explicit).unwrap()),
         SyncState::Webdav(WebdavRemote::new("https://h/dav", "u").unwrap()),
         // `endpoint: None` too: unlike S3's skipped fields it must round-trip through bincode.
@@ -75,6 +72,24 @@ fn a_saved_index_keeps_every_sync_state_and_their_variant_order() {
     let back = Index::load(&path).unwrap();
     let loaded: Vec<_> = back.volumes().map(|(_, v)| v.sync.clone()).collect();
     assert_eq!(loaded, states);
+}
+
+#[test]
+fn an_s3_remote_with_unset_options_survives_a_saved_index() {
+    // A skipped `None` would shift every field after it: the saved Index could not be read.
+    let remote = S3Remote::new("b", "", "", "us-east-1", false, "", "").unwrap();
+    assert!(remote.endpoint.is_none() && remote.profile.is_none() && remote.access_key.is_none());
+    let mut index = Index::new();
+    let meta = EntryMeta {
+        is_dir: true,
+        ..EntryMeta::default()
+    };
+    index.add_volume(Path::new("/s3"), "s3", "s3", meta, SyncState::S3(remote.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.bin");
+    index.save(&path).unwrap();
+    let back = Index::load(&path).unwrap();
+    assert_eq!(back.volumes().next().unwrap().1.sync, SyncState::S3(remote));
 }
 
 #[test]

@@ -52,23 +52,24 @@ pub struct SshRemote {
 /// An S3 Remote: a bucket, or a prefix in one, listed over the S3 API. It holds no secret: typed
 /// keys keep their secret in the OS keyring, under the Remote's identity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+// No `skip_serializing_if` on the Options: bincode (the saved Index) cannot read back a skipped field.
 pub struct S3Remote {
     pub bucket: String,
     /// Folder-like prefix without leading or trailing `/`; empty for the whole bucket.
     #[serde(default)]
     pub prefix: String,
     /// `https://host[:port]` of a custom endpoint (R2, MinIO, B2, Wasabi); `None` is AWS.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub endpoint: Option<String>,
     pub region: String,
     /// `endpoint/bucket/key` rather than `bucket.endpoint/key`.
     #[serde(default)]
     pub path_style: bool,
     /// A named profile of `~/.aws`; `None` is the standard chain (environment, then `default`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub profile: Option<String>,
     /// Access key ID of keys typed into the dialog; its secret is in the keyring.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub access_key: Option<String>,
 }
 

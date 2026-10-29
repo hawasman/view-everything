@@ -343,6 +343,13 @@ mod tests {
         path
     }
 
+    /// The fixture's path for `/w/<rel>`, as the Index prints it: the root verbatim, then the platform's separator.
+    fn w(rel: &str) -> String {
+        let mut path = PathBuf::from("/w");
+        path.extend(rel.split('/').filter(|c| !c.is_empty()));
+        path.display().to_string()
+    }
+
     fn run_line(line: &str, index: &std::path::Path) -> (Result<usize, Failure>, String, String) {
         let mut a = parse(line);
         a.index = Some(index.into());
@@ -357,7 +364,7 @@ mod tests {
         let index = fixture(dir.path());
         let (n, out, err) = run_line("find *.txt", &index);
         assert_eq!(n.unwrap(), 2);
-        assert_eq!(out, "/w/a.txt\n/w/sub/b.txt\n");
+        assert_eq!(out, format!("{}\n{}\n", w("a.txt"), w("sub/b.txt")));
         assert!(err.starts_with("Last Synced: 20"), "{err}");
         assert_eq!(run_line("find *.nothing", &index).0.unwrap(), 0);
         assert!(matches!(run_line("find size:", &index).0, Err(Failure::Message(_))));
@@ -372,10 +379,13 @@ mod tests {
             csv.starts_with("path,name,Logical Size,On-disk Size,modified,Category\r\n"),
             "{csv}"
         );
-        assert!(csv.contains("/w/sub/=evil.log,'=evil.log,20,20,2026-10-10T15:33:33Z,"), "{csv}");
+        assert!(
+            csv.contains(&format!("{},'=evil.log,20,20,2026-10-10T15:33:33Z,", w("sub/=evil.log"))),
+            "{csv}"
+        );
         let (_, json, _) = run_line("find --json b.txt", &index);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v[0]["path"], "/w/sub/b.txt");
+        assert_eq!(v[0]["path"], w("sub/b.txt"));
         assert_eq!(v[0]["on_disk_size"], 500);
     }
 
@@ -384,13 +394,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let index = fixture(dir.path());
         let (_, out, _) = run_line("top", &index);
-        assert_eq!(out, "530\t/w\n520\t/w/sub\n");
+        assert_eq!(out, format!("530\t{}\n520\t{}\n", w(""), w("sub")));
         let (_, out, _) = run_line("du --files -n 1", &index);
-        assert_eq!(out, "500\t/w/sub/b.txt\n");
+        assert_eq!(out, format!("500\t{}\n", w("sub/b.txt")));
         let (_, out, _) = run_line("top --path /w a.txt", &index);
         assert_eq!(out, "");
         let (n, out, _) = run_line("top --path /w --files .log", &index);
-        assert_eq!((n.unwrap(), out.as_str()), (1, "20\t/w/sub/=evil.log\n"));
+        assert_eq!((n.unwrap(), out), (1, format!("20\t{}\n", w("sub/=evil.log"))));
         assert!(matches!(run_line("top --path /nowhere", &index).0, Err(Failure::Message(_))));
     }
 
@@ -398,12 +408,12 @@ mod tests {
     fn find_path_scopes_and_top_takes_the_output_flags() {
         let dir = tempfile::tempdir().unwrap();
         let index = fixture(dir.path());
-        let (_, out, _) = run_line("find --path /w/sub txt", &index);
-        assert_eq!(out, "/w/sub/b.txt\n");
+        let (_, out, _) = run_line(&format!("find --path {} txt", w("sub")), &index);
+        assert_eq!(out, format!("{}\n", w("sub/b.txt")));
         let (_, csv, _) = run_line("top --csv --files -n 1", &index);
-        assert!(csv.contains("/w/sub/b.txt,b.txt,500,500,"), "{csv}");
+        assert!(csv.contains(&format!("{},b.txt,500,500,", w("sub/b.txt"))), "{csv}");
         let (_, json, _) = run_line("du --json -n 1", &index);
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&json).unwrap()[0]["path"], "/w");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&json).unwrap()[0]["path"], w(""));
         let (_, _, err) = run_line("find dupe:", &index);
         assert!(err.contains("dupe:"), "{err}");
     }
