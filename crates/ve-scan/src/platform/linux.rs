@@ -73,7 +73,11 @@ fn volumes_in(text: &str) -> Vec<VolumeInfo> {
 /// then covers several Volumes); device and mount path when udev lists no UUID for the device.
 fn identity(m: &Mount, by_uuid: &Path) -> String {
     let name = fs::canonicalize(Path::new("/sys/dev/block").join(&m.device)).ok();
-    match name.as_ref().and_then(|n| uuid_of(n.file_name()?, by_uuid)) {
+    // btrfs gives every subvolume an anonymous device number (`0:33`) that names no block device;
+    // the mount source (`/dev/nvme0n1p2`) still does, and is the same for all of them.
+    let source = fs::canonicalize(&m.source).ok();
+    let uuid = [name, source].into_iter().flatten().find_map(|n| uuid_of(n.file_name()?, by_uuid));
+    match uuid {
         Some(uuid) if m.root == "/" => format!("uuid:{uuid}"),
         Some(uuid) => format!("uuid:{uuid}:{}", m.root),
         None => format!("dev:{}@{}", m.device, m.mount.display()),
@@ -211,5 +215,26 @@ mod tests {
             read_only: false,
         };
         assert_eq!(identity(&mount, Path::new("/nonexistent")), "dev:9999:1@/mnt/x");
+    }
+
+    #[test]
+    fn btrfs_subvolumes_with_anonymous_devices_are_told_apart_by_the_source_uuid() {
+        let dir = std::env::temp_dir().join(format!("ve-btrfs-identity-{}", std::process::id()));
+        let by_uuid = dir.join("by-uuid");
+        std::fs::create_dir_all(&by_uuid).unwrap();
+        let disk = dir.join("nvme0n1p2");
+        std::fs::write(&disk, "").unwrap();
+        std::os::unix::fs::symlink(&disk, by_uuid.join("d1894d9b")).unwrap();
+        let mount = |root: &str, at: &str| Mount {
+            device: "0:33".into(), // btrfs: no block device of that number
+            root: root.into(),
+            mount: at.into(),
+            fs_type: "btrfs".into(),
+            source: disk.to_string_lossy().into_owned(),
+            read_only: false,
+        };
+        assert_eq!(identity(&mount("/", "/"), &by_uuid), "uuid:d1894d9b");
+        assert_eq!(identity(&mount("/@home", "/home"), &by_uuid), "uuid:d1894d9b:/@home");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
