@@ -104,7 +104,8 @@ jobs:
   publish:
     needs: [windows, linux, macos]
     if: github.event_name == 'push'
-    runs-on: ubuntu-22.04
+    # 24.04: minisign is packaged from noble on, not in 22.04 (jammy).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
