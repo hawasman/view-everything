@@ -40,14 +40,14 @@ pub struct Settings {
     #[serde(default)]
     pub recent_query: Option<String>,
     /// Whether the app asks GitHub Releases for a newer version, at most once a day.
-    #[serde(default = "yes")]
+    #[serde(default = "default_true")]
     pub update_checks: bool,
     /// When the last update check ran, in Unix seconds.
     #[serde(default)]
     pub last_update_check: Option<i64>,
 }
 
-fn yes() -> bool {
+fn default_true() -> bool {
     true
 }
 

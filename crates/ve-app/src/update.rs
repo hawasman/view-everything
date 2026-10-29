@@ -73,6 +73,10 @@ pub fn check(url: &str, current: &str) -> Result<Option<Release>, String> {
     if parse(&version).is_none() {
         return Err(format!("unexpected version {}", latest.tag_name));
     }
+    // The link is opened in a browser: only https.
+    if !latest.html_url.starts_with("https://") {
+        return Err("unexpected release link".to_owned());
+    }
     let newer = !latest.prerelease && !latest.draft && is_newer(&version, current);
     Ok(newer.then_some(Release {
         version,
