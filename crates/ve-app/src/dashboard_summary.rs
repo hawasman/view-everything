@@ -456,6 +456,34 @@ mod tests {
         assert_eq!((lane.unindexed, lane.free, lane.total()), (350, 300, 1000));
     }
 
+    /// A Remote reached through a stand-in ssh that runs the command locally appears in the
+    /// per-Location totals and the Category totals, with the capacity its df reported.
+    #[cfg(unix)]
+    #[test]
+    fn a_remote_counts_in_the_locations_and_categories() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ve-dashboard-remote-{}", std::process::id()));
+        let tree = dir.join("tree");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::write(tree.join("song.mp3"), vec![0u8; 5000]).unwrap();
+        let ssh = dir.join("ssh");
+        let body = "#!/bin/sh\nwhile [ \"$1\" != \"--\" ]; do shift; done; shift; shift; exec sh -c \"$*\"\n";
+        std::fs::write(&ssh, body).unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let shared = ve_scan::SharedIndex::new(index());
+        let remote = ve_core::Remote::new("me@box", tree.to_str().unwrap()).unwrap();
+        let id = shared.write().add_remote(&remote);
+        ve_scan::remote::sync_with(ssh.to_str().unwrap(), &shared, id, &ve_scan::Progress::default()).unwrap();
+        let before = sum(&index(), None);
+        let s = sum(&shared.read(), None);
+        let lane = s.volume(&remote.identity()).expect("the Remote has a lane");
+        assert!(lane.categories[Category::Audio as usize] >= 5000);
+        assert_eq!(s.categories[Category::Audio as usize].0, before.categories[Category::Audio as usize].0 + lane.categories[Category::Audio as usize]);
+        assert!(shared.read().volume(id).unwrap().capacity.is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn the_oldest_location_is_the_one_never_synced_or_longest_ago() {
         assert_eq!(oldest(&[Some(50), Some(10), Some(30)]), Some(1));
