@@ -79,6 +79,7 @@ pub struct Shell {
     trash: Trash,
     treemap: Entity<Treemap>,
     categories: Entity<CategoryPanel>,
+    category_map: CategoryMap,
     volumes: Vec<VolumeInfo>,
     /// Identities of the Volumes already offered for indexing this session.
     offered: HashSet<String>,
@@ -344,6 +345,7 @@ impl Shell {
             trash,
             treemap,
             categories: category_panel,
+            category_map: categories.clone(),
             volumes,
             offered: HashSet::new(),
             startup_problems,
@@ -918,6 +920,21 @@ impl Shell {
         controls
     }
 
+    /// Writes what the Explorer shows (the flat list: every Entry matching the Query, which a
+    /// zoomed folder is part of) to a CSV file.
+    fn export_csv(&self, window: &mut Window, cx: &mut App) {
+        let Some(view) = self.engine.shared.view.lock().clone() else {
+            window.push_notification(Notification::warning("Nothing to export yet."), cx);
+            return;
+        };
+        let (shared, categories) = (self.engine.shared.clone(), self.category_map.clone());
+        crate::export::save(window, cx, "view-everything.csv", move |path| {
+            let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+            ve_core::export::write_csv(&mut out, &shared.index.read(), &view.filter, &categories, &view.flat)?;
+            std::io::Write::flush(&mut out)
+        });
+    }
+
     /// The Entries selected in whichever list the Explorer shows.
     fn selected_entries(&self, cx: &App) -> Vec<ve_core::EntryId> {
         if self.show_tree {
@@ -1245,6 +1262,9 @@ impl Shell {
             .small()
             .disabled(why)
             .build(cx, cx.listener(|this, _, window, cx| this.ask_trash_selected(window, cx)));
+        let export = pill("export", "Export CSV")
+            .small()
+            .build(cx, cx.listener(|this, _, window, cx| this.export_csv(window, cx)));
         let selection = (!selected.is_empty()).then(|| {
             h_flex()
                 .gap(px(4.))
@@ -1334,6 +1354,7 @@ impl Shell {
                                     .children(selection)
                                     .child(saved)
                                     .child(filters)
+                                    .child(export)
                                     .child(trash),
                             ),
                     )

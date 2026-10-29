@@ -8,6 +8,7 @@ never wait on a scan.
   modified files, and when the Index was last synced.
 - **Explorer**: a tree and a flat list beside a Treemap, all driven by one Query. Double-click a
   folder anywhere to zoom into it; the zoom is part of the Query, so you can keep refining it.
+- **Export**: Export CSV writes what the flat list shows (every Entry matching the Query, so a zoomed folder is included) with the columns path, name, Logical Size, On-disk Size, modified (UTC) and Category. Export PNG on the Treemap saves the tiles as drawn, at 2x, in the current theme's colours (without the text labels). Both ask where to save, or use the Downloads folder where there is no save dialog.
 - **Locations**: local Volumes are indexed by default. Removable disks stay searchable as Offline
   Volumes after you unplug them, mounted network shares are opt-in, and read-only Remotes can be
   indexed over SSH/SFTP, S3 and FTP. Test a Remote's details before you add it, and edit it later
