@@ -37,6 +37,7 @@ containing `/` or `\` matches the full path. Text ignores case unless told other
 | `depth:2`, `depth:>1`, `depth:1..3` | Entries by levels below the Location root (the root is 0) |
 | `child:.git`, `child:*.toml` | folders with a direct child whose name matches |
 | `empty:` | folders with no children |
+| `dupe:` | files with a Duplicate: identical content on a local Volume, confirmed by hash (hard links to one file are not Duplicates; Remotes and Offline Volumes are never hashed). Candidates are files of at least 1 MB with an equal size, then equal first and last 64 KB, then equal BLAKE3 hash of the whole file. Hashing runs in the background with progress, one file at a time per Volume, and hashes are cached in `hashes.bin` beside the Index until a file's size or modification time changes |
 
 `case:` and `wholeword:` prefix a plain or wildcard term, chain (`case:wholeword:Cat`), and combine
 with `!` and `|` (`!wholeword:tmp`, `case:Foo|case:Bar`).

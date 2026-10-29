@@ -173,6 +173,7 @@ fn candidate<'a>(index: &'a Index, query: &Query, id: EntryId, scratch: &'a mut 
         } else {
             Vec::new()
         },
+        duplicate: query.needs_duplicates() && query.has_duplicate(id.index()),
     }
 }
 

@@ -446,3 +446,29 @@ fn tree_modifiers_filter_a_real_index() {
     assert_eq!(matched("empty:"), [false, false, true, false, false]);
     assert_eq!(matched("parent:/m/loc/proj"), [false, true, true, true, false]);
 }
+
+#[test]
+fn dupe_matches_files_the_context_lists_as_having_a_duplicate() {
+    let mut set = ve_core::BitSet::new(4);
+    set.insert(2);
+    let context = context().with_duplicates(std::sync::Arc::new(set));
+    let query = Query::parse("dupe:", &context).unwrap();
+    assert!(query.needs_duplicates());
+    assert!(query.has_duplicate(2) && !query.has_duplicate(1));
+    assert!(query.matches(&Candidate {
+        name: "a",
+        duplicate: true,
+        ..Default::default()
+    }));
+    assert!(!query.matches(&Candidate {
+        name: "a",
+        ..Default::default()
+    }));
+    assert!(!query.matches(&Candidate {
+        name: "a",
+        is_dir: true,
+        duplicate: true,
+        ..Default::default()
+    }));
+    assert!(Query::parse("dupe:x", &context).is_err());
+}
