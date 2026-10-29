@@ -71,7 +71,14 @@ pub fn find_rust_targets(index: &Index, volumes: &[VolumeInfo]) -> Vec<Cleanable
 
 /// Checks `path` on disk against the rule again: still a real folder (not a link) named
 /// `target`, with a sibling `Cargo.toml` or a genuine `CACHEDIR.TAG` inside.
-pub fn recheck(path: &Path) -> Result<(), String> {
+pub fn recheck(path: &Path, volumes: &[VolumeInfo]) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err("it is not an absolute path".into());
+    }
+    // A Volume mounted on or inside it would be emptied too: removal does not stop at mount points.
+    if volumes.iter().any(|v| v.mount.starts_with(path)) {
+        return Err("a Volume is mounted on or inside it".into());
+    }
     let meta = std::fs::symlink_metadata(path).map_err(|_| "it no longer exists".to_owned())?;
     if !meta.is_dir() {
         return Err("it is no longer a folder".into());
@@ -79,10 +86,11 @@ pub fn recheck(path: &Path) -> Result<(), String> {
     if path.file_name().is_none_or(|n| n != "target") {
         return Err("it is not named target".into());
     }
-    let cargo = path
-        .parent()
-        .is_some_and(|p| std::fs::metadata(p.join("Cargo.toml")).is_ok_and(|m| m.is_file()));
-    let tagged = std::fs::read(path.join("CACHEDIR.TAG")).is_ok_and(|b| b.starts_with(CACHEDIR_SIGNATURE.as_bytes()));
+    // Markers must be plain files: a link could point anywhere.
+    let plain = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
+    let cargo = path.parent().is_some_and(|p| plain(&p.join("Cargo.toml")));
+    let tag = path.join("CACHEDIR.TAG");
+    let tagged = plain(&tag) && std::fs::read(&tag).is_ok_and(|b| b.starts_with(CACHEDIR_SIGNATURE.as_bytes()));
     if cargo || tagged {
         Ok(())
     } else {
@@ -98,11 +106,12 @@ pub struct Outcome {
     pub skipped: Vec<(PathBuf, String)>,
 }
 
-/// Rechecks each path and permanently removes the ones that still match.
-pub fn clean(paths: &[PathBuf]) -> Outcome {
+/// Rechecks each path and permanently removes the ones that still match. `remove_dir_all` never
+/// follows links, so a folder swapped for a link after the recheck loses only the link.
+pub fn clean(paths: &[PathBuf], volumes: &[VolumeInfo]) -> Outcome {
     let mut out = Outcome::default();
     for path in paths {
-        match recheck(path).and_then(|()| std::fs::remove_dir_all(path).map_err(|e| e.to_string())) {
+        match recheck(path, volumes).and_then(|()| std::fs::remove_dir_all(path).map_err(|e| e.to_string())) {
             Ok(()) => out.removed.push(path.clone()),
             Err(why) => out.skipped.push((path.clone(), why)),
         }
@@ -164,9 +173,11 @@ impl CleanerPage {
         }
         let total: u64 = plan.iter().map(|c| c.on_disk).sum();
         let this = cx.entity();
+        let volumes = self.volumes.clone();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let this = this.clone();
             let paths: Vec<PathBuf> = plan.iter().map(|c| c.path.clone()).collect();
+            let volumes = volumes.clone();
             dialog
                 .confirm()
                 .title("Clean these now?")
@@ -178,18 +189,18 @@ impl CleanerPage {
                 .ok_text("Clean")
                 .ok_variant(ButtonVariant::Danger)
                 .on_ok(move |_, window, cx| {
-                    this.update(cx, |page, cx| page.start_clean(paths.clone(), window, cx));
+                    this.update(cx, |page, cx| page.start_clean(paths.clone(), volumes.clone(), window, cx));
                     true
                 })
         });
     }
 
-    fn start_clean(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_clean(&mut self, paths: Vec<PathBuf>, volumes: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) {
         window
             .spawn(cx, {
                 let this = cx.entity();
                 async move |cx| {
-                    let outcome = cx.background_executor().spawn(async move { clean(&paths) }).await;
+                    let outcome = cx.background_executor().spawn(async move { clean(&paths, &volumes) }).await;
                     cx.update(|window, cx| {
                         let (shared, repaint) = {
                             let page = this.read(cx);
@@ -420,7 +431,10 @@ mod tests {
         let unmarked = make("unmarked", false, None);
         let vanished = base.join("vanished").join("target");
 
-        let out = clean(&[cargo.clone(), tagged.clone(), fake_tag.clone(), unmarked.clone(), vanished.clone()]);
+        let out = clean(
+            &[cargo.clone(), tagged.clone(), fake_tag.clone(), unmarked.clone(), vanished.clone()],
+            &[],
+        );
         assert_eq!(out.removed, vec![cargo.clone(), tagged.clone()]);
         assert!(!cargo.exists() && !tagged.exists());
         assert!(fake_tag.exists() && unmarked.exists());
@@ -428,18 +442,39 @@ mod tests {
         assert!(out.skipped.iter().any(|(p, _)| *p == vanished));
         // A marker that vanished since the Index was built skips the folder too.
         std::fs::remove_file(fake_tag.join("CACHEDIR.TAG")).unwrap();
-        assert!(recheck(&fake_tag).is_err());
+        assert!(recheck(&fake_tag, &[]).is_err());
         // A symlinked Cargo.toml is no marker, and a symlinked target is never removed.
         #[cfg(unix)]
         {
             let linked = make("linked", false, None);
             std::os::unix::fs::symlink(base.join("unmarked").join("target"), base.join("linked").join("Cargo.toml")).unwrap();
-            assert!(recheck(&linked).is_err());
+            assert!(recheck(&linked, &[]).is_err());
             let alias = base.join("alias").join("target");
             std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
             std::fs::write(alias.parent().unwrap().join("Cargo.toml"), "").unwrap();
             std::os::unix::fs::symlink(&unmarked, &alias).unwrap();
-            assert!(recheck(&alias).is_err());
+            assert!(recheck(&alias, &[]).is_err());
+        }
+        // A Volume mounted inside, a relative path and a symlinked CACHEDIR.TAG are all refused.
+        let mounted = make("mounted", true, None);
+        let inside = VolumeInfo {
+            mount: mounted.join("deep"),
+            identity: "uuid:m".into(),
+            fs_type: "ext4".into(),
+            label: String::new(),
+            removable: true,
+            network: false,
+            read_only: false,
+        };
+        assert!(recheck(&mounted, &[inside]).is_err());
+        assert!(recheck(Path::new("target"), &[]).is_err());
+        #[cfg(unix)]
+        {
+            let tagged_link = make("taglink", false, None);
+            let real = base.join("real.tag");
+            std::fs::write(&real, CACHEDIR_SIGNATURE).unwrap();
+            std::os::unix::fs::symlink(&real, tagged_link.join("CACHEDIR.TAG")).unwrap();
+            assert!(recheck(&tagged_link, &[]).is_err());
         }
         std::fs::remove_dir_all(&base).unwrap();
     }

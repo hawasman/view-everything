@@ -90,6 +90,9 @@ _Avoid_: browser, main view, file view
 The search expression that selects which Entries count. Every panel in the Explorer (tree, flat list, Treemap, Category breakdown) shows only matching Entries; an empty Query matches everything.
 _Avoid_: search, filter, find
 
+**Saved Query**:
+A Query kept under a name in the settings, to apply again from the Explorer. Saving under an existing name (ignoring case) replaces that Query.
+
 **Treemap**:
 The panel that draws Filtered Sizes as nested rectangles coloured by Category. It draws the folder everything the Query shows sits in; zooming into a folder (on the Treemap or in a list) adds that folder to the Query, so the tree and flat list follow and the Query can still be refined.
 _Avoid_: size map, block view
