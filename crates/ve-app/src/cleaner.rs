@@ -858,6 +858,7 @@ impl Render for CleanerPage {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
+                    .pr(px(12.))
                     .children(rows)
                     .children(empty),
             )
