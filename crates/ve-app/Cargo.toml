@@ -10,6 +10,9 @@ name = "view-everything"
 path = "src/main.rs"
 
 [features]
+# Checks GitHub Releases for a newer version. Builds another tool updates (the AUR package) turn it off.
+default = ["updater"]
+updater = ["dep:minisign-verify", "dep:serde_json", "dep:ureq"]
 # Measurement hooks: VE_BENCH (scroll timing) and VE_BENCH_MOUNT (synthetic Index; see examples/gen_index.rs).
 bench = []
 
@@ -19,12 +22,18 @@ chrono = "0.4.45"
 dirs = "7.0.0"
 opener = { version = "0.9.0", features = ["reveal"] }
 gpui-kit = "0.8.1"
+minisign-verify = { version = "0.2", optional = true }
 parking_lot = "0.13.0"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1", optional = true }
 toml = "1.1.8"
 trash = "5.2.9"
+ureq = { version = "3.5.0", default-features = false, features = ["rustls"], optional = true }
 ve-core = { path = "../ve-core" }
 ve-scan = { path = "../ve-scan" }
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell"] }
+
+[dev-dependencies]
+minisign = "0.7"

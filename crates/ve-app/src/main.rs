@@ -20,6 +20,8 @@ mod trash;
 mod tree;
 mod treemap;
 mod ui;
+#[cfg(feature = "updater")]
+mod update;
 mod view;
 
 use gpui_kit::*;

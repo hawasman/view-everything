@@ -8,6 +8,8 @@ use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
 use crate::format;
 use crate::settings::Settings;
+#[cfg(feature = "updater")]
+use crate::settings_page::CheckNow;
 use crate::settings_page::{Changed, Forget, Refresh, SettingsPage};
 use crate::theme::{palette, tabular};
 use crate::trash::{self, Trash};
@@ -75,6 +77,9 @@ pub struct Shell {
     /// Identities of the Volumes already offered for indexing this session.
     offered: HashSet<String>,
     startup_problems: Vec<String>,
+    /// A newer release than the running app, as the last update check found.
+    #[cfg(feature = "updater")]
+    update: Option<crate::update::Release>,
     /// The Explorer lists' width in pixels, as of the last paint.
     list_width: Rc<Cell<f32>>,
     #[cfg(feature = "bench")]
@@ -290,6 +295,22 @@ impl Shell {
             .detach();
         }
 
+        // A newer version: once at startup if a day has passed, then hourly (the app may run for days).
+        #[cfg(feature = "updater")]
+        {
+            cx.subscribe(&settings_page, |this, _, _: &CheckNow, cx| this.check_update(cx))
+                .detach();
+            cx.spawn(async move |this, cx| {
+                loop {
+                    if this.update(cx, |this, cx| this.check_update_if_due(cx)).is_err() {
+                        break;
+                    }
+                    cx.background_executor().timer(std::time::Duration::from_secs(3600)).await;
+                }
+            })
+            .detach();
+        }
+
         // Save the Index as the app quits.
         cx.on_app_quit(|this, _| {
             this.engine.shutdown();
@@ -315,10 +336,85 @@ impl Shell {
             volumes,
             offered: HashSet::new(),
             startup_problems,
+            #[cfg(feature = "updater")]
+            update: None,
             list_width: Rc::default(),
             #[cfg(feature = "bench")]
             demoed: false,
         }
+    }
+
+    #[cfg(feature = "updater")]
+    fn check_update_if_due(&mut self, cx: &mut Context<Self>) {
+        let settings = self.settings_page.read(cx).settings();
+        if settings.update_checks && crate::update::due(settings.last_update_check, chrono::Utc::now().timestamp()) {
+            self.check_update(cx);
+        }
+    }
+
+    /// Asks GitHub Releases for the latest version, off the UI thread.
+    #[cfg(feature = "updater")]
+    fn check_update(&mut self, cx: &mut Context<Self>) {
+        let url = crate::update::latest_url();
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_spawn(async move { crate::update::check(&url, crate::update::CURRENT) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let status = match &found {
+                    Ok(Some(r)) => format!("Version {} is available", r.version),
+                    Ok(None) => format!("Up to date ({})", crate::update::CURRENT),
+                    Err(e) => format!("Could not check for updates: {e}"),
+                };
+                // A failed check keeps showing the row of an earlier one.
+                if let Ok(release) = found {
+                    this.update = release;
+                }
+                let now = chrono::Utc::now().timestamp();
+                this.settings_page.update(cx, |page, cx| page.update_checked(status, now, cx));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The row above Settings when a newer version is out.
+    #[cfg(feature = "updater")]
+    fn update_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let release = self.update.as_ref()?;
+        let p = palette(cx);
+        let url = release.notes_url.clone();
+        Some(
+            v_flex()
+                .mt(px(16.))
+                .px(px(12.))
+                .py(px(8.))
+                .rounded(px(12.))
+                .border_1()
+                .border_color(p.border)
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(format!("Version {} is out", release.version)),
+                )
+                .child(
+                    div()
+                        .id("whats-new")
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(p.accent)
+                        .child("What's new")
+                        .on_click(move |_, _, _| {
+                            let _ = opener::open_browser(&url);
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    #[cfg(not(feature = "updater"))]
+    fn update_row(&self, _: &mut Context<Self>) -> Option<AnyElement> {
+        None
     }
 
     /// The mounted Volumes changed: the Settings page re-applies them to the Engine, and each
@@ -799,6 +895,7 @@ impl Shell {
             .child(self.nav_row("nav-explorer", "Explorer", IconName::Folder, Page::Explorer, cx))
             .child(div().mt(px(30.)).mb(px(8.)).px(px(12.)).child(caption("Locations", cx)))
             .child(v_flex().id("locations").flex_1().min_h_0().overflow_y_scroll().children(locations))
+            .children(self.update_row(cx))
             .child(
                 self.nav_row("nav-settings", "Settings", IconName::Settings, Page::Settings, cx)
                     .mt(px(16.)),

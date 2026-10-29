@@ -250,6 +250,10 @@ pub struct Changed {
 /// The user asked to Refresh the Remote with this identity now.
 pub struct Refresh(pub String);
 
+/// The user asked to check for a newer version now.
+#[cfg(feature = "updater")]
+pub struct CheckNow;
+
 /// The user asked to Forget the Offline Volume with this identity.
 pub struct Forget(pub String);
 
@@ -284,6 +288,9 @@ pub struct SettingsPage {
     remote_refresh: Vec<RefreshSelect>,
     /// Last Synced of each Remote by identity, as the Engine reports it.
     remote_synced: HashMap<String, Option<i64>>,
+    /// What the last update check found, for the Updates section.
+    #[cfg(feature = "updater")]
+    update_status: String,
 }
 
 /// The Test of the details in the Remote dialog.
@@ -298,6 +305,8 @@ enum Check {
 impl EventEmitter<Changed> for SettingsPage {}
 impl EventEmitter<Forget> for SettingsPage {}
 impl EventEmitter<Refresh> for SettingsPage {}
+#[cfg(feature = "updater")]
+impl EventEmitter<CheckNow> for SettingsPage {}
 
 impl SettingsPage {
     pub fn new(settings: Settings, volumes: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -347,6 +356,8 @@ impl SettingsPage {
             check_run: 0,
             remote_refresh,
             remote_synced: HashMap::new(),
+            #[cfg(feature = "updater")]
+            update_status: String::new(),
         }
     }
 
@@ -745,6 +756,59 @@ impl SettingsPage {
             .into_any_element()
     }
 
+    /// The Updates section: the daily-check switch, Check now and what the last check found.
+    #[cfg(feature = "updater")]
+    fn updates(&self, cx: &mut Context<Self>) -> Div {
+        let status = if self.update_status.is_empty() {
+            format!("Version {}", crate::update::CURRENT)
+        } else {
+            self.update_status.clone()
+        };
+        panel(cx)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(16.))
+            .child(
+                h_flex()
+                    .gap(px(12.))
+                    .items_center()
+                    .child(
+                        Switch::new("update-checks")
+                            .checked(self.settings.update_checks)
+                            .on_click(cx.listener(|this, on: &bool, _, cx| {
+                                this.settings.update_checks = *on;
+                                this.commit(cx);
+                            })),
+                    )
+                    .child("Check for updates once a day"),
+            )
+            .child(
+                h_flex()
+                    .gap(px(12.))
+                    .items_center()
+                    .child(div().id("update-status").child(caption(status, cx)))
+                    .child(pill("check-now", "Check now").small().build(
+                        cx,
+                        cx.listener(|this, _, _, cx| {
+                            this.update_status = "Checking…".to_owned();
+                            cx.emit(CheckNow);
+                            cx.notify();
+                        }),
+                    )),
+            )
+    }
+
+    /// Shows what an update check found, and remembers when it ran.
+    #[cfg(feature = "updater")]
+    pub fn update_checked(&mut self, status: String, at: i64, cx: &mut Context<Self>) {
+        self.update_status = status;
+        self.settings.last_update_check = Some(at);
+        // Only the check time changed: nothing for the window to apply.
+        self.problem = self.settings.save().err().map(|e| format!("Could not save settings: {e}"));
+        cx.notify();
+    }
+
     /// The Remote dialog: SSH, S3 or FTP details for a read-only Remote, to add one or to edit
     /// `editing`. Test tries the details before they are saved.
     pub fn open_remote_dialog(&mut self, editing: Option<Remote>, window: &mut Window, cx: &mut Context<Self>) {
@@ -1127,6 +1191,16 @@ impl Render for SettingsPage {
             ))
             .child(div().h(px(1.)).bg(border))
             .child(section("Theme", "System follows the operating system and changes with it.", theme, cx));
+        #[cfg(feature = "updater")]
+        {
+            let updates = self.updates(cx);
+            column = column.child(div().h(px(1.)).bg(border)).child(section(
+                "Updates",
+                "Asks GitHub Releases for a newer version at most once a day. A failed check only shows here.",
+                updates,
+                cx,
+            ));
+        }
         if let Some(problem) = &self.problem {
             column = column.child(div().text_color(p.warning).child(problem.clone()));
         }

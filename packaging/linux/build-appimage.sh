@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds view-everything-x86_64.AppImage into dist/ (repo root). Needs rsvg-convert (librsvg) for
-# the PNG icons.
+# Builds view-everything-x86_64.AppImage (and its .zsync) into dist/ (repo root). Needs rsvg-convert (librsvg)
+# for the PNG icons, and zsyncmake (zsync) for the .zsync file.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -42,6 +42,10 @@ if [ -z "$tool" ]; then
     fi
 fi
 
+# Update information (ADR-0007): Shelly, AppImageUpdate and Gear Lever read it from the AppImage and fetch the
+# .zsync published with each release. appimagetool writes that file next to the AppImage when zsyncmake exists.
+update="gh-releases-zsync|hawasman|view-everything|latest|view-everything-x86_64.AppImage.zsync"
+command -v zsyncmake >/dev/null || echo "warning: zsyncmake not found, no .zsync file is written (install zsync)" >&2
 # --appimage-extract-and-run: works where FUSE is unavailable (CI, containers).
-ARCH=x86_64 "$tool" --appimage-extract-and-run "$appdir" "$out/view-everything-x86_64.AppImage"
+(cd "$out" && ARCH=x86_64 "$tool" --appimage-extract-and-run --updateinformation "$update" "$appdir" view-everything-x86_64.AppImage)
 echo "Wrote $out/view-everything-x86_64.AppImage"

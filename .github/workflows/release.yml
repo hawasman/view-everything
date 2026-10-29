@@ -2,7 +2,7 @@ name: release
 
 # Push a tag matching the workspace version (Cargo.toml), e.g. `git tag v0.1.0 && git push origin v0.1.0`.
 # Builds Windows (portable zip + MSI), Linux (AppImage) and macOS (universal .dmg), then publishes
-# one GitHub Release with every file and a SHA256SUMS list.
+# one GitHub Release with every file, a SHA256SUMS list and a .minisig signature for each of them.
 on:
   push:
     tags: ['v*']
@@ -75,7 +75,7 @@ jobs:
         run: >
           sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev
           libwayland-dev libxcb1-dev libvulkan-dev libegl1-mesa-dev libfontconfig1-dev libfreetype6-dev
-          librsvg2-bin
+          librsvg2-bin zsync
       - name: Build AppImage
         run: packaging/linux/build-appimage.sh
       - uses: actions/upload-artifact@v4
@@ -112,6 +112,19 @@ jobs:
           merge-multiple: true
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS
+      # Every asset, SHA256SUMS included, gets a .minisig for the key in packaging/minisign.pub (ADR-0007).
+      - name: Sign
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          test -n "$MINISIGN_SECRET_KEY" || { echo "::error::Secret MINISIGN_SECRET_KEY is not set (see README)"; exit 1; }
+          test -f dist/view-everything-x86_64.AppImage.zsync || { echo "::error::No .zsync file was built"; exit 1; }
+          sudo apt-get update && sudo apt-get install -y minisign
+          key="$(mktemp)"
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
+          for f in dist/*; do minisign -S -s "$key" -m "$f" -x "$f.minisig"; done
+          rm -f "$key"
+          ls dist
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
