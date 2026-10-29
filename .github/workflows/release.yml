@@ -1,8 +1,12 @@
 name: release
 
+# Push a tag matching the workspace version (Cargo.toml), e.g. `git tag v0.1.0 && git push origin v0.1.0`.
+# Builds Windows (portable zip + MSI), Linux (AppImage) and macOS (universal .dmg), then publishes
+# one GitHub Release with every file and a SHA256SUMS list.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,7 +15,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  version:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches Cargo.toml
+        if: github.event_name == 'push'
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
   windows:
+    needs: version
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,24 +63,55 @@ jobs:
         with:
           name: windows
           path: dist/*
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
 
   linux:
+    needs: version
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev libvulkan-dev libegl1-mesa-dev
+        run: >
+          sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev
+          libwayland-dev libxcb1-dev libvulkan-dev libegl1-mesa-dev libfontconfig1-dev libfreetype6-dev
       - name: Build AppImage
         run: packaging/linux/build-appimage.sh
       - uses: actions/upload-artifact@v4
         with:
           name: linux
           path: dist/*
+
+  macos:
+    needs: version
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Icon tools
+        run: brew install librsvg
+      - name: Build universal .dmg
+        run: packaging/macos/build-dmg.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  publish:
+    needs: [windows, linux, macos]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          generate_release_notes: true

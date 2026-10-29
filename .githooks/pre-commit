@@ -1,0 +1,8 @@
+#!/bin/sh
+# Enabled per clone with: git config core.hooksPath .githooks
+# Mirrors CI: formatting, lints, then the test suite. Skip once with `git commit --no-verify`.
+set -e
+
+cargo fmt --all --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --quiet
