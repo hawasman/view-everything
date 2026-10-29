@@ -497,18 +497,22 @@ pub fn recheck(rule: &Rule, path: &Path, volumes: &[VolumeInfo], min_age_days: O
 
 /// The first path at or under `path` (links not followed) that the user does not own: removing
 /// it needs admin rights (ADR-0008). `deep` false judges `path` alone, as for a command rule's
-/// working folder. Where ownership cannot be told it is None and a failed removal is reported.
+/// working folder. Where ownership cannot be told (no uid, an unreadable folder) it counts as not
+/// the user's: the admin step shows the command instead of a Clean that might fail half-way.
+// ponytail: walks every file of each Cleanable on the render thread, once per Index generation; move to the background if a huge node_modules makes it visible.
 #[cfg(unix)]
 pub fn foreign(path: &Path, deep: bool) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
     // A file this process creates is owned by its user: no libc call needed to learn the uid.
     static UID: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-    let uid = (*UID.get_or_init(|| {
+    let Some(uid) = *UID.get_or_init(|| {
         let probe = std::env::temp_dir().join(format!("ve-uid-{}", std::process::id()));
         let uid = std::fs::File::create(&probe).and_then(|f| f.metadata()).map(|m| m.uid()).ok();
         let _ = std::fs::remove_file(&probe);
         uid
-    }))?;
+    }) else {
+        return Some(path.to_path_buf());
+    };
     let mut stack = vec![path.to_path_buf()];
     while let Some(current) = stack.pop() {
         let Ok(meta) = std::fs::symlink_metadata(&current) else { continue };
@@ -516,7 +520,10 @@ pub fn foreign(path: &Path, deep: bool) -> Option<PathBuf> {
             return Some(current);
         }
         if deep && meta.is_dir() {
-            stack.extend(std::fs::read_dir(&current).into_iter().flatten().flatten().map(|e| e.path()));
+            match std::fs::read_dir(&current) {
+                Ok(entries) => stack.extend(entries.flatten().map(|e| e.path())),
+                Err(_) => return Some(current),
+            }
         }
     }
     None
@@ -526,7 +533,8 @@ pub fn foreign(path: &Path, deep: bool) -> Option<PathBuf> {
 #[cfg(windows)]
 pub fn foreign(path: &Path, _deep: bool) -> Option<PathBuf> {
     let root = std::env::var_os("SystemRoot")?;
-    path.starts_with(root).then(|| path.to_path_buf())
+    let (text, root) = (path.to_string_lossy().to_lowercase(), root.to_string_lossy().to_lowercase());
+    text.starts_with(&root).then(|| path.to_path_buf())
 }
 
 /// Whether the app can run the admin step itself: only through `pkexec`, on Linux.
@@ -538,7 +546,7 @@ const RM: &str = "/usr/bin/rm";
 /// The exact command that removes `paths` with admin rights, as shown before it runs: with
 /// `pkexec` on Linux (what the app runs), otherwise what the user would run themselves.
 pub fn admin_command(paths: &[PathBuf]) -> String {
-    let quoted = |p: &PathBuf| format!("'{}'", p.display());
+    let quoted = |p: &PathBuf| format!("'{}'", p.display().to_string().replace('\'', "'\\''"));
     if cfg!(windows) {
         paths
             .iter()
@@ -562,12 +570,13 @@ pub fn admin_clean(plan: &[(Arc<Rule>, PathBuf, Option<u64>)], volumes: &[Volume
     let mut out = Outcome::default();
     let mut go: Vec<PathBuf> = Vec::new();
     for (rule, path, min_age_days) in plan {
-        match recheck(rule, path, volumes, *min_age_days) {
-            _ if rule.is_command() => out
-                .skipped
-                .push((path.clone(), "command rules are not run with admin rights".into())),
-            Err(why) => out.skipped.push((path.clone(), why)),
-            Ok(()) => go.push(path.clone()),
+        if rule.is_command() {
+            out.skipped
+                .push((path.clone(), "command rules are not run with admin rights".into()));
+        } else if let Err(why) = recheck(rule, path, volumes, *min_age_days) {
+            out.skipped.push((path.clone(), why));
+        } else {
+            go.push(path.clone());
         }
     }
     if go.is_empty() {

@@ -371,10 +371,11 @@ impl CleanerPage {
     }
 
     fn show_button(&self, id: (&'static str, usize), c: &Cleanable, cx: &mut Context<Self>) -> impl IntoElement {
-        let (path, is_file) = (c.path.clone(), !c.rule.is_command() && !c.path.is_dir());
-        pill(id, "Show in Explorer")
-            .small()
-            .build(cx, cx.listener(move |this, _, _, cx| this.show_in_explorer(&path, is_file, cx)))
+        let (path, command) = (c.path.clone(), c.rule.is_command());
+        pill(id, "Show in Explorer").small().build(
+            cx,
+            cx.listener(move |this, _, _, cx| this.show_in_explorer(&path, !command && !path.is_dir(), cx)),
+        )
     }
 
     /// The admin-only Cleanables, each with the command that would remove it, and the admin step.
