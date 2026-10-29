@@ -3,7 +3,7 @@
 //! A Snapshot is keyed by path, since Entry ids change on every save. Folders are stored in
 //! depth-first order as a name and the position of their parent, so a path is never written out
 //! in full; a Volume's root is named by its mount path. The file is the columns, bincoded and
-//! deflated.
+//! gzipped.
 
 use crate::filter::Filter;
 use crate::index::{EntryId, Index};

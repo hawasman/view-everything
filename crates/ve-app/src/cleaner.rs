@@ -234,7 +234,7 @@ impl CleanerPage {
                 .description(
                     div()
                         .child(format!(
-                            "This permanently removes {} item(s), freeing about {}, and cannot be undone. It runs exactly:",
+                            "This permanently removes {} item(s), freeing about {}, and cannot be undone. Anything that no longer matches is skipped and reported. It runs:",
                             plan.len(),
                             format::size(total)
                         ))

@@ -131,3 +131,9 @@ _Avoid_: preview, report
 **Clean**:
 Permanently removing the Cleanables in a Cleanup Plan, bypassing the Trash so the space is actually freed.
 _Avoid_: delete, purge, wipe
+
+**Admin only**:
+A Cleanable the user does not own, or that holds something they do not own. Clean never touches it; it is listed apart with the exact command that removes it, and removed only by a separate admin step that shows that command first and runs it elevated.
+
+**Show in Explorer**:
+The Cleaner's action on a Cleanable: opens the Explorer with a Query scoped to its folder.

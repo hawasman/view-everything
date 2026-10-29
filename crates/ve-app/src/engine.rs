@@ -531,15 +531,17 @@ fn save_if_changed(shared: &Arc<Shared>, path: Option<&Path>, saved_generation: 
     }
 }
 
+const SNAPSHOTS: &str = "snapshots";
+
 /// The folder of Snapshots, beside the Index.
 pub fn snapshots_dir() -> Option<PathBuf> {
-    Some(settings::index_path()?.with_file_name("snapshots"))
+    Some(settings::index_path()?.with_file_name(SNAPSHOTS))
 }
 
 /// After the first Index save of a day (once every Location has synced), stores that day's Snapshot on a thread of its own, so
 /// neither the save nor the GUI waits for it, then drops the Snapshots retention no longer keeps.
 fn snapshot_first_save_of_day(shared: &Arc<Shared>, index_path: &Path) {
-    let dir = index_path.with_file_name("snapshots"); // same folder as `snapshots_dir`
+    let dir = index_path.with_file_name(SNAPSHOTS);
     let today = Local::now().date_naive();
     let file = snapshot::path_for(&dir, today);
     if file.exists() || shared.snapshotting.swap(true, Ordering::AcqRel) {

@@ -514,7 +514,14 @@ pub fn foreign(path: &Path, deep: bool) -> Option<PathBuf> {
     static UID: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
     let Some(uid) = *UID.get_or_init(|| {
         let probe = std::env::temp_dir().join(format!("ve-uid-{}", std::process::id()));
-        let uid = std::fs::File::create(&probe).and_then(|f| f.metadata()).map(|m| m.uid()).ok();
+        // `create_new` never follows a link planted at the name.
+        let uid = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .and_then(|f| f.metadata())
+            .map(|m| m.uid())
+            .ok();
         let _ = std::fs::remove_file(&probe);
         uid
     }) else {
@@ -539,9 +546,12 @@ pub fn foreign(path: &Path, deep: bool) -> Option<PathBuf> {
 /// Windows has no cheap owner test: what lies under the Windows folder is taken as needing admin.
 #[cfg(windows)]
 pub fn foreign(path: &Path, _deep: bool) -> Option<PathBuf> {
-    let root = std::env::var_os("SystemRoot")?;
-    let (text, root) = (path.to_string_lossy().to_lowercase(), root.to_string_lossy().to_lowercase());
-    text.starts_with(&root).then(|| path.to_path_buf())
+    // Whole folders, compared without case or a `\\?\` prefix; with no Windows folder known, fail closed.
+    let plain = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase().trim_start_matches(r"\\?\"));
+    let Some(root) = std::env::var_os("SystemRoot") else {
+        return Some(path.to_path_buf());
+    };
+    plain(path).starts_with(plain(Path::new(&root))).then(|| path.to_path_buf())
 }
 
 /// Whether the app can run the admin step itself: only through `pkexec`, on Linux.
@@ -557,7 +567,10 @@ pub fn admin_command(paths: &[PathBuf]) -> String {
     if cfg!(windows) {
         paths
             .iter()
-            .map(|p| format!("rd /s /q \"{}\"", p.display()))
+            .map(|p| match p.is_dir() {
+                true => format!("rd /s /q \"{}\"", p.display()),
+                false => format!("del /f /q \"{}\"", p.display()),
+            })
             .collect::<Vec<_>>()
             .join(" & ")
     } else {

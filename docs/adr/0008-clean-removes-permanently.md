@@ -6,4 +6,4 @@ Before this, Empty Trash was the only permanent change the app made. Clean, run 
 - A build artefact counts only when a project marker is found, such as a sibling `Cargo.toml` or `package.json`, or a genuine `CACHEDIR.TAG` inside. Markers must be plain files, never links. Removal never follows links and refuses a folder with a Volume mounted on or inside it.
 - The advanced view shows every path and command exactly.
 - Command rules are marked Estimated and run without a shell.
-- Version 1 removes only files the user owns. Files that need admin rights get a separate admin step that shows its command first.
+- Clean removes only what the user owns, judged by walking the whole Cleanable (links not followed); where ownership cannot be told it counts as not theirs. Everything else is Admin only: it gets a separate admin step that shows its exact command first and runs it with `pkexec` (Linux only; elsewhere the command is shown for the user to run). Command rules are never run elevated. On Windows only what lies under the Windows folder is treated as Admin only, since there is no cheap owner test.
