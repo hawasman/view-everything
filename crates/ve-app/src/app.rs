@@ -243,7 +243,9 @@ impl Shell {
         #[cfg(feature = "bench")]
         if std::env::var_os("VE_OPEN_DIALOG").is_some() {
             cx.defer_in(window, |this, window, cx| {
-                this.settings_page.clone().update(cx, |page, cx| page.open_add_remote(window, cx))
+                this.settings_page
+                    .clone()
+                    .update(cx, |page, cx| page.open_remote_dialog(None, window, cx))
             });
         }
 
@@ -692,10 +694,10 @@ impl Shell {
             }))
     }
 
-    /// Brand, scope switcher, Find-a-file, pages, Locations; Settings and the user at the bottom.
+    /// Brand, scope switcher, pages, Locations; Settings and the user at the bottom.
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let (text, muted, border, ground, surface, accent) = (p.text, p.muted, p.border, p.ground, p.surface, p.accent);
+        let (text, muted, border, ground, accent) = (p.text, p.muted, p.border, p.ground, p.accent);
         let control = p.control;
         let (positive, avatar) = (p.positive, p.avatar);
         let status = self.engine.shared.status.lock().clone();
@@ -780,26 +782,6 @@ impl Shell {
                     .rounded(px(2.))
                     .bg(control),
             );
-        let find = h_flex()
-            .h(px(32.))
-            .mt(px(12.))
-            .mb(px(8.))
-            .pl(px(4.))
-            .pr(px(10.))
-            .gap(px(4.))
-            .items_center()
-            .rounded_full()
-            .border_1()
-            .border_color(border)
-            .bg(surface)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(Input::new(&self.query).appearance(false).bordered(false).small()),
-            )
-            .child(div().text_xs().text_color(muted).child("/"));
-
         v_flex()
             .w(px(224.))
             .h_full()
@@ -834,8 +816,10 @@ impl Shell {
                     .child("Index")
                     .child(caption(format!("{count} Location{}", if count == 1 { "" } else { "s" }), cx)),
             )
-            .child(find)
-            .child(self.nav_row("nav-dashboard", "Dashboard", IconName::LayoutDashboard, Page::Dashboard, cx))
+            .child(
+                self.nav_row("nav-dashboard", "Dashboard", IconName::LayoutDashboard, Page::Dashboard, cx)
+                    .mt(px(12.)),
+            )
             .child(self.nav_row("nav-explorer", "Explorer", IconName::Folder, Page::Explorer, cx))
             .child(div().mt(px(30.)).mb(px(8.)).px(px(12.)).child(caption("Locations", cx)))
             .child(v_flex().id("locations").flex_1().min_h_0().overflow_y_scroll().children(locations))
@@ -873,6 +857,31 @@ impl Shell {
                             .child(caption(format!("{} Entries", format::count(entries)), cx)),
                     ),
             )
+    }
+
+    /// The Query: wide enough to read whole, before the Filters that edit it. `/` focuses it.
+    fn find_box(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .h(px(36.))
+            .pl(px(14.))
+            .pr(px(14.))
+            .gap(px(8.))
+            .items_center()
+            .rounded_full()
+            .border_1()
+            .border_color(p.border)
+            .bg(p.surface)
+            .child(Icon::new(IconName::Search).small().text_color(p.muted))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Input::new(&self.query).appearance(false).bordered(false)),
+            )
+            .child(div().text_xs().text_color(p.muted).child("/"))
     }
 
     /// `.tabs`: underlined Tree / Flat list with the summary line at the right.
@@ -1048,12 +1057,21 @@ impl Shell {
                     }))
                     .child(
                         h_flex()
-                            .h(px(32.))
+                            .h(px(36.))
                             .mb(px(8.))
+                            .gap(px(16.))
                             .items_center()
-                            .justify_between()
-                            .child(div().text_size(px(24.)).line_height(px(32.)).child("Explorer"))
-                            .child(h_flex().gap(px(12.)).items_center().children(selection).child(filters).child(trash)),
+                            .child(div().flex_none().text_size(px(24.)).line_height(px(32.)).child("Explorer"))
+                            .child(self.find_box(cx))
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .gap(px(12.))
+                                    .items_center()
+                                    .children(selection)
+                                    .child(filters)
+                                    .child(trash),
+                            ),
                     )
                     .child(self.tabs(summary, cx))
                     .child(

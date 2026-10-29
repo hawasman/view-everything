@@ -180,6 +180,19 @@ impl Settings {
         self.volume_refresh_minutes.remove(&remote.identity());
     }
 
+    /// Puts `new` where the Remote `old` was, with its refresh interval. A different Remote of the
+    /// same identity as `new` is the same Location, and goes.
+    pub fn replace_remote(&mut self, old: &Remote, new: Remote, refresh_minutes: u64) {
+        let id = new.identity();
+        self.volume_refresh_minutes.remove(&old.identity());
+        self.volume_refresh_minutes.insert(id.clone(), refresh_minutes);
+        self.remotes.retain(|r| r == old || r.identity() != id);
+        match self.remotes.iter().position(|r| r == old) {
+            Some(at) => self.remotes[at] = new,
+            None => self.remotes.push(new),
+        }
+    }
+
     /// The refresh interval of a Remote, in minutes: Manual (0) unless chosen.
     pub fn remote_refresh_minutes(&self, remote: &Remote) -> u64 {
         self.volume_refresh_minutes.get(&remote.identity()).copied().unwrap_or(0)
@@ -365,6 +378,28 @@ mod tests {
             s.remotes[0],
             Remote::S3(S3Remote::new("b", "", "", "us-east-1", false, "", "AKIA").unwrap())
         );
+    }
+
+    #[test]
+    fn an_edited_remote_keeps_its_place_and_takes_its_interval_to_its_new_identity() {
+        let (a, b, c) = (
+            Remote::new("me@a", "/srv").unwrap(),
+            Remote::new("me@b", "/srv").unwrap(),
+            Remote::new("me@c", "/srv").unwrap(),
+        );
+        let mut s = Settings::default();
+        for r in [&a, &b, &c] {
+            s.add_remote(r.clone(), 60);
+        }
+        let moved = Remote::new("me@b", "/data").unwrap();
+        s.replace_remote(&b, moved.clone(), 120);
+        assert_eq!(s.remotes, [a.clone(), moved.clone(), c.clone()]);
+        assert!(!s.volume_refresh_minutes.contains_key(&b.identity()));
+        assert_eq!(s.remote_refresh_minutes(&moved), 120);
+        // Edited into the Location of another Remote: one Remote, where the edited one was.
+        s.replace_remote(&moved, c.clone(), 15);
+        assert_eq!(s.remotes, [a, c.clone()]);
+        assert_eq!(s.remote_refresh_minutes(&c), 15);
     }
 
     #[test]

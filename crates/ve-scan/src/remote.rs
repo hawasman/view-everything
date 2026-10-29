@@ -126,6 +126,49 @@ pub fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::R
     }
 }
 
+/// Connects to `remote` and opens its folder (or lists one key of its bucket) without touching
+/// the Index: the Test of the Remote dialog. `secret` is a secret key or password typed in but
+/// not stored yet; `None` uses the one kept in the OS keyring, as a sync would.
+pub fn check(remote: &Remote, secret: Option<&str>) -> io::Result<()> {
+    let denied = |e: String| io::Error::new(io::ErrorKind::PermissionDenied, e);
+    match remote {
+        Remote::Ssh(r) => check_with("ssh", r),
+        Remote::S3(r) => {
+            let credentials = match (secret, &r.access_key) {
+                (Some(secret), Some(key)) => Some(rusty_s3::Credentials::new(key.clone(), secret.to_owned())),
+                _ => {
+                    crate::s3::with_system_chain(|chain| chain.credentials(r, &|| crate::s3::read_secret(&r.identity()))).map_err(denied)?
+                }
+            };
+            crate::s3::check(r, credentials.as_ref())
+        }
+        Remote::Ftp(r) => {
+            let password = match secret {
+                Some(p) => p.to_owned(),
+                None => crate::ftp::password(r).map_err(denied)?,
+            };
+            crate::ftp::check(r, &password, crate::ftp::web_roots_config())
+        }
+    }
+}
+
+/// [`check`] of an SSH Remote through the `ssh` program `program`: logs in and enters its folder.
+pub fn check_with(program: &str, remote: &SshRemote) -> io::Result<()> {
+    let mut child = spawn(program, remote, false, &format!("cd {}", shell_quote(&remote.path)), Stdio::null())?;
+    let stderr = drain_stderr(&mut child);
+    io::copy(&mut child.stdout.take().expect("piped"), &mut io::sink())?;
+    let status = child.wait()?;
+    let stderr = stderr.join().unwrap_or_default();
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(255) => Err(failure(remote, Some(255), 0, &stderr).expect("255 is a failure")),
+        _ => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} is not a folder on {}", remote.path, remote.host),
+        )),
+    }
+}
+
 /// Remotes known to lack GNU `find -printf`, so the next sync goes straight to SFTP.
 ///
 /// ponytail: remembered for the session only; persisting it needs a field on `Remote` in ve-core.

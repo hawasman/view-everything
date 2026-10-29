@@ -6,7 +6,7 @@ use crate::theme::{self, SERIF_FAMILY, palette};
 use crate::ui::{Tone, caption, panel, pill, tag};
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::Sizable as _;
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::switch::Switch;
@@ -47,6 +47,16 @@ impl SelectItem for Every {
 }
 
 type RefreshSelect = Entity<SelectState<Vec<Every>>>;
+
+/// The refresh choices, plus `minutes` if it is not one of them, and where `minutes` is.
+fn refresh_items(minutes: u64) -> (Vec<Every>, IndexPath) {
+    let mut items: Vec<Every> = REFRESH_CHOICES.map(Every).into();
+    if !REFRESH_CHOICES.contains(&minutes) {
+        items.insert(items.len() - 1, Every(minutes));
+    }
+    let at = items.iter().position(|e| e.0 == minutes).expect("minutes is among the items");
+    (items, IndexPath::new(at))
+}
 
 /// The fields of the Add Remote dialog's S3 tab.
 #[derive(Clone)]
@@ -93,9 +103,10 @@ impl S3Form {
         ]
     }
 
-    /// The S3 Remote typed in, with its secret stored in the OS keyring. Empty Region and Endpoint
-    /// are taken from the profile or the environment, as the AWS tools do.
-    fn remote(&self, path_style: bool, cx: &App) -> Result<Remote, String> {
+    /// The S3 Remote typed in and the secret key typed for it, if any. Empty Region and Endpoint
+    /// are taken from the profile or the environment, as the AWS tools do. `editing` is the Remote
+    /// the dialog edits: its secret stays when none is typed for the same Access key.
+    fn read(&self, path_style: bool, editing: Option<&Remote>, cx: &App) -> Result<(Remote, Option<String>), String> {
         let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_owned();
         let (profile, key, secret) = (text(&self.profile), text(&self.key), self.secret.read(cx).value().to_string());
         let defaults = ve_scan::s3::with_system_chain(|c| c.defaults(Some(profile.as_str()).filter(|p| !p.is_empty())));
@@ -115,14 +126,59 @@ impl S3Form {
             &profile,
             &key,
         )?;
+        let kept = matches!(editing, Some(Remote::S3(old)) if old.access_key.is_some() && old.access_key == remote.access_key);
         match (key.is_empty(), secret.is_empty()) {
+            (false, _) if !profile.is_empty() => return Err("Use a Profile or an Access key, not both".into()),
+            (false, true) if kept => {}
             (false, true) => return Err("Enter the Secret key that goes with the Access key".into()),
             (true, false) => return Err("Enter the Access key that goes with the Secret key".into()),
-            (false, false) if !profile.is_empty() => return Err("Use a Profile or an Access key, not both".into()),
-            (false, false) => ve_scan::s3::store_secret(&remote.identity(), &secret)?,
-            (true, true) => {}
+            _ => {}
         }
-        Ok(Remote::S3(remote))
+        Ok((Remote::S3(remote), Some(secret).filter(|s| !s.is_empty())))
+    }
+
+    /// Shows `remote` in the fields; its secret is not shown, only said to be kept.
+    fn fill(&self, remote: &S3Remote, window: &mut Window, cx: &mut App) {
+        set(&self.bucket, &remote.bucket, window, cx);
+        set(&self.prefix, &remote.prefix, window, cx);
+        set(&self.endpoint, remote.endpoint.as_deref().unwrap_or(""), window, cx);
+        set(&self.region, &remote.region, window, cx);
+        set(&self.profile, remote.profile.as_deref().unwrap_or(""), window, cx);
+        set(&self.key, remote.access_key.as_deref().unwrap_or(""), window, cx);
+        set(&self.secret, "", window, cx);
+        secret_hint(&self.secret, remote.access_key.is_some(), window, cx);
+    }
+}
+
+fn set(input: &Entity<InputState>, text: &str, window: &mut Window, cx: &mut App) {
+    input.update(cx, |i, cx| i.set_value(text, window, cx));
+}
+
+/// The placeholder of a secret field: kept already (when editing a Remote that has one), or to be kept.
+fn secret_hint(input: &Entity<InputState>, kept: bool, window: &mut Window, cx: &mut App) {
+    let hint = if kept {
+        "unchanged (in the OS keyring)"
+    } else {
+        "stored in the OS keyring"
+    };
+    input.update(cx, |i, cx| i.set_placeholder(hint, window, cx));
+}
+
+/// Whether `remote` may keep a secret in the OS keyring, under its identity.
+fn has_secret(remote: &Remote) -> bool {
+    match remote {
+        Remote::S3(r) => r.access_key.is_some(),
+        Remote::Ftp(_) => true,
+        Remote::Ssh(_) => false,
+    }
+}
+
+/// Whether `remote` cannot connect without a secret.
+fn needs_secret(remote: &Remote) -> bool {
+    match remote {
+        Remote::S3(r) => r.access_key.is_some(),
+        Remote::Ftp(r) => !r.is_anonymous(),
+        Remote::Ssh(_) => false,
     }
 }
 
@@ -154,8 +210,9 @@ impl FtpForm {
         [&self.host, &self.port, &self.user, &self.password, &self.path]
     }
 
-    /// The FTP Remote typed in, with its password stored in the OS keyring (never in settings.toml).
-    fn remote(&self, allow_plain: bool, cx: &App) -> Result<Remote, String> {
+    /// The FTP Remote typed in and the password typed for it, if any. `editing` is the Remote the
+    /// dialog edits: its password stays when none is typed.
+    fn read(&self, allow_plain: bool, editing: Option<&Remote>, cx: &App) -> Result<(Remote, Option<String>), String> {
         let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_owned();
         let port = match text(&self.port).as_str() {
             "" => 21,
@@ -164,12 +221,21 @@ impl FtpForm {
         let tls = if allow_plain { FtpTls::Plain } else { FtpTls::Explicit };
         let remote = FtpRemote::new(&text(&self.host), port, &text(&self.user), &text(&self.path), tls)?;
         let password = self.password.read(cx).value().to_string();
-        match (password.is_empty(), remote.is_anonymous()) {
-            (true, false) => return Err("Enter the password for this user".into()),
-            (true, true) => {}
-            (false, _) => ve_scan::s3::store_secret(&remote.identity(), &password)?,
+        let kept = matches!(editing, Some(Remote::Ftp(old)) if !old.is_anonymous());
+        if password.is_empty() && !remote.is_anonymous() && !kept {
+            return Err("Enter the password for this user".into());
         }
-        Ok(Remote::Ftp(remote))
+        Ok((Remote::Ftp(remote), Some(password).filter(|p| !p.is_empty())))
+    }
+
+    /// Shows `remote` in the fields; its password is not shown, only said to be kept.
+    fn fill(&self, remote: &FtpRemote, window: &mut Window, cx: &mut App) {
+        set(&self.host, &remote.host, window, cx);
+        set(&self.port, &remote.port.to_string(), window, cx);
+        set(&self.user, &remote.user, window, cx);
+        set(&self.password, "", window, cx);
+        set(&self.path, &remote.path, window, cx);
+        secret_hint(&self.password, !remote.is_anonymous(), window, cx);
     }
 }
 
@@ -197,21 +263,36 @@ pub struct SettingsPage {
     volume_refresh: Vec<RefreshSelect>,
     /// Set when the settings file could not be written.
     problem: Option<String>,
-    /// Fields of the Add Remote dialog.
+    /// Fields of the Remote dialog.
     remote_host: Entity<InputState>,
     remote_path: Entity<InputState>,
     remote_every: RefreshSelect,
     s3: S3Form,
     ftp: FtpForm,
-    /// The tab the Add Remote dialog shows.
+    /// The tab the Remote dialog shows.
     remote_tab: RemoteTab,
     s3_path_style: bool,
     /// FTP without TLS was switched on in the dialog.
     ftp_plain: bool,
+    /// The Remote the dialog edits; `None` adds one.
+    editing: Option<Remote>,
+    /// What the dialog's Test found for the details typed in.
+    check: Check,
+    /// Counts Tests and changes to the details, so a Test that ends after either is not shown.
+    check_run: u64,
     /// One refresh-interval select per Remote, in `settings.remotes` order.
     remote_refresh: Vec<RefreshSelect>,
     /// Last Synced of each Remote by identity, as the Engine reports it.
     remote_synced: HashMap<String, Option<i64>>,
+}
+
+/// The Test of the details in the Remote dialog.
+#[derive(Clone, PartialEq)]
+enum Check {
+    Idle,
+    Running,
+    Passed,
+    Failed(String),
 }
 
 impl EventEmitter<Changed> for SettingsPage {}
@@ -227,10 +308,19 @@ impl SettingsPage {
             .collect();
         let remote_host = cx.new(|cx| InputState::new(window, cx).placeholder("user@host or ssh config alias"));
         let remote_path = cx.new(|cx| InputState::new(window, cx).placeholder("/srv/backup"));
-        let items: Vec<Every> = REFRESH_CHOICES.map(Every).into();
-        let manual = IndexPath::new(items.len() - 1);
+        let (items, manual) = refresh_items(0);
         let remote_every = cx.new(|cx| SelectState::new(items, Some(manual), window, cx));
         let remote_refresh = Self::remote_selects(&settings, window, cx);
+        let (s3, ftp) = (S3Form::new(window, cx), FtpForm::new(window, cx));
+        // A Test result is for the details it tested.
+        for input in [&remote_host, &remote_path].into_iter().chain(s3.all()).chain(ftp.all()) {
+            cx.subscribe(input, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.forget_check(cx);
+                }
+            })
+            .detach();
+        }
         Self {
             settings,
             offline: Vec::new(),
@@ -241,8 +331,8 @@ impl SettingsPage {
             remote_host,
             remote_path,
             remote_every,
-            s3: S3Form::new(window, cx),
-            ftp: FtpForm::new(window, cx),
+            s3,
+            ftp,
             // Screenshots: VE_DIALOG_TAB=s3 or ftp opens the Add Remote dialog on that tab, VE_DIALOG_PLAIN
             // with FTP's plain toggle on.
             remote_tab: match (cfg!(feature = "bench"), std::env::var("VE_DIALOG_TAB").as_deref()) {
@@ -252,6 +342,9 @@ impl SettingsPage {
             },
             s3_path_style: false,
             ftp_plain: cfg!(feature = "bench") && std::env::var_os("VE_DIALOG_PLAIN").is_some(),
+            editing: None,
+            check: Check::Idle,
+            check_run: 0,
             remote_refresh,
             remote_synced: HashMap::new(),
         }
@@ -265,11 +358,103 @@ impl SettingsPage {
             .collect()
     }
 
-    /// Adds a Remote with its refresh interval and has it indexed.
-    fn add_remote(&mut self, remote: Remote, minutes: u64, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings.add_remote(remote, minutes);
+    /// The Remote the dialog describes, with the secret typed for it (none typed: `None`).
+    fn typed_remote(&self, cx: &App) -> Result<(Remote, Option<String>), String> {
+        match self.remote_tab {
+            RemoteTab::S3 => self.s3.read(self.s3_path_style, self.editing.as_ref(), cx),
+            RemoteTab::Ftp => self.ftp.read(self.ftp_plain, self.editing.as_ref(), cx),
+            RemoteTab::Ssh => Ok((
+                Remote::new(
+                    self.remote_host.read(cx).value().as_ref(),
+                    self.remote_path.read(cx).value().as_ref(),
+                )?,
+                None,
+            )),
+        }
+    }
+
+    /// Adds the Remote, or puts it in place of the one being edited, with its refresh interval,
+    /// and has it indexed. A typed secret is kept under the Remote's identity; with none typed, an
+    /// edited Remote's secret moves with it to a new identity.
+    fn save_remote(
+        &mut self,
+        remote: Remote,
+        secret: Option<String>,
+        minutes: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let id = remote.identity();
+        let old = self.editing.clone();
+        let moved = old.as_ref().filter(|o| has_secret(o) && o.identity() != id);
+        match (&secret, moved) {
+            (Some(secret), _) => ve_scan::s3::store_secret(&id, secret)?,
+            (None, Some(o)) if has_secret(&remote) => match ve_scan::s3::read_secret(&o.identity()) {
+                Ok(secret) => ve_scan::s3::store_secret(&id, &secret)?,
+                Err(why) if needs_secret(&remote) => return Err(format!("Enter the secret again: {why}")),
+                Err(_) => {}
+            },
+            _ => {}
+        }
+        if let Some(o) = &old
+            && has_secret(o)
+            && (o.identity() != id || !has_secret(&remote))
+        {
+            ve_scan::s3::forget_secret(&o.identity());
+        }
+        match &old {
+            Some(o) => self.settings.replace_remote(o, remote, minutes),
+            None => {
+                self.settings.add_remote(remote, minutes);
+            }
+        }
+        self.editing = None;
         self.remote_refresh = Self::remote_selects(&self.settings, window, cx);
         self.commit(cx);
+        Ok(())
+    }
+
+    /// Tests the details typed in, off the UI thread, and shows what it found in the dialog.
+    fn test_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.check_run += 1;
+        let run = self.check_run;
+        let (remote, secret) = match self.typed_remote(cx) {
+            Ok(typed) => typed,
+            Err(why) => {
+                self.check = Check::Failed(why);
+                window.refresh();
+                return;
+            }
+        };
+        self.check = Check::Running;
+        window.refresh();
+        // With none typed, an edited Remote's secret is still filed under its old identity until saved.
+        let kept = self.editing.as_ref().filter(|o| has_secret(o)).map(Remote::identity);
+        let task = cx.background_spawn(async move {
+            let secret = secret.or_else(|| kept.and_then(|id| ve_scan::s3::read_secret(&id).ok()));
+            ve_scan::remote::check(&remote, secret.as_deref())
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |page, window, _| {
+                if page.check_run == run {
+                    page.check = match result {
+                        Ok(()) => Check::Passed,
+                        Err(e) => Check::Failed(e.to_string()),
+                    };
+                    window.refresh();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn forget_check(&mut self, cx: &mut Context<Self>) {
+        self.check_run += 1;
+        if self.check != Check::Idle {
+            self.check = Check::Idle;
+            cx.notify();
+        }
     }
 
     fn remove_remote(&mut self, remote: &Remote, window: &mut Window, cx: &mut Context<Self>) {
@@ -294,12 +479,8 @@ impl SettingsPage {
     /// A select of refresh choices (plus the stored value if it is not one of them) that stores
     /// the pick for the Volume `identity`, or as the default when there is none.
     fn refresh_select(minutes: u64, identity: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> RefreshSelect {
-        let mut items: Vec<Every> = REFRESH_CHOICES.map(Every).into();
-        if !REFRESH_CHOICES.contains(&minutes) {
-            items.insert(items.len() - 1, Every(minutes));
-        }
-        let at = items.iter().position(|e| e.0 == minutes);
-        let select = cx.new(|cx| SelectState::new(items, at.map(IndexPath::new), window, cx));
+        let (items, at) = refresh_items(minutes);
+        let select = cx.new(|cx| SelectState::new(items, Some(at), window, cx));
         cx.subscribe(&select, move |this, _, event: &SelectEvent<Vec<Every>>, cx| {
             let SelectEvent::Confirm(Some(m)) = event else { return };
             match &identity {
@@ -386,14 +567,14 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// A Remote: its host and path or bucket, the Remote · protocol tag, Last Synced with Refresh now, and Remove.
+    /// A Remote: its host and path or bucket, the Remote · protocol tag, Last Synced with Refresh now and Edit, and Remove.
     fn remote_row(&self, ix: usize, first: bool, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
         let remote = self.settings.remotes[ix].clone();
         let identity = remote.identity();
         let synced = self.remote_synced.get(&identity).copied().flatten();
         let label = last_synced_label(Some(synced), chrono::Utc::now().timestamp()).unwrap_or_default();
-        let (refresh_identity, removed) = (identity.clone(), remote.clone());
+        let (refresh_identity, removed, edited) = (identity.clone(), remote.clone(), remote.clone());
         h_flex()
             .min_h(px(62.))
             .py(px(8.))
@@ -425,6 +606,16 @@ impl SettingsPage {
                                     .text_color(p.accent)
                                     .child("Refresh now")
                                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(Refresh(refresh_identity.clone())))),
+                            )
+                            .child(
+                                div()
+                                    .id(("edit-remote", ix))
+                                    .cursor_pointer()
+                                    .text_color(p.accent)
+                                    .child("Edit")
+                                    .on_click(
+                                        cx.listener(move |this, _, window, cx| this.open_remote_dialog(Some(edited.clone()), window, cx)),
+                                    ),
                             ),
                     ),
             )
@@ -554,21 +745,23 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// The Add Remote dialog: SSH, S3 or FTP details for a read-only Remote.
-    pub fn open_add_remote(&self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The Remote dialog: SSH, S3 or FTP details for a read-only Remote, to add one or to edit
+    /// `editing`. Test tries the details before they are saved.
+    pub fn open_remote_dialog(&mut self, editing: Option<Remote>, window: &mut Window, cx: &mut Context<Self>) {
+        // An Add after an Edit starts empty; an Add after a cancelled Add keeps what was typed.
+        if editing.is_some() || self.editing.is_some() {
+            self.fill_dialog(editing.as_ref(), window, cx);
+        }
+        self.editing = editing;
+        self.forget_check(cx);
         let (host, path, every) = (self.remote_host.clone(), self.remote_path.clone(), self.remote_every.clone());
         let (form, ftp_form) = (self.s3.clone(), self.ftp.clone());
         let page = cx.entity();
         window.open_dialog(cx, move |dialog, _, cx| {
-            let (host, path, every, page, form, ftp_form) = (
-                host.clone(),
-                path.clone(),
-                every.clone(),
-                page.clone(),
-                form.clone(),
-                ftp_form.clone(),
-            );
-            let (shown_tab, path_style, plain) = page.read_with(cx, |p, _| (p.remote_tab, p.s3_path_style, p.ftp_plain));
+            let page = page.clone();
+            let (shown_tab, path_style, plain, editing, check) = page.read_with(cx, |p, _| {
+                (p.remote_tab, p.s3_path_style, p.ftp_plain, p.editing.is_some(), p.check.clone())
+            });
             let p = palette(cx);
             let (surface, ground, border, muted, text) = (p.surface, p.ground, p.border, p.muted, p.text);
             let field = |label: &'static str, input: &Entity<InputState>| {
@@ -605,7 +798,10 @@ impl SettingsPage {
             let tab = |id: &'static str, label: &'static str, which: RemoteTab| {
                 let page = page.clone();
                 seg(label, shown_tab == which).id(id).on_click(move |_, window, cx| {
-                    page.update(cx, |page, _| page.remote_tab = which);
+                    page.update(cx, |page, cx| {
+                        page.remote_tab = which;
+                        page.forget_check(cx);
+                    });
                     window.refresh();
                 })
             };
@@ -643,7 +839,12 @@ impl SettingsPage {
                                 .items_center()
                                 .child(Switch::new("s3-path-style").checked(path_style).on_click({
                                     let page = page.clone();
-                                    move |checked: &bool, _, cx| page.update(cx, |page, _| page.s3_path_style = *checked)
+                                    move |checked: &bool, _, cx| {
+                                        page.update(cx, |page, cx| {
+                                            page.s3_path_style = *checked;
+                                            page.forget_check(cx);
+                                        })
+                                    }
                                 }))
                                 .child(div().text_color(muted).child("Path-style URLs (MinIO and most custom endpoints)")),
                         )
@@ -670,7 +871,12 @@ impl SettingsPage {
                                 .items_center()
                                 .child(Switch::new("ftp-allow-plain").checked(plain).on_click({
                                     let page = page.clone();
-                                    move |checked: &bool, _, cx| page.update(cx, |page, _| page.ftp_plain = *checked)
+                                    move |checked: &bool, _, cx| {
+                                        page.update(cx, |page, cx| {
+                                            page.ftp_plain = *checked;
+                                            page.forget_check(cx);
+                                        })
+                                    }
                                 }))
                                 .child(div().text_color(muted).child("Allow plain FTP (no encryption)")),
                         )
@@ -687,35 +893,42 @@ impl SettingsPage {
                         .child(field("Path", &path))
                         .child(refresh)
                 };
-            let add = {
-                let (host, path, every, page, form, ftp_form) = (
-                    host.clone(),
-                    path.clone(),
-                    every.clone(),
-                    page.clone(),
-                    form.clone(),
-                    ftp_form.clone(),
-                );
+            let outcome = match &check {
+                Check::Idle => None,
+                Check::Running => Some((muted, "Testing the connection…".to_owned())),
+                Check::Passed => Some((p.positive, "Connected: the Remote can be read.".to_owned())),
+                Check::Failed(why) => Some((p.negative, why.clone())),
+            };
+            let save = {
+                let (every, page) = (every.clone(), page.clone());
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                    let (tab, path_style, plain) = page.read_with(cx, |p, _| (p.remote_tab, p.s3_path_style, p.ftp_plain));
-                    let remote = match tab {
-                        RemoteTab::S3 => form.remote(path_style, cx),
-                        RemoteTab::Ftp => ftp_form.remote(plain, cx),
-                        RemoteTab::Ssh => Remote::new(host.read(cx).value().as_ref(), path.read(cx).value().as_ref()),
-                    };
-                    match remote {
-                        Ok(remote) => {
-                            let minutes = every.read(cx).selected_value().copied().unwrap_or(0);
-                            page.update(cx, |page, cx| page.add_remote(remote, minutes, window, cx));
-                            for input in [&host, &path].into_iter().chain(form.all()).chain(ftp_form.all()) {
-                                input.update(cx, |i, cx| i.set_value("", window, cx));
-                            }
+                    let minutes = every.read(cx).selected_value().copied().unwrap_or(0);
+                    let saved = page
+                        .read(cx)
+                        .typed_remote(cx)
+                        .and_then(|(remote, secret)| page.update(cx, |page, cx| page.save_remote(remote, secret, minutes, window, cx)));
+                    match saved {
+                        Ok(()) => {
+                            page.update(cx, |page, cx| page.fill_dialog(None, window, cx));
                             window.close_dialog(cx);
                         }
                         Err(why) => window.push_notification(Notification::error(why), cx),
                     }
                 }
             };
+            let test = {
+                let page = page.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| page.update(cx, |page, cx| page.test_remote(window, cx))
+            };
+            let tabs = h_flex().child(
+                h_flex()
+                    .p(px(3.))
+                    .rounded_full()
+                    .bg(surface)
+                    .child(tab("tab-ssh", "SSH", RemoteTab::Ssh))
+                    .child(tab("tab-s3", "S3", RemoteTab::S3))
+                    .child(tab("tab-ftp", "FTP", RemoteTab::Ftp)),
+            );
             dialog
                 .w(px(480.))
                 .centered()
@@ -727,7 +940,7 @@ impl SettingsPage {
                         .text_size(px(28.))
                         .line_height(px(32.))
                         .font_weight(FontWeight::NORMAL)
-                        .child("Add Remote"),
+                        .child(if editing { "Edit Remote" } else { "Add Remote" }),
                 )
                 .child(
                     v_flex()
@@ -737,18 +950,10 @@ impl SettingsPage {
                                 .text_color(muted)
                                 .child("Remotes are read-only: listed and sized, never changed, no Trash."),
                         )
-                        .child(
-                            h_flex().child(
-                                h_flex()
-                                    .p(px(3.))
-                                    .rounded_full()
-                                    .bg(surface)
-                                    .child(tab("tab-ssh", "SSH", RemoteTab::Ssh))
-                                    .child(tab("tab-s3", "S3", RemoteTab::S3))
-                                    .child(tab("tab-ftp", "FTP", RemoteTab::Ftp)),
-                            ),
-                        )
-                        .child(body),
+                        // An edited Remote stays the kind it is.
+                        .when(!editing, |d| d.child(tabs))
+                        .child(body)
+                        .when_some(outcome, |d, (color, line)| d.child(div().text_color(color).child(line))),
                 )
                 .footer(
                     h_flex()
@@ -760,9 +965,58 @@ impl SettingsPage {
                             RemoteTab::Ssh => "Keys and ssh-agent only",
                         }))
                         .child(pill("remote-cancel", "Cancel").build(cx, |_, window, cx| window.close_dialog(cx)))
-                        .child(pill("remote-add", "Add Remote").primary().build(cx, add)),
+                        .child(
+                            pill("remote-test", "Test")
+                                .disabled((check == Check::Running).then_some("Testing…"))
+                                .build(cx, test),
+                        )
+                        .child(
+                            pill("remote-add", if editing { "Save" } else { "Add Remote" })
+                                .primary()
+                                .build(cx, save),
+                        ),
                 )
         });
+    }
+
+    /// Puts `remote`'s details in the dialog's fields, tab, switches and refresh interval; `None`
+    /// empties them for a new Remote.
+    fn fill_dialog(&mut self, remote: Option<&Remote>, window: &mut Window, cx: &mut Context<Self>) {
+        for input in [&self.remote_host, &self.remote_path]
+            .into_iter()
+            .chain(self.s3.all())
+            .chain(self.ftp.all())
+        {
+            set(input, "", window, cx);
+        }
+        secret_hint(&self.s3.secret, false, window, cx);
+        secret_hint(&self.ftp.password, false, window, cx);
+        let minutes = remote.map_or(0, |r| self.settings.remote_refresh_minutes(r));
+        self.remote_every.update(cx, |select, cx| {
+            let (items, at) = refresh_items(minutes);
+            select.set_items(items, window, cx);
+            select.set_selected_index(Some(at), window, cx);
+        });
+        self.s3_path_style = false;
+        self.ftp_plain = false;
+        match remote {
+            None => {}
+            Some(Remote::Ssh(r)) => {
+                self.remote_tab = RemoteTab::Ssh;
+                set(&self.remote_host, &r.host, window, cx);
+                set(&self.remote_path, &r.path, window, cx);
+            }
+            Some(Remote::S3(r)) => {
+                self.remote_tab = RemoteTab::S3;
+                self.s3_path_style = r.path_style;
+                self.s3.fill(r, window, cx);
+            }
+            Some(Remote::Ftp(r)) => {
+                self.remote_tab = RemoteTab::Ftp;
+                self.ftp_plain = r.tls == FtpTls::Plain;
+                self.ftp.fill(r, window, cx);
+            }
+        }
     }
 }
 
@@ -797,7 +1051,7 @@ impl Render for SettingsPage {
         let indexed = self.volumes.iter().filter(|v| self.settings.is_indexed(v)).count();
         let add = pill("add-remote", "Add Remote")
             .small()
-            .build(cx, cx.listener(|this, _, window, cx| this.open_add_remote(window, cx)));
+            .build(cx, cx.listener(|this, _, window, cx| this.open_remote_dialog(None, window, cx)));
         let head = h_flex()
             .pb(px(7.))
             .text_xs()

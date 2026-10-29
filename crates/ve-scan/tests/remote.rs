@@ -132,6 +132,33 @@ fn failures_are_reported_and_leave_the_index_alone() {
 }
 
 #[test]
+fn a_check_logs_in_and_enters_the_folder_without_indexing() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let ssh = script(dir.path(), "ssh", LOCAL);
+    let ssh = ssh.to_str().unwrap();
+    let remote = |path: &str| match Remote::new("me@box", path).unwrap() {
+        Remote::Ssh(r) => r,
+        _ => unreachable!(),
+    };
+    remote::check_with(ssh, &remote(dir.path().to_str().unwrap())).unwrap();
+    let file = dir.path().join("plain.txt");
+    fs::write(&file, "x").unwrap();
+    for missing in [dir.path().join("nope"), file] {
+        let err = remote::check_with(ssh, &remote(missing.to_str().unwrap())).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
+        assert!(err.to_string().contains("is not a folder on me@box"), "{err}");
+    }
+    let refused = script(
+        dir.path(),
+        "ssh-refused",
+        "echo 'me@box: Permission denied (publickey).' >&2; exit 255",
+    );
+    let err = remote::check_with(refused.to_str().unwrap(), &remote("/")).unwrap_err();
+    assert!(err.to_string().contains("key or ssh-agent"), "{err}");
+}
+
+#[test]
 fn df_over_the_same_ssh_gives_the_remote_a_capacity_and_a_failing_df_clears_it() {
     let _serial = serial();
     let dir = tempfile::tempdir().unwrap();

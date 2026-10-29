@@ -198,7 +198,11 @@ fn bucket(remote: &S3Remote) -> Result<Bucket, io::Error> {
         .clone()
         .unwrap_or_else(|| format!("https://{}", remote.endpoint_host()));
     let url = url::Url::parse(&endpoint).map_err(|e| invalid(format!("endpoint {endpoint}: {e}")))?;
-    let style = if remote.path_style { UrlStyle::Path } else { UrlStyle::VirtualHost };
+    let style = if remote.uses_path_style() {
+        UrlStyle::Path
+    } else {
+        UrlStyle::VirtualHost
+    };
     Bucket::new(url, style, remote.bucket.clone(), remote.region.clone()).map_err(|e| invalid(format!("S3 bucket: {e}")))
 }
 
@@ -235,54 +239,88 @@ fn http_failure(remote: &S3Remote, status: u16, body: &str, anonymous: bool) -> 
     io::Error::new(kind, format!("{host} answered {status} {code} {message}{hint}").replace("  ", " "))
 }
 
-/// Lists every current object of `remote`, a page at a time, giving each page to `page`.
-pub fn list(remote: &S3Remote, credentials: Option<&Credentials>, mut page: impl FnMut(Vec<Object>) -> io::Result<()>) -> io::Result<()> {
-    let bucket = bucket(remote)?;
-    let prefix = if remote.prefix.is_empty() {
-        String::new()
-    } else {
-        format!("{}/", remote.prefix)
-    };
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_global(Some(Duration::from_secs(120)))
         .http_status_as_error(false)
         // The signature is in the URL: never forward it to another host.
         .max_redirects(0)
         .build()
-        .into();
+        .into()
+}
+
+/// `prefix/` of the Remote, as keys under it start; empty for the whole bucket.
+fn key_prefix(remote: &S3Remote) -> String {
+    if remote.prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", remote.prefix)
+    }
+}
+
+/// One ListObjectsV2 page of at most `max_keys` keys under `prefix`, after `token`.
+fn fetch_page(
+    agent: &ureq::Agent,
+    bucket: &Bucket,
+    remote: &S3Remote,
+    credentials: Option<&Credentials>,
+    prefix: &str,
+    token: Option<&str>,
+    max_keys: usize,
+) -> io::Result<rusty_s3::actions::list_objects_v2::ListObjectsV2Response> {
+    let mut action = bucket.list_objects_v2(credentials);
+    action.with_max_keys(max_keys);
+    if !prefix.is_empty() {
+        action.with_prefix(prefix);
+    }
+    if let Some(token) = token {
+        action.with_continuation_token(token);
+    }
+    let url = action.sign(Duration::from_secs(300));
+    let mut response = agent.get(url.as_str()).call().map_err(|e| connection_failure(remote, &e))?;
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(64 * 1024 * 1024)
+        .read_to_string()
+        .map_err(|e| io::Error::other(format!("{}: {e}", remote.endpoint_host())))?;
+    if status != 200 {
+        return Err(http_failure(remote, status, &body, credentials.is_none()));
+    }
+    rusty_s3::actions::ListObjectsV2::parse_response(&body).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unreadable listing from {}: {e}", remote.endpoint_host()),
+        )
+    })
+}
+
+/// Why the endpoint could not be reached, in words for the user.
+fn connection_failure(remote: &S3Remote, error: &ureq::Error) -> io::Error {
+    let host = remote.endpoint_host();
+    // TLS spoken to a server without it fails in the handshake, in words about records.
+    let text = error.to_string();
+    let tls = matches!(error, ureq::Error::Tls(_) | ureq::Error::Rustls(_)) || text.contains("corrupt message");
+    let message = match &remote.endpoint {
+        Some(e) if tls && e.starts_with("https://") => {
+            format!("{host} did not answer over TLS; if it has none, start the Endpoint with http:// ({text})")
+        }
+        _ => format!("{host}: {text}"),
+    };
+    io::Error::new(io::ErrorKind::ConnectionRefused, message)
+}
+
+/// Lists every current object of `remote`, a page at a time, giving each page to `page`.
+pub fn list(remote: &S3Remote, credentials: Option<&Credentials>, mut page: impl FnMut(Vec<Object>) -> io::Result<()>) -> io::Result<()> {
+    let bucket = bucket(remote)?;
+    let prefix = key_prefix(remote);
+    let agent = agent();
     let mut token: Option<String> = None;
     let mut tokens = HashSet::new();
     loop {
-        let mut action = bucket.list_objects_v2(credentials);
-        action.with_max_keys(PAGE);
-        if !prefix.is_empty() {
-            action.with_prefix(prefix.as_str());
-        }
-        if let Some(token) = &token {
-            action.with_continuation_token(token.as_str());
-        }
-        let url = action.sign(Duration::from_secs(300));
-        let mut response = agent
-            .get(url.as_str())
-            .call()
-            .map_err(|e| io::Error::new(io::ErrorKind::ConnectionRefused, format!("{}: {e}", remote.endpoint_host())))?;
-        let status = response.status().as_u16();
-        let body = response
-            .body_mut()
-            .with_config()
-            .limit(64 * 1024 * 1024)
-            .read_to_string()
-            .map_err(|e| io::Error::other(format!("{}: {e}", remote.endpoint_host())))?;
-        if status != 200 {
-            return Err(http_failure(remote, status, &body, credentials.is_none()));
-        }
-        let parsed = rusty_s3::actions::ListObjectsV2::parse_response(&body).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unreadable listing from {}: {e}", remote.endpoint_host()),
-            )
-        })?;
+        let parsed = fetch_page(&agent, &bucket, remote, credentials, &prefix, token.as_deref(), PAGE)?;
         let objects = parsed
             .contents
             .into_iter()
@@ -311,6 +349,13 @@ pub fn list(remote: &S3Remote, credentials: Option<&Credentials>, mut page: impl
             None => return Ok(()),
         }
     }
+}
+
+/// Lists a single key of `remote`: proof that the endpoint answers, the bucket is there and the
+/// keys may list it, without reading the whole bucket.
+pub fn check(remote: &S3Remote, credentials: Option<&Credentials>) -> io::Result<()> {
+    let bucket = bucket(remote)?;
+    fetch_page(&agent(), &bucket, remote, credentials, &key_prefix(remote), None, 1).map(|_| ())
 }
 
 /// The folders and file `objects` stand for, parents first. `seen` holds the folders already

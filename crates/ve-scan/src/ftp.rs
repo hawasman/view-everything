@@ -287,7 +287,7 @@ fn failure(remote: &FtpRemote, e: FtpError) -> io::Error {
     }
 }
 
-fn web_roots_config() -> Arc<ClientConfig> {
+pub(crate) fn web_roots_config() -> Arc<ClientConfig> {
     let roots = RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
@@ -420,12 +420,26 @@ pub fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::R
 }
 
 /// The password kept in the keyring. A public server has none to keep.
-fn password(remote: &FtpRemote) -> Result<String, String> {
+pub(crate) fn password(remote: &FtpRemote) -> Result<String, String> {
     match read_secret(&remote.identity()) {
         Err(_) if remote.is_anonymous() => Ok("anonymous@".into()),
         Err(e) => Err(e.replace("the secret key is", "the password is")),
         Ok(p) => Ok(p),
     }
+}
+
+/// Logs in to `remote` with `password` and enters its folder, trusting `tls` for FTPS: the
+/// Test of the Remote dialog.
+pub fn check(remote: &FtpRemote, password: &str, tls: Arc<ClientConfig>) -> io::Result<()> {
+    let mut ftp = connect(remote, password, tls)?;
+    let entered = ftp.cwd(remote.path.as_str()).map_err(|e| match e {
+        FtpError::UnexpectedResponse(r) if r.status.code() == 550 => {
+            io::Error::new(io::ErrorKind::NotFound, format!("{} is not a folder on the server", remote.path))
+        }
+        e => failure(remote, e),
+    });
+    let _ = ftp.quit();
+    entered
 }
 
 /// [`sync`] with `auth` giving the password and `tls` the trust for FTPS (test doubles, or the

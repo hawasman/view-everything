@@ -123,6 +123,20 @@ impl S3Remote {
         }
     }
 
+    /// Whether requests go to `endpoint/bucket/key`: when chosen, and always for an endpoint
+    /// named by an IP address or `localhost`, which cannot carry the bucket as a subdomain.
+    pub fn uses_path_style(&self) -> bool {
+        let host = self.endpoint_host();
+        let name = match host.strip_prefix('[') {
+            Some(v6) => v6.split(']').next().unwrap_or(v6),
+            None => host
+                .rsplit_once(':')
+                .filter(|(_, port)| port.parse::<u16>().is_ok())
+                .map_or(host.as_str(), |(name, _)| name),
+        };
+        self.path_style || name.eq_ignore_ascii_case("localhost") || name.parse::<std::net::IpAddr>().is_ok()
+    }
+
     /// `s3:<endpoint-host>/<bucket>/<prefix>`: the same Location wherever it is listed.
     pub fn identity(&self) -> String {
         format!("s3:{}/{}/{}", self.endpoint_host(), self.bucket, self.prefix)

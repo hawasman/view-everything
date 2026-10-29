@@ -539,6 +539,29 @@ fn a_wrong_password_a_missing_keyring_entry_and_a_missing_folder_say_what_to_do(
     assert!(sync_with(&index, id, &Progress::default(), &good, no_trust()).is_err());
 }
 
+#[test]
+fn a_check_logs_in_and_enters_the_folder_without_listing_it() {
+    let server = start(Style::Mlsd);
+    let good = remote(&server, FtpTls::Plain);
+    ve_scan::ftp::check(&good, "hunter2", no_trust()).unwrap();
+    assert!(
+        !server
+            .state
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.starts_with("MLSD") || l.starts_with("LIST")),
+        "a check lists nothing"
+    );
+    let err = ve_scan::ftp::check(&good, "wrong", no_trust()).unwrap_err();
+    assert!(err.to_string().contains("rejected the login"), "{err}");
+    let mut missing = good.clone();
+    missing.path = "/nope".into();
+    let err = ve_scan::ftp::check(&missing, "hunter2", no_trust()).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
+}
+
 fn certified() -> (Arc<ServerConfig>, RootCertStore) {
     let key = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
     let der = key.cert.der().clone();

@@ -319,6 +319,54 @@ fn a_missing_bucket_and_an_unreachable_endpoint_are_reported() {
 }
 
 #[test]
+fn an_endpoint_named_by_an_ip_address_is_reached_path_style_even_if_not_chosen() {
+    let server = start(&OBJECTS);
+    let mut by_ip = remote(&server, "photos");
+    by_ip.path_style = false;
+    let index = SharedIndex::new(Index::new());
+    let id = index.write().add_remote(&Remote::S3(by_ip));
+    s3::sync_with(&index, id, &Progress::default(), &keys).unwrap();
+    assert_eq!(index.read().live_count(), 8, "root, 3 folders, 4 files");
+}
+
+#[test]
+fn a_check_lists_one_key_and_reports_what_a_sync_would() {
+    let server = start(&OBJECTS);
+    *server.state.require_key.lock().unwrap() = Some("AKIATEST".into());
+    let good = remote(&server, "photos");
+    s3::check(&good, Some(&Credentials::new("AKIATEST", "secret"))).unwrap();
+    {
+        let requests = server.state.requests.lock().unwrap();
+        let get = |name: &str| requests[0].iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+        assert_eq!(requests.len(), 1);
+        assert_eq!((get("max-keys").as_deref(), get("prefix").as_deref()), (Some("1"), Some("photos/")));
+    }
+    let err = s3::check(&good, Some(&Credentials::new("AKIAWRONG", "secret"))).unwrap_err();
+    assert!(err.to_string().contains("check the keys"), "{err}");
+    let mut missing = good.clone();
+    missing.bucket = "nope".into();
+    let err = s3::check(&missing, Some(&Credentials::new("AKIATEST", "secret"))).unwrap_err();
+    assert!(err.to_string().contains("NoSuchBucket"), "{err}");
+}
+
+#[test]
+fn https_to_a_server_without_tls_suggests_http() {
+    // A plain HTTP server answers a TLS hello as a bad request, as MinIO without TLS does.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let _ = std::io::Read::read(&mut stream, &mut [0; 1024]);
+            respond(&mut stream, "400 Bad Request", "");
+        }
+    });
+    let tls = S3Remote::new("bkt", "", &format!("127.0.0.1:{port}"), "us-east-1", false, "", "").unwrap();
+    assert_eq!(tls.endpoint.as_deref(), Some(format!("https://127.0.0.1:{port}").as_str()));
+    let err = s3::check(&tls, None).unwrap_err();
+    assert!(err.to_string().contains("start the Endpoint with http://"), "{err}");
+}
+
+#[test]
 fn an_s3_remote_survives_a_save_and_settings_style_round_trip() {
     let remote = Remote::S3(S3Remote::new("b", "p/q", "minio.lan:9000", "us-east-1", true, "work", "AKIA").unwrap());
     let index = SharedIndex::new(Index::new());

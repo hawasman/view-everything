@@ -10,7 +10,8 @@ never wait on a scan.
   folder anywhere to zoom into it; the zoom is part of the Query, so you can keep refining it.
 - **Locations**: local Volumes are indexed by default. Removable disks stay searchable as Offline
   Volumes after you unplug them, mounted network shares are opt-in, and read-only Remotes can be
-  indexed over SSH/SFTP, S3 and FTP.
+  indexed over SSH/SFTP, S3 and FTP. Test a Remote's details before you add it, and edit it later
+  from Settings.
 - **Trash**: Move to Trash and Empty Trash with confirmation.
 
 The vocabulary used in the app and the code is defined in [CONTEXT.md](CONTEXT.md); design
