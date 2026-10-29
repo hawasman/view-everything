@@ -1,4 +1,4 @@
-//! The look of the app: the `--*` tokens of `designs/final/ve.css`, light and dark, as one
+//! The look of the app: the design tokens, light and dark, as one
 //! gpui-kit theme, plus the bundled fonts and the few icons the kit does not ship.
 
 use crate::settings::ThemeChoice;

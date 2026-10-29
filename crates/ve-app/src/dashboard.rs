@@ -1,4 +1,4 @@
-//! The Dashboard: a glance at the whole Index, built to `designs/final/dashboard.html`. It
+//! The Dashboard: a glance at the whole Index. It
 //! ignores the Explorer's Query. What it shows comes from one pass over the Index, computed off
 //! the UI thread and cached per Index generation (see `dashboard_summary`).
 
