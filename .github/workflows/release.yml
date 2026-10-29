@@ -75,6 +75,7 @@ jobs:
         run: >
           sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev
           libwayland-dev libxcb1-dev libvulkan-dev libegl1-mesa-dev libfontconfig1-dev libfreetype6-dev
+          librsvg2-bin
       - name: Build AppImage
         run: packaging/linux/build-appimage.sh
       - uses: actions/upload-artifact@v4

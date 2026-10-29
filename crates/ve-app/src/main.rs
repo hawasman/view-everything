@@ -98,7 +98,7 @@ fn main() {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1440.), px(900.)), cx))),
             window_min_size: Some(size(px(720.), px(480.))),
             titlebar: Some(TitlebarOptions {
-                title: Some("view-everything".into()),
+                title: Some(app::APP_NAME.into()),
                 ..Default::default()
             }),
             app_id: Some("view-everything".into()),

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds a universal (Apple Silicon + Intel) view-everything.app into
+# Builds a universal (Apple Silicon + Intel) "View Everything.app" into
 # dist/view-everything-macos-universal.dmg (repo root). Needs Xcode command line tools and
 # rsvg-convert (`brew install librsvg`) for the icon. The app is ad-hoc signed, not notarized:
 # on first launch, right-click it and choose Open.
@@ -7,7 +7,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work="$root/target/macos"
-app="$work/view-everything.app"
+app="$work/View Everything.app"
 out="$root/dist"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)"
 
@@ -36,8 +36,8 @@ cat > "$app/Contents/Info.plist" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>view-everything</string>
-    <key>CFBundleDisplayName</key><string>view-everything</string>
+    <key>CFBundleName</key><string>View Everything</string>
+    <key>CFBundleDisplayName</key><string>View Everything</string>
     <key>CFBundleIdentifier</key><string>org.view-everything.app</string>
     <key>CFBundleExecutable</key><string>view-everything</string>
     <key>CFBundleIconFile</key><string>view-everything</string>
@@ -57,6 +57,6 @@ staging="$work/dmg"
 mkdir -p "$staging"
 cp -R "$app" "$staging/"
 ln -s /Applications "$staging/Applications"
-hdiutil create -volname "view-everything" -srcfolder "$staging" -ov -format UDZO \
+hdiutil create -volname "View Everything" -srcfolder "$staging" -ov -format UDZO \
     "$out/view-everything-macos-universal.dmg"
 echo "Wrote $out/view-everything-macos-universal.dmg"

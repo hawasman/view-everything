@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds view-everything-x86_64.AppImage into dist/ (repo root).
+# Builds view-everything-x86_64.AppImage into dist/ (repo root). Needs rsvg-convert (librsvg) for
+# the PNG icons.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -8,14 +9,20 @@ appdir="$root/target/appimage/AppDir"
 out="$root/dist"
 
 cd "$root"
+version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
 cargo build --release -p ve-app --locked
 
 rm -rf "$appdir"
-mkdir -p "$appdir/usr/bin" "$out"
+icons="$appdir/usr/share/icons/hicolor"
+mkdir -p "$appdir/usr/bin" "$icons/scalable/apps" "$icons/256x256/apps" "$out"
 install -m755 target/release/view-everything "$appdir/usr/bin/view-everything"
-install -m644 packaging/linux/view-everything.desktop "$appdir/view-everything.desktop"
-install -m644 packaging/icons/view-everything.svg "$appdir/view-everything.svg"
-ln -s view-everything.svg "$appdir/.DirIcon"
+# App stores and launchers read the version from the desktop entry (Shelly shows "Unknown" without it).
+{ cat packaging/linux/view-everything.desktop; echo "X-AppImage-Version=$version"; } > "$appdir/view-everything.desktop"
+install -m644 packaging/icons/view-everything.svg "$icons/scalable/apps/view-everything.svg"
+rsvg-convert -w 256 -h 256 packaging/icons/view-everything.svg -o "$icons/256x256/apps/view-everything.png"
+ln -s usr/share/icons/hicolor/scalable/apps/view-everything.svg "$appdir/view-everything.svg"
+# The AppDir spec has .DirIcon as a PNG, for thumbnailers and launchers that read no SVG.
+ln -s usr/share/icons/hicolor/256x256/apps/view-everything.png "$appdir/.DirIcon"
 cat > "$appdir/AppRun" <<'EOF'
 #!/bin/sh
 HERE="$(dirname "$(readlink -f "$0")")"

@@ -29,6 +29,17 @@ use std::sync::Arc;
 use ve_core::CategoryMap;
 use ve_scan::VolumeInfo;
 
+/// The app's name as people read it (the binary, app id and data folders stay `view-everything`).
+pub const APP_NAME: &str = "View Everything";
+
+/// The app icon the packages install, drawn in the sidebar.
+static APP_ICON: std::sync::LazyLock<Arc<Image>> = std::sync::LazyLock::new(|| {
+    Arc::new(Image::from_bytes(
+        ImageFormat::Svg,
+        include_bytes!("../../../packaging/icons/view-everything.svg").to_vec(),
+    ))
+});
+
 /// A Volume's label, or its mount point when it has none (a device path is no name).
 pub fn volume_name(v: &VolumeInfo) -> String {
     if v.label.is_empty() || v.label.starts_with("/dev/") {
@@ -697,8 +708,7 @@ impl Shell {
     /// Brand, scope switcher, pages, Locations; Settings and the user at the bottom.
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let (text, muted, border, ground, accent) = (p.text, p.muted, p.border, p.ground, p.accent);
-        let control = p.control;
+        let (muted, border, ground, accent) = (p.muted, p.border, p.ground, p.accent);
         let (positive, avatar) = (p.positive, p.avatar);
         let status = self.engine.shared.status.lock().clone();
         let syncing: Vec<_> = match &status.phase {
@@ -748,40 +758,6 @@ impl Shell {
         let display_name = format!("{initial}{}", user.chars().skip(1).collect::<String>());
         let entries = self.engine.shared.index.read().live_count() as u64;
 
-        let mark = div()
-            .relative()
-            .size(px(22.))
-            .flex_none()
-            .child(
-                div()
-                    .absolute()
-                    .left(px(1.))
-                    .top(px(1.))
-                    .w(px(12.))
-                    .h(px(20.))
-                    .rounded(px(2.))
-                    .bg(text),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(15.))
-                    .top(px(1.))
-                    .w(px(6.))
-                    .h(px(9.))
-                    .rounded(px(2.))
-                    .bg(accent),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .left(px(15.))
-                    .top(px(12.))
-                    .w(px(6.))
-                    .h(px(9.))
-                    .rounded(px(2.))
-                    .bg(control),
-            );
         v_flex()
             .w(px(224.))
             .h_full()
@@ -800,8 +776,8 @@ impl Shell {
                     .items_center()
                     .text_size(px(15.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(mark)
-                    .child("view-everything"),
+                    .child(img(APP_ICON.clone()).size(px(24.)).flex_none())
+                    .child(APP_NAME),
             )
             .child(
                 h_flex()

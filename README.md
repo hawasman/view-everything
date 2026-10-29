@@ -1,4 +1,4 @@
-# view-everything
+# View Everything
 
 A desktop app for Linux, Windows and macOS that finds files by name instantly and shows what is
 using your disk space. It keeps one Index of every file on your Volumes, so searching and sizing
