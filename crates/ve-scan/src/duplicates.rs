@@ -11,7 +11,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use ve_core::EntryId;
+use ve_core::{BitSet, EntryId};
 
 use crate::SharedIndex;
 
@@ -53,6 +53,8 @@ pub struct Stats {
     pub partial_hashed: u64,
     pub full_hashed: u64,
     pub cache_hits: u64,
+    /// Files of at least the minimum size left out because `excluded` named them.
+    pub excluded: u64,
 }
 
 /// Hashes remembered between runs (`hashes.bin`), keyed by Volume, file id, size and modified
@@ -105,17 +107,21 @@ struct Candidate {
 }
 
 /// Finds the Duplicates of every online local Volume in `index`, largest wasted space first.
-/// `cache` is updated in place (entries of scanned Volumes not seen this run are dropped).
+/// Entries in `excluded` are treated as absent: never candidates, and their cached hashes are
+/// kept. `cache` is updated in place (entries of scanned Volumes not seen this run are dropped).
 /// Returns early with what is known if `cancel` is set.
 pub fn find(
     index: &SharedIndex,
     cache: &mut HashCache,
     min_size: u64,
+    excluded: &BitSet,
     progress: &HashProgress,
     cancel: &AtomicBool,
 ) -> (Vec<Group>, Stats) {
     let mut stats = Stats::default();
     let mut scanned: Vec<String> = Vec::new();
+    // Cache keys of excluded files: not searched this run, but not forgotten either.
+    let mut kept: std::collections::HashSet<(usize, u64)> = std::collections::HashSet::new();
     // Stage 1: equal Logical Size, hard links collapsed. The Index is read one Volume at a
     // time, so a sync is never held off for the whole walk.
     let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
@@ -139,6 +145,11 @@ pub fn find(
                 }
                 let (size, key) = (index.logical(child), index.key(child));
                 if size < min_size.max(1) || (index.is_hardlinked(child) && !links.insert(key)) {
+                    continue;
+                }
+                if excluded.contains(child.index()) {
+                    stats.excluded += 1;
+                    kept.insert((volume, key));
                     continue;
                 }
                 by_size.entry(size).or_default().push(Candidate {
@@ -190,7 +201,9 @@ pub fn find(
     // Refresh the cache: drop what this run did not see on the scanned Volumes.
     // A cancelled run saw only part of them: keep the cache as it was.
     if !cancel.load(Ordering::Relaxed) {
-        cache.entries.retain(|(volume, _), _| !scanned.contains(volume));
+        cache
+            .entries
+            .retain(|(volume, key), _| scanned.iter().position(|s| s == volume).is_none_or(|v| kept.contains(&(v, *key))));
     }
     for file in files.iter().chain(&survivors) {
         if let Some(cached) = &file.cached {

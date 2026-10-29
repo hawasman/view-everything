@@ -25,8 +25,11 @@ gpui-kit = "0.8.1"
 minisign-verify = { version = "0.3", optional = true }
 parking_lot = "0.13.0"
 png = "0.18"
+rayon = "1.12.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1", optional = true }
+# Rasterizes the app icon for the tray on every platform.
+resvg = { version = "0.46", default-features = false }
 toml = "1.1.8"
 trash = "5.2.9"
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"], optional = true }
@@ -35,7 +38,20 @@ ve-scan = { path = "../ve-scan" }
 zip = { version = "9.1.3", default-features = false, features = ["deflate"], optional = true }
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61", features = ["Win32_UI_Shell"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target."cfg(target_os = \"macos\")".dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSImage", "NSMenu", "NSMenuItem", "NSStatusBar", "NSStatusItem", "NSButton", "NSControl", "NSResponder", "NSCell"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSGeometry", "NSString", "NSObject"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 
 [dev-dependencies]
 minisign = "0.10"

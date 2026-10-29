@@ -379,6 +379,16 @@ impl Remote {
         self.kind_impl().label()
     }
 
+    /// What to show for this Remote: the user's `name` when it has one (trimmed, not empty), else
+    /// its [`label`](Remote::label). The name is kept in the settings, not in the Remote, so it
+    /// never changes the Remote's identity or the saved Index.
+    pub fn display_name(&self, name: Option<&str>) -> String {
+        match name.map(str::trim).filter(|n| !n.is_empty()) {
+            Some(name) => name.to_owned(),
+            None => self.label(),
+        }
+    }
+
     /// The protocol, for the Remote · tag.
     pub fn kind(&self) -> &'static str {
         self.kind_impl().kind()
@@ -565,12 +575,20 @@ pub struct Volume {
     pub last_synced: Option<i64>,
     /// Capacity measured at that sync.
     pub capacity: Option<Capacity>,
+    /// The name the user gave this Remote. Not saved (the settings keep it, the Engine sets it).
+    #[serde(skip)]
+    pub name: Option<String>,
 }
 
 impl Volume {
     /// The Remote this Location is, if it is one.
     pub fn remote(&self) -> Option<Remote> {
         self.sync.remote()
+    }
+
+    /// What to show for this Location when it is a Remote: its name, else its address.
+    pub fn remote_display_name(&self) -> Option<String> {
+        self.remote().map(|r| r.display_name(self.name.as_deref()))
     }
 
     /// A read-only Remote rather than a mounted Volume.
@@ -671,10 +689,23 @@ impl Index {
             sync,
             last_synced: None,
             capacity: None,
+            name: None,
         };
         let id = VolumeId(self.volumes.len() as u32);
         self.volumes.push(Some(volume));
         id
+    }
+
+    /// Sets (or with `None` clears) the name shown for the Remote Location `id`.
+    pub fn set_remote_name(&mut self, id: VolumeId, name: Option<&str>) {
+        let name = name.map(str::trim).filter(|n| !n.is_empty()).map(str::to_owned);
+        let Some(Some(volume)) = self.volumes.get_mut(id.0 as usize) else {
+            return;
+        };
+        if volume.name != name {
+            volume.name = name;
+            self.touch();
+        }
     }
 
     /// Adds a Remote as a Location with only its root, ready for a sync. It is always online;
@@ -921,6 +952,20 @@ impl Index {
     pub fn name(&self, id: EntryId) -> &str {
         let start = self.name_start[id.index()] as usize;
         &self.names[start..start + self.name_len[id.index()] as usize]
+    }
+
+    /// What to show for `id`: its name, except that the root of a Remote Location the user named
+    /// shows that name in place of its address. The path of the Entry is unchanged.
+    pub fn display_name(&self, id: EntryId) -> &str {
+        if self.parent(id).is_none()
+            && let Some(name) = self
+                .volume_with_root(id)
+                .and_then(|v| self.volume(v))
+                .and_then(|v| v.name.as_deref())
+        {
+            return name;
+        }
+        self.name(id)
     }
 
     #[inline]

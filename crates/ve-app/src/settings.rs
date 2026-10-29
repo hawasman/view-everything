@@ -37,6 +37,9 @@ pub struct Settings {
     /// under their identity; Manual unless set.
     #[serde(default)]
     pub remotes: Vec<Remote>,
+    /// The names the user gave Remotes, by identity. A Remote without one shows its address.
+    #[serde(default)]
+    pub remote_names: BTreeMap<String, String>,
     /// The Query behind the Dashboard's Recently modified table; the default when unset.
     #[serde(default)]
     pub recent_query: Option<String>,
@@ -59,6 +62,21 @@ pub struct Settings {
     /// The same for build artefacts, judged by the project's newest file.
     #[serde(default = "default_build_days")]
     pub cleaner_build_days: u64,
+    /// A Query naming the files a Duplicate search leaves out (Duplicate Exclusions).
+    #[serde(default = "default_duplicate_exclusions")]
+    pub duplicate_exclusions: String,
+    /// How many levels of folders the Treemap subdivides (Depth).
+    #[serde(default = "default_treemap_depth")]
+    pub treemap_depth: u8,
+    /// Closing the window leaves the app running in the system tray (needs a tray).
+    #[serde(default)]
+    pub keep_in_tray: bool,
+    /// Start the app when the user logs in (straight to the tray, or a minimized window).
+    #[serde(default)]
+    pub start_at_login: bool,
+    /// Show no animations (Reduce motion); off follows the operating system.
+    #[serde(default)]
+    pub reduce_motion: bool,
 }
 
 fn default_temp_days() -> u64 {
@@ -67,6 +85,30 @@ fn default_temp_days() -> u64 {
 
 fn default_build_days() -> u64 {
     30
+}
+
+fn default_treemap_depth() -> u8 {
+    crate::treemap::DEFAULT_DEPTH
+}
+
+/// Dependency, build, VCS and package-cache folders: copies there are rarely worth a look.
+pub fn default_duplicate_exclusions() -> String {
+    const FOLDERS: [&str; 13] = [
+        "node_modules",
+        "target",
+        ".venv",
+        "venv",
+        "vendor",
+        ".git",
+        "site-packages",
+        "__pycache__",
+        ".cargo/registry",
+        ".npm",
+        ".pnpm-store",
+        ".gradle",
+        ".m2",
+    ];
+    FOLDERS.iter().map(|f| format!("\"*/{f}/*\"")).collect::<Vec<_>>().join("|")
 }
 
 fn default_true() -> bool {
@@ -106,6 +148,7 @@ impl Default for Settings {
             volume_refresh_minutes: BTreeMap::new(),
             theme: ThemeChoice::System,
             remotes: Vec::new(),
+            remote_names: BTreeMap::new(),
             recent_query: None,
             update_checks: true,
             live_helper: false,
@@ -113,6 +156,11 @@ impl Default for Settings {
             saved_queries: Vec::new(),
             cleaner_temp_days: default_temp_days(),
             cleaner_build_days: default_build_days(),
+            duplicate_exclusions: default_duplicate_exclusions(),
+            treemap_depth: default_treemap_depth(),
+            keep_in_tray: false,
+            start_at_login: false,
+            reduce_motion: false,
         }
     }
 }
@@ -268,6 +316,27 @@ impl Settings {
     pub fn remove_remote(&mut self, remote: &Remote) {
         self.remotes.retain(|r| r != remote);
         self.volume_refresh_minutes.remove(&remote.identity());
+        self.remote_names.remove(&remote.identity());
+    }
+
+    /// Sets or (empty) clears the name of `remote`.
+    pub fn set_remote_name(&mut self, remote: &Remote, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.remote_names.remove(&remote.identity());
+        } else {
+            self.remote_names.insert(remote.identity(), name.to_owned());
+        }
+    }
+
+    /// The name the user gave `remote`, if any.
+    pub fn remote_name(&self, remote: &Remote) -> Option<&str> {
+        self.remote_names.get(&remote.identity()).map(String::as_str)
+    }
+
+    /// What to show for `remote`: its name, else its address.
+    pub fn remote_display_name(&self, remote: &Remote) -> String {
+        remote.display_name(self.remote_name(remote))
     }
 
     /// Puts `new` where the Remote `old` was, with its refresh interval. A different Remote of the
@@ -275,6 +344,7 @@ impl Settings {
     pub fn replace_remote(&mut self, old: &Remote, new: Remote, refresh_minutes: u64) {
         let id = new.identity();
         self.volume_refresh_minutes.remove(&old.identity());
+        self.remote_names.remove(&old.identity());
         self.volume_refresh_minutes.insert(id.clone(), refresh_minutes);
         self.remotes.retain(|r| r == old || r.identity() != id);
         match self.remotes.iter().position(|r| r == old) {
@@ -409,6 +479,25 @@ mod tests {
         // A settings file from before S3 Remotes has only SSH ones, in their old shape.
         let old: Settings = toml::from_str("[[remotes]]\nhost = \"me@box\"\npath = \"/srv\"\n").unwrap();
         assert_eq!(old.remotes, [Remote::new("me@box", "/srv").unwrap()]);
+    }
+
+    #[test]
+    fn a_remote_name_is_saved_by_identity_and_an_old_file_without_names_loads() {
+        let remote = Remote::new("me@box", "/srv").unwrap();
+        let mut s = Settings::default();
+        s.add_remote(remote.clone(), 0);
+        assert_eq!(s.remote_display_name(&remote), "me@box:/srv");
+        s.set_remote_name(&remote, " Backup box ");
+        let back: Settings = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.remote_display_name(&remote), "Backup box");
+        s.set_remote_name(&remote, "  ");
+        assert!(s.remote_names.is_empty());
+        let old: Settings = toml::from_str("[[remotes]]\nhost = \"me@box\"\npath = \"/srv\"\n").unwrap();
+        assert_eq!(old.remote_display_name(&remote), "me@box:/srv");
+        s.add_remote(remote.clone(), 0);
+        s.set_remote_name(&remote, "x");
+        s.remove_remote(&remote);
+        assert!(s.remote_names.is_empty());
     }
 
     #[test]

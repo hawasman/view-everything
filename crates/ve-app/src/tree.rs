@@ -6,6 +6,7 @@ use crate::selection::Selection;
 use crate::theme::palette;
 use crate::ui::swatch;
 use crate::view::{self, View};
+use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::{Icon, IconName, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -19,7 +20,7 @@ use ve_core::{Category, CategoryMap, EntryId, Index};
 const CACHED_ROWS: usize = 512;
 const INDENT: f32 = 16.;
 /// Width of the columns after Name, which takes what is left of the list's width.
-const FIXED_WIDTH: f32 = 72. + 72. + 108. + 68. + 136. + 16.;
+const FIXED_WIDTH: f32 = 72. + 72. + 108. + 76. + 136. + 28.;
 /// The Change column, present while comparing with a Snapshot.
 const CHANGE_WIDTH: f32 = 112.;
 const MIN_NAME_WIDTH: f32 = 160.;
@@ -29,7 +30,7 @@ const COLUMNS: [(&str, f32, bool); 7] = [
     ("On disk", 72., true),
     ("Size", 72., true),
     ("%", 108., true),
-    ("Files", 68., true),
+    ("Files", 76., true),
     ("Modified", 136., true),
     ("Change", CHANGE_WIDTH, true),
 ];
@@ -82,6 +83,8 @@ pub struct TreeList {
     /// Rows drawn recently; see `FlatList::rows`. Dropped when the rows change.
     cells: HashMap<usize, Cells>,
     pub selection: Selection,
+    /// Builds the right-click menu; set by the Shell, which owns what the items act on.
+    pub menu: Option<crate::entry_actions::MenuFn>,
     /// Width the table has to fit in; 0 until first measured.
     available: f32,
     /// A new Query opened its focus; the Explorer has yet to scroll to it.
@@ -105,6 +108,7 @@ impl TreeList {
             gone: Vec::new(),
             cells: HashMap::new(),
             selection: Selection::default(),
+            menu: None,
             available: 0.,
             scroll_to_focus: false,
         }
@@ -130,6 +134,23 @@ impl TreeList {
 
     pub fn entry_at(&self, row: usize) -> Option<EntryId> {
         self.rows.get(row).filter(|r| r.gone.is_none()).map(|r| r.id)
+    }
+
+    /// Arrow-key move of the selection; the row now focused.
+    pub fn step(&mut self, down: bool, extend: bool) -> Option<usize> {
+        let ids: Vec<Option<EntryId>> = (0..self.rows.len()).map(|r| self.entry_at(r)).collect();
+        self.selection.step(down, extend, ids.len(), |r| ids[r])
+    }
+
+    /// Selects every visible row.
+    pub fn select_all(&mut self) {
+        let ids: Vec<Option<EntryId>> = (0..self.rows.len()).map(|r| self.entry_at(r)).collect();
+        self.selection.select_all(ids.len(), |r| ids[r]);
+    }
+
+    /// Width the columns need as designed: Name's own width plus the fixed columns.
+    pub fn natural_width(&self) -> f32 {
+        COLUMNS[0].1 + FIXED_WIDTH + if self.comparison.is_some() { CHANGE_WIDTH } else { 0. }
     }
 
     /// Fits the table into `width`: Name shrinks first, the size columns stay. True when the
@@ -189,7 +210,7 @@ impl TreeList {
         self.open_to(id);
         self.rebuild();
         let row = self.rows.iter().position(|r| r.id == id && r.gone.is_none())?;
-        self.selection.only(row, id);
+        self.selection.only(id);
         Some(row)
     }
 
@@ -199,7 +220,7 @@ impl TreeList {
         if let Some(id) = self.entry_at(0) {
             self.toggle(id);
             if let Some(next) = self.entry_at(2) {
-                self.selection.only(2, next);
+                self.selection.only(next);
             }
         }
     }
@@ -341,6 +362,13 @@ impl TableDelegate for TreeList {
         self.rebuild();
     }
 
+    fn context_menu(&mut self, _: usize, menu: PopupMenu, window: &mut Window, cx: &mut Context<TableState<Self>>) -> PopupMenu {
+        match self.menu.clone() {
+            Some(build) => build(menu, self.selection.ids(), self.selection.last(), window, cx),
+            None => menu,
+        }
+    }
+
     fn render_th(&mut self, col_ix: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
         let text = crate::theme::palette(cx).text;
         div()
@@ -404,7 +432,7 @@ impl TableDelegate for TreeList {
                 let is_dir = index.is_dir(id);
                 Some(Cells {
                     depth,
-                    name: index.name(id).to_owned(),
+                    name: index.display_name(id).to_owned(),
                     expandable: index.children(id).iter().any(|&c| view.filter.is_shown(c)),
                     open: self.expanded.contains(&id),
                     muted: !view.query.trim().is_empty() && !view.filter.is_matched(id),
@@ -433,14 +461,28 @@ impl TableDelegate for TreeList {
             }
         }
         let selected = self.entry_at(row).is_some_and(|id| self.selection.contains(id));
-        let accent = crate::theme::palette(cx).active;
+        let is_last = selected && self.selection.last() == self.entry_at(row);
         div()
             .id(("row", row))
-            .when(selected, |d| d.bg(accent).rounded(px(8.)))
+            .when(selected, |d| d.child(crate::selection::highlight(is_last, cx)))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |table, _, _, cx| {
+                    let list = table.delegate_mut();
+                    if let Some(id) = list.entry_at(row) {
+                        if !list.selection.contains(id) {
+                            list.selection.only(id);
+                        }
+                        list.selection.context = Some(id);
+                        cx.notify();
+                    }
+                }),
+            )
             .on_click(cx.listener(move |table, e: &ClickEvent, _, cx| {
                 let list = table.delegate_mut();
                 let ids: Vec<Option<EntryId>> = (0..list.rows.len()).map(|r| list.entry_at(r)).collect();
-                list.selection.click(row, e.modifiers(), |r| ids.get(r).copied().flatten());
+                list.selection
+                    .click(row, e.modifiers(), ids.len(), |r| ids.get(r).copied().flatten());
                 cx.notify();
             }))
     }
@@ -495,6 +537,7 @@ impl TableDelegate for TreeList {
                 .w(px(14.))
                 .flex_shrink_0()
                 .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(Icon::new(icon).size(px(14.)).text_color(muted))
                 .on_click(cx.listener(move |table, _, _, cx| {
                     table.delegate_mut().toggle(id);

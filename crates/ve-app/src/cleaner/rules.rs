@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use ve_core::category::extension;
 use ve_core::{Candidate, CategoryMap, EntryId, Index, Query, QueryContext, Totals};
 use ve_scan::VolumeInfo;
@@ -294,16 +295,43 @@ fn marker_in_index(index: &Index, rule: &Rule, id: EntryId) -> bool {
         })
 }
 
+/// What `find` is doing, as its progress callback reports it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Running the rules over every Entry; progress counts Entries.
+    Scanning,
+    /// Measuring what was found; progress counts Cleanables.
+    Sizing,
+}
+
 /// What the rules found in the Index, on Locations that can be changed, grouped in `Group::ALL`
 /// order and largest first. A path inside another path that is removed whole is left out: the
-/// outer one takes it along.
-pub fn find(index: &Index, volumes: &[VolumeInfo], rules: &[Arc<Rule>]) -> Vec<Cleanable> {
+/// outer one takes it along. A raised `cancel` ends the look early with nothing. `progress`
+/// receives the phase, how many are done and how many there are, now and then.
+pub fn find(
+    index: &Index,
+    volumes: &[VolumeInfo],
+    rules: &[Arc<Rule>],
+    cancel: &AtomicBool,
+    progress: &dyn Fn(Phase, u64, u64),
+) -> Vec<Cleanable> {
+    let total = index.capacity() as u64;
     let needs_path = rules.iter().any(|r| r.query.needs_path());
     let needs_children = rules.iter().any(|r| r.query.needs_children());
     let (mut path, mut chain) = (String::new(), Vec::new());
     let mut found: Vec<(Arc<Rule>, EntryId)> = Vec::new();
     // ponytail: every rule's Query runs on every Entry; index them by name if a 10M-Entry Index makes it slow.
-    for id in (0..index.capacity() as u32).map(EntryId).filter(|&id| index.is_live(id)) {
+    for (n, id) in (0..index.capacity() as u32)
+        .map(EntryId)
+        .filter(|&id| index.is_live(id))
+        .enumerate()
+    {
+        if n % 4096 == 0 {
+            if cancel.load(Ordering::Relaxed) {
+                return Vec::new();
+            }
+            progress(Phase::Scanning, n as u64, total);
+        }
         let is_dir = index.is_dir(id);
         if needs_path {
             index.write_match_path(id, &mut path, &mut chain);
@@ -346,10 +374,16 @@ pub fn find(index: &Index, volumes: &[VolumeInfo], rules: &[Arc<Rule>]) -> Vec<C
         true
     });
     let mut seen = HashSet::new();
-    let mut out: Vec<Cleanable> = found
+    let unique: Vec<_> = found
         .into_iter()
         .filter(|(rule, id)| seen.insert((rule.is_command(), rule.name.clone(), *id)))
-        .map(|(rule, id)| {
+        .collect();
+    let to_size = unique.len() as u64;
+    let mut out: Vec<Cleanable> = unique
+        .into_iter()
+        .enumerate()
+        .map(|(n, (rule, id))| {
+            progress(Phase::Sizing, n as u64, to_size);
             let sized = rule
                 .estimate
                 .as_deref()
@@ -615,11 +649,11 @@ pub fn admin_command(paths: &[PathBuf]) -> String {
 
 /// The admin step: rechecks each Cleanable as Clean does, then removes the ones that still match
 /// with one `pkexec rm` (a single password prompt) and reports per Cleanable whether it is gone.
-/// Command rules are never run elevated.
-pub fn admin_clean(plan: &[(Arc<Rule>, PathBuf, Option<u64>)], volumes: &[VolumeInfo]) -> Outcome {
+/// Command rules are never run elevated. `on_done` is told how many are rechecked.
+pub fn admin_clean(plan: &[(Arc<Rule>, PathBuf, Option<u64>)], volumes: &[VolumeInfo], on_done: &dyn Fn(usize)) -> Outcome {
     let mut out = Outcome::default();
     let mut go: Vec<PathBuf> = Vec::new();
-    for (rule, path, min_age_days) in plan {
+    for (k, (rule, path, min_age_days)) in plan.iter().enumerate() {
         if rule.is_command() {
             out.skipped
                 .push((path.clone(), "command rules are not run with admin rights".into()));
@@ -628,6 +662,7 @@ pub fn admin_clean(plan: &[(Arc<Rule>, PathBuf, Option<u64>)], volumes: &[Volume
         } else {
             go.push(path.clone());
         }
+        on_done(k + 1);
     }
     if go.is_empty() {
         return out;
@@ -702,10 +737,10 @@ fn run(argv: &[String], cwd: &Path) -> Result<(Option<i32>, String), String> {
 
 /// Rechecks each Cleanable and applies the rule to the ones that still match: a command runs, a
 /// path is removed permanently. `remove_dir_all` never follows links, so a folder swapped for a
-/// link after the recheck loses only the link.
-pub fn clean(plan: &[(Arc<Rule>, PathBuf, Option<u64>)], volumes: &[VolumeInfo]) -> Outcome {
+/// link after the recheck loses only the link. `on_done` is told how many are finished.
+pub fn clean(plan: &[(Arc<Rule>, PathBuf, Option<u64>)], volumes: &[VolumeInfo], on_done: &dyn Fn(usize)) -> Outcome {
     let mut out = Outcome::default();
-    for (rule, path, min_age_days) in plan {
+    for (k, (rule, path, min_age_days)) in plan.iter().enumerate() {
         if let Err(why) = recheck(rule, path, volumes, *min_age_days) {
             out.skipped.push((path.clone(), why));
         } else if let Some(other) = foreign(path, !rule.is_command()) {
@@ -728,6 +763,7 @@ pub fn clean(plan: &[(Arc<Rule>, PathBuf, Option<u64>)], volumes: &[VolumeInfo])
                 Err(e) => out.skipped.push((path.clone(), e.to_string())),
             }
         }
+        on_done(k + 1);
     }
     out
 }
@@ -904,7 +940,7 @@ mod tests {
         at(&mut index, m, ".next", dir());
 
         let rules = builtin(OS).rules;
-        let found = find(&index, &[], &rules);
+        let found = find(&index, &[], &rules, &AtomicBool::new(false), &|_, _, _| {});
         let listed: Vec<_> = found.iter().map(|c| (c.rule.name.as_str(), c.path.clone())).collect();
         assert_eq!(
             listed,
@@ -931,15 +967,16 @@ mod tests {
             network: false,
             read_only: true,
         };
-        assert!(find(&index, &[ro], &rules).is_empty());
+        let no_cancel = AtomicBool::new(false);
+        assert!(find(&index, &[ro], &rules, &no_cancel, &|_, _, _| {}).is_empty());
         index.set_mount(vol, None);
-        assert!(find(&index, &[], &rules).is_empty());
+        assert!(find(&index, &[], &rules, &no_cancel, &|_, _, _| {}).is_empty());
         let remote = index.add_remote(&ve_core::Remote::new("me@box", "/srv").unwrap());
         let rroot = index.volume(remote).unwrap().root;
         let r = at(&mut index, rroot, "p", dir());
         at(&mut index, r, "Cargo.toml", file(1));
         at(&mut index, r, "target", dir());
-        assert!(find(&index, &[], &rules).is_empty());
+        assert!(find(&index, &[], &rules, &AtomicBool::new(false), &|_, _, _| {}).is_empty());
     }
 
     #[test]
@@ -971,7 +1008,7 @@ mod tests {
             },
         );
         index.insert(parent, ".X11-unix", dir());
-        let found = find(&index, &[], &builtin(OS).rules);
+        let found = find(&index, &[], &builtin(OS).rules, &AtomicBool::new(false), &|_, _, _| {});
         let names: Vec<_> = found.iter().map(|c| c.path.file_name().unwrap().to_str().unwrap()).collect();
         assert_eq!(names.len(), 2, "{names:?}");
         let get = |id| found.iter().find(|c| c.path == index.path(id)).unwrap();
@@ -1039,7 +1076,7 @@ mod tests {
             .iter()
             .map(|p| (rust.clone(), (*p).clone(), None))
             .collect();
-        let out = clean(&plan, &vols);
+        let out = clean(&plan, &vols, &|_| {});
         assert_eq!(out.removed, vec![cargo.clone(), tagged.clone()]);
         assert!(!cargo.exists() && !tagged.exists());
         assert!(fake_tag.exists() && unmarked.exists());
@@ -1124,6 +1161,7 @@ mod tests {
                 (missing, project.clone(), None),
             ],
             &vols,
+            &|_| {},
         );
         assert_eq!(out.commands.len(), 3);
         assert!(!out.commands[0].succeeded());
@@ -1137,7 +1175,7 @@ mod tests {
         assert_eq!(mk(r#"["a", "b c"]"#).argv_text(), "a \"b c\"");
         // A command rule whose marker is gone does not run.
         std::fs::remove_file(project.join("marker")).unwrap();
-        let out = clean(&[(ok, project, None)], &vols);
+        let out = clean(&[(ok, project, None)], &vols, &|_| {});
         assert!(out.commands.is_empty() && out.skipped.len() == 1);
         std::fs::remove_dir_all(&base).unwrap();
     }
@@ -1162,7 +1200,7 @@ mod tests {
             "{text}"
         );
         let rust = rule("Rust build artefacts");
-        let out = admin_clean(&[(rust, base.join("target"), None)], &[]);
+        let out = admin_clean(&[(rust, base.join("target"), None)], &[], &|_| {});
         assert!(out.removed.is_empty() && out.skipped.len() == 1, "{out:?}");
         std::fs::remove_dir_all(&base).unwrap();
     }

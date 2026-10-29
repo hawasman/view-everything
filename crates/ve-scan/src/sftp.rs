@@ -215,7 +215,13 @@ pub struct Walk {
 
 /// Walks the tree under `root` (an absolute path on the server), calling `emit` with a record for
 /// the root (empty path) and then for every Entry beneath it, each folder before its contents.
-pub fn walk(input: impl Read, output: impl Write, root: &str, mut emit: impl FnMut(Record)) -> io::Result<Walk> {
+pub fn walk(
+    input: impl Read,
+    output: impl Write,
+    root: &str,
+    cancel: &std::sync::atomic::AtomicBool,
+    mut emit: impl FnMut(Record),
+) -> io::Result<Walk> {
     let mut wire = Wire { input, output, next_id: 0 };
     wire.handshake()?;
     let id = wire.request(LSTAT, &string(root.as_bytes()))?;
@@ -240,6 +246,9 @@ pub fn walk(input: impl Read, output: impl Write, root: &str, mut emit: impl FnM
     let mut queue = VecDeque::from([(root.as_bytes().to_vec(), String::new())]);
     let mut pending: HashMap<u32, Pending> = HashMap::new();
     while !queue.is_empty() || !pending.is_empty() {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
         while pending.len() < WINDOW {
             let Some((path, rel)) = queue.pop_front() else { break };
             let id = wire.request(OPENDIR, &string(&path))?;
@@ -327,7 +336,7 @@ mod tests {
 
     #[test]
     fn a_truncated_or_oversized_reply_is_an_error_not_a_panic() {
-        let walk_of = |bytes: &[u8]| walk(bytes, io::sink(), "/x", |_| {}).unwrap_err().kind();
+        let walk_of = |bytes: &[u8]| walk(bytes, io::sink(), "/x", &Default::default(), |_| {}).unwrap_err().kind();
         assert_eq!(walk_of(&[]), io::ErrorKind::UnexpectedEof);
         // VERSION, then a packet claiming more bytes than the server sent.
         assert_eq!(

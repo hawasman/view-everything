@@ -35,7 +35,7 @@ impl From<&Record> for EntryMeta {
 
 /// Replaces the contents of `volume` with the tree found in the MFT read from `reader`.
 pub fn load<R: Read + Seek>(index: &SharedIndex, volume: VolumeId, mut reader: R, progress: &Progress) -> io::Result<()> {
-    let records = mft::read_all(&mut reader)?;
+    let records = mft::read_all(&mut reader, &progress.cancel)?;
     let root = index
         .read()
         .volume(volume)

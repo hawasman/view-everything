@@ -38,13 +38,17 @@ pub enum Act {
     Explore(Option<String>),
     /// Forget the Offline Volume with this identity (and its last mount path).
     Forget(String, PathBuf),
-    /// Bring the Location with these Volume identities (one filesystem's) up to date now.
+    /// Sync the Location with these Volume identities (one filesystem's) now, in full.
     Refresh(Vec<String>),
+    /// Sync every online Volume now.
+    SyncAll,
     MoveToTrash(EntryId),
     /// Open the Cleaner.
     OpenCleaner,
     /// Save the Recently modified Query; `None` restores the default.
     SaveQuery(Option<String>),
+    /// Start the Live updates a login start held back.
+    StartLive,
 }
 
 impl EventEmitter<Act> for DashboardPage {}
@@ -217,7 +221,7 @@ impl DashboardPage {
                 let indexed: u64 = categories.iter().sum();
                 let remote = v.remote();
                 let name = match (&remote, mounted) {
-                    (Some(r), _) => r.label(),
+                    (Some(r), _) => r.display_name(v.name.as_deref()),
                     (None, Some(m)) => volume_name(m),
                     (None, None) => v.mount.display().to_string(),
                 };
@@ -486,6 +490,29 @@ impl Render for DashboardPage {
 
         let body = v_flex()
             .child(head)
+            .when(cx.try_global::<crate::host::Host>().is_some_and(|h| h.live_paused()), |d| {
+                d.child(
+                    panel(cx)
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(16.))
+                        .mb(px(16.))
+                        .child(
+                            v_flex()
+                                .child(div().font_weight(FontWeight::MEDIUM).child("Live updates paused"))
+                                .child(caption(
+                                    "Not started at login, to spare you the password prompt. Changes are found when a Volume is synced.",
+                                    cx,
+                                )),
+                        )
+                        .child(
+                            pill("start-live", "Start")
+                                .primary()
+                                .build(cx, cx.listener(|_, _, _, cx| cx.emit(Act::StartLive))),
+                        ),
+                )
+            })
             .child(self.categories_row(cx))
             .child(
                 h_flex()
@@ -765,14 +792,20 @@ impl DashboardPage {
             (Some(at), true) => (ago(now, at), l.interval.clone()),
             (None, _) => ("Never".to_owned(), Some("Waiting for the first sync".to_owned())),
         };
+        let identities: Vec<String> = l.members.iter().map(|m| m.identity.clone()).collect();
+        let sync_pill = pill(("sync-now", ix), "Sync now")
+            .small()
+            .busy(l.syncing.is_some())
+            .build(cx, cx.listener(move |_, _, _, cx| cx.emit(Act::Refresh(identities.clone()))));
         let mut sync = v_flex().items_end().child(div().text_color(p.text).child(main));
         sync = if let Some(read) = l.syncing {
             sync.child(
                 div()
                     .text_size(px(13.))
                     .text_color(p.accent)
-                    .child(format!("Catching up — {} Entries read", format::count(read))),
+                    .child(format!("Syncing — {} Entries read", format::count(read))),
             )
+            .child(div().mt(px(4.)).child(sync_pill))
         } else if !l.online {
             let forget: Vec<_> = l.members.iter().map(|m| (m.identity.clone(), m.mount.clone())).collect();
             sync.child(
@@ -792,6 +825,7 @@ impl DashboardPage {
             )
         } else {
             sync.child(div().text_size(px(13.)).text_color(p.muted).child(second.unwrap_or_default()))
+                .child(div().mt(px(4.)).child(sync_pill))
         };
 
         h_flex()
@@ -854,7 +888,8 @@ impl DashboardPage {
             .child(
                 div().child(
                     pill("empty-trash", "Empty Trash")
-                        .disabled(why)
+                        .busy(self.trash.emptying())
+                        .disabled(if self.trash.emptying() { None } else { why })
                         .build(cx, cx.listener(|this, _, window, cx| this.trash.ask_empty(window, cx))),
                 ),
             );
@@ -902,16 +937,10 @@ impl DashboardPage {
             },
             None => ("—".to_owned(), "No Locations yet.".to_owned()),
         };
-        // The button refreshes the oldest Location that can be reached: an Offline one cannot.
-        let online: Vec<&Location> = locations.iter().filter(|l| l.online).collect();
-        let target = oldest(&online.iter().map(|l| l.last_synced).collect::<Vec<_>>()).map(|i| online[i]);
-        let refresh_why = target.is_none().then_some("There is nothing to refresh");
-        let label = target.map_or("Refresh".to_owned(), |l| {
-            format!("Refresh {}", shortened(&l.name, REFRESH_NAME_CHARS))
-        });
-        let refresh_ids: Vec<String> = target
-            .map(|l| l.members.iter().map(|m| m.identity.clone()).collect())
-            .unwrap_or_default();
+        // Sync now of every online Volume (the Remotes have their own buttons on their rows).
+        let syncing = self.shared.is_syncing();
+        let loading = self.shared.is_loading();
+        let any_online = locations.iter().any(|l| l.online && l.kind != Kind::Remote);
         let synced = panel(cx)
             .flex_1()
             .child(div().font_weight(FontWeight::MEDIUM).child("Index last synced"))
@@ -919,9 +948,14 @@ impl DashboardPage {
             .child(div().text_xs().text_color(p.muted).mb(px(16.)).child(note))
             .child(
                 div().child(
-                    pill("refresh", label)
-                        .disabled(refresh_why)
-                        .build(cx, cx.listener(move |_, _, _, cx| cx.emit(Act::Refresh(refresh_ids.clone())))),
+                    pill("sync-now", "Sync now")
+                        .busy(syncing)
+                        .disabled(if loading {
+                            Some("Loading the saved Index")
+                        } else {
+                            (!any_online).then_some("There is no Volume to sync")
+                        })
+                        .build(cx, cx.listener(|_, _, _, cx| cx.emit(Act::SyncAll))),
                 ),
             );
         v_flex()
@@ -1181,34 +1215,11 @@ mod bench {
                         ms(0.99),
                         late.last().unwrap().as_secs_f64() * 1e3
                     );
-                    let _ = cx.update(|_, cx| cx.quit());
+                    let _ = cx.update(|_, cx| crate::host::Host::quit(cx));
                     return;
                 }
             }
         })
         .detach();
-    }
-}
-
-/// The most of a Remote's or Volume's name the Refresh button shows.
-const REFRESH_NAME_CHARS: usize = 18;
-
-/// `text` cut to `max` characters, ending in `…` when it was longer.
-fn shortened(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_owned();
-    }
-    text.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
-}
-
-#[cfg(test)]
-mod tests {
-    use super::shortened;
-
-    #[test]
-    fn long_names_are_cut_with_an_ellipsis() {
-        assert_eq!(shortened("nas", 18), "nas");
-        assert_eq!(shortened("a-very-long-remote-name-indeed", 10), "a-very-lo…");
-        assert_eq!(shortened("日本語日本語", 4), "日本語…");
     }
 }

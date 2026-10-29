@@ -1,6 +1,6 @@
 # No background service; Catch-up at launch when stale
 
-_Partly superseded by ADR-0009 (live change tracking on macOS and Linux)._
+_Partly superseded by ADR-0009 (live change tracking on macOS and Linux); amended by ADR-0012 (tray and start at login)._
 
 Unlike Everything, the app installs no privileged service that starts at boot. It updates the Index only while running, and at launch it shows the saved Index at once with each Location's Last Synced time. A privileged service would bring its own install, update and security problems.
 

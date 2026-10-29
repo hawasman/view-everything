@@ -427,3 +427,38 @@ fn sftp_failures_are_reported_and_a_file_root_is_refused() {
     assert!(err.to_string().contains("not a folder"), "{err}");
     assert_eq!(index.read().live_count(), 2);
 }
+
+#[test]
+fn one_folder_of_an_ssh_remote_is_synced_alone() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    fs::create_dir_all(tree.join("a/b")).unwrap();
+    fs::create_dir_all(tree.join("c")).unwrap();
+    fs::write(tree.join("a/old.txt"), "o").unwrap();
+    fs::write(tree.join("c/stale.txt"), "s").unwrap();
+    let ssh = script(dir.path(), "ssh", LOCAL);
+    let ssh = ssh.to_str().unwrap();
+    let index = SharedIndex::new(Index::new());
+    let id = add(&index, tree.to_str().unwrap());
+    remote::sync_with(ssh, &index, id, &Progress::default()).unwrap();
+    assert!(remote::can_sync_folder(&index.read(), id));
+
+    fs::remove_file(tree.join("a/old.txt")).unwrap();
+    fs::write(tree.join("a/b/new.txt"), "n").unwrap();
+    fs::remove_file(tree.join("c/stale.txt")).unwrap();
+    let a = {
+        let index = index.read();
+        index.child_named(index.volume(id).unwrap().root, "a").unwrap()
+    };
+    let progress = Progress::default();
+    remote::sync_folder_with(ssh, &index, a, &progress).unwrap();
+
+    let index = index.read();
+    let root = index.volume(id).unwrap().root;
+    assert_eq!(names(&index, a), ["b"]);
+    assert_eq!(names(&index, index.child_named(a, "b").unwrap()), ["new.txt"]);
+    // c was outside the folder: its change is not seen yet.
+    assert_eq!(names(&index, index.child_named(root, "c").unwrap()), ["stale.txt"]);
+    assert_eq!(progress.entries(), 3, "a, b, new.txt and nothing else");
+}

@@ -369,11 +369,19 @@ fn list_folder(ftp: &mut RustlsFtpStream, mlsd: &mut bool, now: NaiveDateTime) -
 /// Walks every folder under `root`, giving each Entry's path relative to it (parents first) and
 /// metadata to `emit`. Returns how many folders or lines could not be read: such a listing is
 /// not complete, and nothing may be pruned after it.
-fn walk(ftp: &mut RustlsFtpStream, root: &str, mut emit: impl FnMut(String, EntryMeta)) -> io::Result<u64> {
+fn walk(
+    ftp: &mut RustlsFtpStream,
+    root: &str,
+    cancel: &std::sync::atomic::AtomicBool,
+    mut emit: impl FnMut(String, EntryMeta),
+) -> io::Result<u64> {
     let mut mlsd = ftp.feat().is_ok_and(|f| f.keys().any(|k| k.eq_ignore_ascii_case("MLST")));
     let now = Utc::now().naive_utc();
     let (mut unreadable, mut stack) = (0, vec![(String::new(), root.to_owned())]);
     while let Some((rel, abs)) = stack.pop() {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
         let lines = match ftp.cwd(abs.as_str()).and_then(|_| list_folder(ftp, &mut mlsd, now)) {
             Ok(lines) => lines,
             // The root must be there; a folder that is refused (550) is just unreadable.
@@ -483,7 +491,7 @@ pub fn sync_with(
     let mut ftp = connect(&remote, &password, tls)?;
     let mut applier = Applier::new(index, root, progress);
     let mut batch = Vec::new();
-    let walked = walk(&mut ftp, &remote.path, |path, meta| {
+    let walked = walk(&mut ftp, &remote.path, &progress.cancel, |path, meta| {
         batch.push((path, meta));
         if batch.len() >= BATCH {
             applier.apply(&mut batch);

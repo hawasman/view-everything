@@ -5,6 +5,7 @@ use crate::engine::Shared;
 use crate::selection::Selection;
 use crate::{format, view::View};
 use gpui_kit::component::h_flex;
+use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::table::{Column, TableDelegate, TableState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -17,12 +18,12 @@ const COLUMNS: [(&str, f32, bool); 6] = [
     ("Folder", 380., false),
     ("On disk", 72., true),
     ("Size", 72., true),
-    ("Files", 68., true),
+    ("Files", 76., true),
     ("Modified", 136., true),
 ];
 
 /// Width of the columns after Name and Folder, which share what is left of the list's width.
-const FIXED_WIDTH: f32 = 72. + 72. + 68. + 136. + 16.;
+const FIXED_WIDTH: f32 = 72. + 72. + 76. + 136. + 28.;
 const MIN_FLEX_WIDTH: f32 = 80.;
 
 /// Rows kept in `FlatList::rows` before it starts over.
@@ -35,6 +36,8 @@ pub struct FlatList {
     /// row rather than once per cell. Dropped when the View changes.
     rows: HashMap<usize, [String; 6]>,
     pub selection: Selection,
+    /// Builds the right-click menu; set by the Shell, which owns what the items act on.
+    pub menu: Option<crate::entry_actions::MenuFn>,
     /// Width the table has to fit in; 0 until first measured.
     available: f32,
 }
@@ -46,12 +49,32 @@ impl FlatList {
             view: None,
             rows: HashMap::new(),
             selection: Selection::default(),
+            menu: None,
             available: 0.,
         }
     }
 
     pub fn entry_at(&self, row: usize) -> Option<EntryId> {
         self.view.as_ref()?.flat.get(row).copied()
+    }
+
+    /// Width the columns need as designed.
+    pub fn natural_width() -> f32 {
+        COLUMNS[0].1 + COLUMNS[1].1 + FIXED_WIDTH
+    }
+
+    /// Arrow-key move of the selection; the row now focused.
+    pub fn step(&mut self, down: bool, extend: bool) -> Option<usize> {
+        let view = self.view.clone();
+        let rows = view.as_ref().map_or(0, |v| v.flat.len());
+        self.selection.step(down, extend, rows, |r| view.as_ref()?.flat.get(r).copied())
+    }
+
+    /// Selects every row.
+    pub fn select_all(&mut self) {
+        let view = self.view.clone();
+        let rows = view.as_ref().map_or(0, |v| v.flat.len());
+        self.selection.select_all(rows, |r| view.as_ref()?.flat.get(r).copied());
     }
 
     /// Fits the table into `width`: Name and Folder shrink first, the size columns stay.
@@ -93,7 +116,7 @@ impl FlatList {
     pub fn reveal(&mut self, id: EntryId) -> Option<usize> {
         let row = self.view.as_ref()?.flat.iter().position(|&e| e == id);
         match row {
-            Some(row) => self.selection.only(row, id),
+            Some(_) => self.selection.only(id),
             None => self.selection.clear(),
         }
         row
@@ -133,7 +156,7 @@ impl TableDelegate for FlatList {
                 self.rows.insert(
                     row,
                     [
-                        index.name(id).to_owned(),
+                        index.display_name(id).to_owned(),
                         folder.unwrap_or_default(),
                         format::size(totals.on_disk),
                         format::size(totals.logical),
@@ -144,17 +167,38 @@ impl TableDelegate for FlatList {
             }
         }
         let selected = self.entry_at(row).is_some_and(|id| self.selection.contains(id));
-        let accent = crate::theme::palette(cx).active;
+        let is_last = selected && self.selection.last() == self.entry_at(row);
         div()
             .id(("row", row))
-            .when(selected, |d| d.bg(accent).rounded(px(8.)))
+            .when(selected, |d| d.child(crate::selection::highlight(is_last, cx)))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |table, _, _, cx| {
+                    let list = table.delegate_mut();
+                    if let Some(id) = list.entry_at(row) {
+                        if !list.selection.contains(id) {
+                            list.selection.only(id);
+                        }
+                        list.selection.context = Some(id);
+                        cx.notify();
+                    }
+                }),
+            )
             .on_click(cx.listener(move |table, e: &ClickEvent, _, cx| {
                 let list = table.delegate_mut();
                 let view = list.view.clone();
                 let entry_at = |r: usize| view.as_ref()?.flat.get(r).copied();
-                list.selection.click(row, e.modifiers(), entry_at);
+                let rows = view.as_ref().map_or(0, |v| v.flat.len());
+                list.selection.click(row, e.modifiers(), rows, entry_at);
                 cx.notify();
             }))
+    }
+
+    fn context_menu(&mut self, _: usize, menu: PopupMenu, window: &mut Window, cx: &mut Context<TableState<Self>>) -> PopupMenu {
+        match self.menu.clone() {
+            Some(build) => build(menu, self.selection.ids(), self.selection.last(), window, cx),
+            None => menu,
+        }
     }
 
     fn render_th(&mut self, col_ix: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {

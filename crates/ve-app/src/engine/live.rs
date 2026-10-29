@@ -94,6 +94,12 @@ impl Live {
     /// The Volumes a running source keeps current. They have been walked once, so only changes
     /// since then are needed.
     pub(super) fn covered(&self) -> HashSet<VolumeId> {
+        let covered = self.compute_covered();
+        *self.shared.followed.lock() = covered.clone();
+        covered
+    }
+
+    fn compute_covered(&self) -> HashSet<VolumeId> {
         if !self.active.load(Ordering::Relaxed) {
             return HashSet::new();
         }

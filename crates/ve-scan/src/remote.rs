@@ -196,7 +196,7 @@ pub fn sync_with(program: &str, index: &SharedIndex, volume: VolumeId, progress:
             _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a Remote")),
         }
     };
-    list(program, index, root, &remote, progress)?;
+    list(program, index, root, &remote, &remote.path, progress)?;
     // Capacity is a bonus: a host without a working `df` just has none, and the sync stands.
     let capacity = df_with(program, &remote).ok();
     index.write().set_capacity(volume, capacity);
@@ -208,19 +208,59 @@ pub fn is_sftp_only(remote: &Remote) -> bool {
     matches!(remote, Remote::Ssh(r) if SFTP_ONLY.lock().contains(r))
 }
 
-fn list(program: &str, index: &SharedIndex, root: EntryId, remote: &SshRemote, progress: &Progress) -> io::Result<()> {
+fn list(program: &str, index: &SharedIndex, root: EntryId, remote: &SshRemote, path: &str, progress: &Progress) -> io::Result<()> {
     if !SFTP_ONLY.lock().contains(remote) {
-        match sync_find(program, index, root, remote, progress) {
+        match sync_find(program, index, root, remote, path, progress) {
             Err(e) if e.kind() == io::ErrorKind::Unsupported => {}
             done => return done,
         }
     }
-    sync_sftp(program, index, root, remote, progress)?;
+    sync_sftp(program, index, root, remote, path, progress)?;
     let mut only = SFTP_ONLY.lock();
     if !only.contains(remote) {
         only.push(remote.clone());
     }
     Ok(())
+}
+
+/// Whether the Remote of `volume` can list one folder alone: SSH Remotes can (`find` or SFTP
+/// starting at the folder); S3, FTP, WebDAV and Azure Remotes are listed whole.
+pub fn can_sync_folder(index: &ve_core::Index, volume: VolumeId) -> bool {
+    index.volume(volume).is_some_and(|v| matches!(v.sync, SyncState::Ssh(_)))
+}
+
+/// Brings the folder `dir` of an SSH Remote, and what is below it, up to date without listing
+/// the rest of the Remote.
+pub fn sync_folder(index: &SharedIndex, dir: EntryId, progress: &Progress) -> io::Result<()> {
+    sync_folder_with("ssh", index, dir, progress)
+}
+
+/// [`sync_folder`] through the `ssh` program `program`.
+pub fn sync_folder_with(program: &str, index: &SharedIndex, dir: EntryId, progress: &Progress) -> io::Result<()> {
+    let (remote, path) = {
+        let index = index.read();
+        let root = index.root_of(dir);
+        let volume = index
+            .volume_with_root(root)
+            .and_then(|v| index.volume(v))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such Remote"))?;
+        let SyncState::Ssh(remote) = &volume.sync else {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "This Remote can only be synced whole"));
+        };
+        let mut parts = Vec::new();
+        let mut current = dir;
+        while current != root {
+            parts.push(index.name(current).to_owned());
+            current = index.parent(current).expect("below the root");
+        }
+        let mut path = remote.path.trim_end_matches('/').to_owned();
+        for part in parts.iter().rev() {
+            path.push('/');
+            path.push_str(part);
+        }
+        (remote.clone(), path)
+    };
+    list(program, index, dir, &remote, &path, progress)
 }
 
 /// The capacity of the filesystem holding the Remote's root, from `df -kP` run over `program`
@@ -295,14 +335,17 @@ fn drain_stderr(child: &mut Child) -> std::thread::JoinHandle<String> {
     })
 }
 
-fn sync_find(program: &str, index: &SharedIndex, root: EntryId, remote: &SshRemote, progress: &Progress) -> io::Result<()> {
-    let mut child = spawn(program, remote, false, &command_line(&remote.path), Stdio::null())?;
+fn sync_find(program: &str, index: &SharedIndex, root: EntryId, remote: &SshRemote, path: &str, progress: &Progress) -> io::Result<()> {
+    let mut child = spawn(program, remote, false, &command_line(path), Stdio::null())?;
     let stderr = drain_stderr(&mut child);
     let mut applier = Applier::new(index, root, progress);
     let mut input = BufReader::new(child.stdout.take().expect("piped"));
     let (mut buf, mut batch) = (Vec::new(), Vec::new());
     let (mut read_error, mut malformed) = (None, false);
     loop {
+        if progress.cancelled() {
+            break;
+        }
         buf.clear();
         match input.read_until(0, &mut buf) {
             Ok(0) => break,
@@ -347,13 +390,13 @@ fn sync_find(program: &str, index: &SharedIndex, root: EntryId, remote: &SshRemo
 
 /// Indexes a Remote over `ssh -s host sftp`. As with find, Entries are pruned only after a
 /// listing that reached every folder.
-fn sync_sftp(program: &str, index: &SharedIndex, root: EntryId, remote: &SshRemote, progress: &Progress) -> io::Result<()> {
+fn sync_sftp(program: &str, index: &SharedIndex, root: EntryId, remote: &SshRemote, path: &str, progress: &Progress) -> io::Result<()> {
     let mut child = spawn(program, remote, true, "sftp", Stdio::piped())?;
     let stderr = drain_stderr(&mut child);
     let (stdin, stdout) = (child.stdin.take().expect("piped"), child.stdout.take().expect("piped"));
     let mut applier = Applier::new(index, root, progress);
     let mut batch = Vec::new();
-    let walked = sftp::walk(BufReader::new(stdout), stdin, &remote.path, |record| {
+    let walked = sftp::walk(BufReader::new(stdout), stdin, path, &progress.cancel, |record| {
         batch.push((record.path.clone(), record.meta()));
         if batch.len() >= BATCH {
             applier.apply(&mut batch);
@@ -446,6 +489,11 @@ impl<'a> Applier<'a> {
     }
 
     pub(crate) fn apply(&mut self, batch: &mut Vec<(String, EntryMeta)>) {
+        // A cancelled sync writes nothing more; `prune` then keeps every Entry not yet seen.
+        if self.progress.cancelled() {
+            batch.clear();
+            return;
+        }
         if batch.is_empty() {
             return;
         }
@@ -476,6 +524,9 @@ impl<'a> Applier<'a> {
 
     /// Removes Entries the listing no longer has.
     pub(crate) fn prune(self) {
+        if self.progress.cancelled() {
+            return;
+        }
         let gone: std::collections::HashSet<EntryId> = self.unseen.values().copied().collect();
         let mut by_parent: HashMap<EntryId, Vec<EntryId>> = HashMap::new();
         let mut index = self.index.write();

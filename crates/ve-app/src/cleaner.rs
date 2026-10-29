@@ -7,21 +7,27 @@ use crate::categories::CategoryPanel;
 use crate::engine::{Repaint, Shared};
 use crate::format;
 use crate::settings::{Settings, cleanup_path};
+use crate::tasks::{Outcome, TaskKind};
 use crate::theme::palette;
-use crate::ui::{caption, panel, pill};
+use crate::ui::{caption, panel, pill, task_progress};
 use crate::view::{CategoryRow, EXTENSIONS_PER_CATEGORY};
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, Size, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rules::{CAN_ELEVATE, Cleanable, CommandReport, Group, Rule, Rules, admin_clean, admin_command, clean, foreign};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Instant, SystemTime};
+
+/// Least time between two looks that only follow the Index moving on.
+const RELOOK_THROTTLE: std::time::Duration = std::time::Duration::from_secs(5);
 use ve_core::{Category, CategoryMap, Totals};
 use ve_scan::VolumeInfo;
 
@@ -54,9 +60,18 @@ pub struct CleanerPage {
     build_days: u64,
     /// Index generation `cleanables` was found in.
     seen: Option<u64>,
+    /// When the last look started, for the throttle on looking again as the Index moves.
+    last_look: Instant,
+    relook_scheduled: bool,
     /// A look for Cleanables is running on a background thread. Nothing it has not told apart
     /// into yours and admin-only is offered, so a Cleanable never shows up as cleanable early.
     looking: bool,
+    /// The user cancelled the look: none starts until they ask again or something changes.
+    paused: bool,
+    /// The running look is measuring what it found, not yet checking Entries.
+    sizing: Arc<AtomicBool>,
+    /// The Clean running (or last run) is the admin step, so its button is the one that spins.
+    cleaning_admin: bool,
     /// Counts the changes (rules, Volumes, age limits) that make a running look's answer stale.
     epoch: u64,
     cleanables: Vec<Cleanable>,
@@ -148,7 +163,12 @@ impl CleanerPage {
             temp_days: settings.cleaner_temp_days,
             build_days: settings.cleaner_build_days,
             seen: None,
+            last_look: Instant::now(),
+            relook_scheduled: false,
             looking: false,
+            paused: false,
+            sizing: Arc::new(AtomicBool::new(false)),
+            cleaning_admin: false,
             epoch: 0,
             cleanables: Vec::new(),
             known: HashSet::new(),
@@ -206,6 +226,7 @@ impl CleanerPage {
     /// The next `refresh` looks again, and a look already running is forgotten.
     fn invalidate(&mut self) {
         self.seen = None;
+        self.paused = false;
         self.epoch += 1;
     }
 
@@ -224,29 +245,85 @@ impl CleanerPage {
             self.rules = rules::load(cleanup_path().as_deref());
             self.invalidate();
         }
-        if self.looking || self.seen == Some(self.shared.index.read().generation()) {
+        if self.looking || self.paused {
             return;
         }
+        let generation = self.shared.index.read().generation();
+        if self.seen == Some(generation) {
+            return;
+        }
+        // Looking again only because the Index moved (Live updates) waits out the throttle, so a
+        // busy volume does not re-walk every Cleanable on every generation.
+        if self.seen.is_some() {
+            let since = self.last_look.elapsed();
+            if since < RELOOK_THROTTLE {
+                if !self.relook_scheduled {
+                    self.relook_scheduled = true;
+                    let wait = RELOOK_THROTTLE - since;
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(wait).await;
+                        this.update(cx, |this, cx| {
+                            this.relook_scheduled = false;
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+                return;
+            }
+        }
+        self.last_look = Instant::now();
         self.looking = true;
         let epoch = self.epoch;
         let (shared, volumes, rules) = (self.shared.clone(), self.volumes.clone(), self.rules.rules.clone());
+        let sizing = self.sizing.clone();
+        // Only a look the page waits on (the first, or after a change of rules or Volumes) is a
+        // Task; looking again as the Index moves on is quiet, or every sync would fill the list.
+        let task = self
+            .seen
+            .is_none()
+            .then(|| shared.tasks.begin(TaskKind::CleanerSearch, "Look for Cleanables".into(), true));
+        let cancel = task.as_ref().map_or_else(|| Arc::new(AtomicBool::new(false)), |t| t.cancel_flag());
         cx.spawn(async move |this, cx| {
             let found = cx
                 .background_spawn(async move {
                     let index = shared.index.read();
                     let generation = index.generation();
-                    let found = rules::find(&index, &volumes, &rules);
+                    let progress = |phase: rules::Phase, done: u64, total: u64| {
+                        sizing.store(phase == rules::Phase::Sizing, Ordering::Relaxed);
+                        if let Some(task) = &task {
+                            task.set_progress(done, Some(total));
+                        }
+                    };
+                    let found = rules::find(&index, &volumes, &rules, &cancel, &progress);
                     drop(index);
                     // Fail closed: a Cleanable is the user's only if the whole walk says so.
-                    let (admin, own): (Vec<_>, Vec<_>) = found.into_iter().partition(|c| foreign(&c.path, !c.rule.is_command()).is_some());
-                    (generation, own, admin)
+                    let (admin, own): (Vec<_>, Vec<_>) = found
+                        .into_iter()
+                        .partition(|c| !cancel.load(Ordering::Relaxed) && foreign(&c.path, !c.rule.is_command()).is_some());
+                    let cancelled = cancel.load(Ordering::Relaxed);
+                    if let Some(task) = task {
+                        task.finish(if cancelled {
+                            Outcome::Cancelled
+                        } else {
+                            Outcome::Done(format!(
+                                "{} Cleanables found",
+                                crate::format::count((own.len() + admin.len()) as u64)
+                            ))
+                        });
+                    }
+                    (generation, own, admin, cancelled)
                 })
                 .await;
             this.update(cx, |this, cx| {
                 this.looking = false;
-                // Rules or Volumes changed meanwhile: this answer is for something else, so the
-                // render that follows looks again.
-                if this.epoch == epoch {
+                if found.3 {
+                    // Cancelled: no new look until the user asks again or the rules change.
+                    this.paused = true;
+                } else if this.epoch == epoch {
+                    // Rules or Volumes changed meanwhile: this answer is for something else, so the
+                    // render that follows looks again.
                     this.apply(found.0, found.1, found.2);
                     this.rebuild_breakdown(cx);
                 }
@@ -343,11 +420,33 @@ impl CleanerPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.shared.tasks.is_running(TaskKind::Clean) {
+            return;
+        }
+        self.cleaning_admin = true;
+        let total = plan.len() as u64;
+        let task = self
+            .shared
+            .tasks
+            .begin(TaskKind::Clean, format!("Clean {total} Cleanables as admin"), false);
+        task.set_progress(0, Some(total));
+        cx.notify();
         window
             .spawn(cx, {
                 let this = cx.entity();
                 async move |cx| {
-                    let outcome = cx.background_executor().spawn(async move { admin_clean(&plan, &volumes) }).await;
+                    let outcome = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let outcome = admin_clean(&plan, &volumes, &|k| task.set_progress(k as u64, Some(total)));
+                            task.finish(if outcome.skipped.is_empty() {
+                                Outcome::Done(format!("Removed {} item(s)", crate::format::count(outcome.removed.len() as u64)))
+                            } else {
+                                Outcome::Failed(format!("{} item(s) not removed", outcome.skipped.len()))
+                            });
+                            outcome
+                        })
+                        .await;
                     cx.update(|window, cx| {
                         let (shared, repaint) = {
                             let page = this.read(cx);
@@ -438,7 +537,16 @@ impl CleanerPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A Clean cannot run twice, whichever button or dialog started it.
+        if self.shared.tasks.is_running(TaskKind::Clean) {
+            return;
+        }
+        self.cleaning_admin = false;
         let shared = self.shared.clone();
+        let total = plan.len() as u64;
+        let task = shared.tasks.begin(TaskKind::Clean, format!("Clean {total} Cleanables"), false);
+        task.set_progress(0, Some(total));
+        cx.notify();
         window
             .spawn(cx, {
                 let this = cx.entity();
@@ -446,7 +554,7 @@ impl CleanerPage {
                     let outcome = cx
                         .background_executor()
                         .spawn(async move {
-                            let outcome = clean(&plan, &volumes);
+                            let outcome = clean(&plan, &volumes, &|k| task.set_progress(k as u64, Some(total)));
                             // Whatever a command changed is read back into the Index: only its working
                             // folder, since a command rule's effect is confined to it (the Volume would
                             // take minutes to re-walk).
@@ -456,6 +564,12 @@ impl CleanerPage {
                                     let _ = ve_scan::sync_folder(&shared.index, folder, &command.cwd, &shared.progress);
                                 }
                             }
+                            let failed = outcome.commands.iter().filter(|c| !c.succeeded()).count() + outcome.skipped.len();
+                            task.finish(if failed == 0 {
+                                Outcome::Done(format!("Removed {} item(s)", crate::format::count(outcome.removed.len() as u64)))
+                            } else {
+                                Outcome::Failed(format!("{failed} item(s) skipped or failed"))
+                            });
                             outcome
                         })
                         .await;
@@ -733,6 +847,10 @@ impl Render for CleanerPage {
         if !self.admin.is_empty() {
             summary.push_str(&format!(" · Admin only: {admin_count} selected, {}", format::size(admin_total)));
         }
+        let clean_task = self.shared.tasks.running().into_iter().find(|t| t.kind == TaskKind::Clean);
+        let clean_busy = clean_task.is_some() && !self.cleaning_admin;
+        let admin_busy = clean_task.is_some() && self.cleaning_admin;
+        let clean_blocked = clean_task.is_some().then_some("A Clean is already running");
         // The plan and its buttons stay above the list, so they are never a scroll away.
         let bar = panel(cx)
             .child(
@@ -750,16 +868,82 @@ impl Render for CleanerPage {
                     .child(
                         pill("clean", "Clean")
                             .primary()
-                            .disabled((count == 0).then_some("Tick what to clean first"))
+                            .busy(clean_busy)
+                            .disabled(if clean_busy {
+                                None
+                            } else {
+                                clean_blocked.or((count == 0).then_some("Tick what to clean first"))
+                            })
                             .build(cx, cx.listener(|this, _, window, cx| this.ask_clean(window, cx))),
                     )
                     .child(
                         pill("admin-clean", "Clean as admin…")
-                            .disabled(admin_why)
+                            .busy(admin_busy)
+                            .disabled(if admin_busy { None } else { clean_blocked.or(admin_why) })
                             .build(cx, cx.listener(|this, _, window, cx| this.ask_admin_clean(window, cx))),
                     ),
             )
+            .children(clean_task.map(|t| {
+                div()
+                    .mt(px(10.))
+                    .child(task_progress("clean-progress", t.done, t.total, "Cleanables", cx))
+            }))
             .children(advanced.map(|a| div().mt(px(12.)).child(a)));
+        let looking = self.looking();
+        let search_task = self.shared.tasks.running().into_iter().find(|t| t.kind == TaskKind::CleanerSearch);
+        let status = if looking {
+            match search_task.filter(|t| t.total.is_some_and(|n| n > 0)) {
+                Some(t) => {
+                    let what = if self.sizing.load(Ordering::Relaxed) {
+                        "Cleanables measured"
+                    } else {
+                        "Entries checked"
+                    };
+                    task_progress("cleaner-progress", t.done, t.total, what, cx).into_any_element()
+                }
+                None => h_flex()
+                    .gap(px(10.))
+                    .items_center()
+                    .child(Spinner::new().with_size(Size::XSmall).color(muted))
+                    .child("Looking for Cleanables…")
+                    .into_any_element(),
+            }
+        } else if self.paused {
+            "The search was cancelled.".into_any_element()
+        } else {
+            format!(
+                "{} Cleanables found",
+                format::count((self.cleanables.len() + self.admin.len()) as u64)
+            )
+            .into_any_element()
+        };
+        let search_row = h_flex()
+            .flex_none()
+            .gap(px(10.))
+            .items_center()
+            .child(div().flex_1().text_color(muted).child(status))
+            .when(looking, |row| {
+                row.child(pill("cancel-search", "Cancel").small().build(
+                    cx,
+                    cx.listener(|this, _, _, cx| {
+                        this.shared.tasks.cancel_kind(TaskKind::CleanerSearch);
+                        cx.notify();
+                    }),
+                ))
+            })
+            .child(
+                pill("cleaner-rescan", "Look again")
+                    .small()
+                    .busy(looking)
+                    .disabled(looking.then_some("A search is already running"))
+                    .build(
+                        cx,
+                        cx.listener(|this, _, _, cx| {
+                            this.invalidate();
+                            cx.notify();
+                        }),
+                    ),
+            );
 
         let tab_bar = h_flex().gap(px(8.)).children(tabs.iter().enumerate().map(|(i, &(t, n))| {
             let title = match t {
@@ -853,6 +1037,7 @@ impl Render for CleanerPage {
             .flex()
             .flex_col()
             .gap(px(8.))
+            .child(search_row)
             .child(tab_bar)
             .children(admin_intro)
             // The list scrolls inside the page, with a scrollbar, under the bar and above the pager.
@@ -862,7 +1047,8 @@ impl Render for CleanerPage {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .pr(px(12.))
+                    // Clear of the scrollbar, which overlays the right edge.
+                    .pr(px(22.))
                     .children(rows)
                     .children(empty),
             )

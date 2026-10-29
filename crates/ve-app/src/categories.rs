@@ -70,7 +70,10 @@ impl CategoryPanel {
             text.push_str(&term);
             query.set_value(text, window, cx);
             // set_value is silent; the Shell recomputes the View on Change.
-            cx.emit(InputEvent::Change);
+            cx.emit(InputEvent::PressEnter {
+                secondary: false,
+                shift: false,
+            });
         });
     }
 }
@@ -124,11 +127,13 @@ impl Render for CategoryPanel {
                 .w(px(14.))
                 .flex_none()
                 .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if !this.open.remove(&category) {
                         this.open.insert(category);
                     }
                     cx.notify();
+                    cx.stop_propagation();
                 }))
                 .child(
                     Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })

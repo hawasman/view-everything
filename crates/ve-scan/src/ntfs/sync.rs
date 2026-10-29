@@ -79,12 +79,15 @@ fn ensure_journal(handle: &File) -> io::Result<Journal> {
 }
 
 /// Record numbers named by journal records from `start`, and the USN to resume from.
-fn read_changes(handle: &File, journal: &Journal, start: i64) -> io::Result<(Vec<u64>, i64)> {
+fn read_changes(handle: &File, journal: &Journal, start: i64, progress: &Progress) -> io::Result<(Vec<u64>, i64)> {
     let mut changed = Vec::new();
     let mut seen = HashSet::new();
     let mut next = start;
     let mut buf = vec![0u8; JOURNAL_BUFFER];
     while next < journal.next_usn {
+        if progress.cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
         let mut input = [0u8; 40];
         input[0..8].copy_from_slice(&next.to_le_bytes());
         input[8..12].copy_from_slice(&u32::MAX.to_le_bytes()); // every reason
@@ -247,8 +250,15 @@ fn apply(index: &mut Index, map: &mut HashMap<u64, Vec<EntryId>>, number: u64, r
     true
 }
 
-fn catch_up(index: &SharedIndex, handle: &File, root: EntryId, journal: &Journal, from: i64) -> io::Result<Option<i64>> {
-    let (mut changed, next) = read_changes(handle, journal, from)?;
+fn catch_up(
+    index: &SharedIndex,
+    handle: &File,
+    root: EntryId,
+    journal: &Journal,
+    from: i64,
+    progress: &Progress,
+) -> io::Result<Option<i64>> {
+    let (mut changed, next) = read_changes(handle, journal, from, progress)?;
     if changed.is_empty() {
         return Ok(Some(next));
     }
@@ -279,7 +289,7 @@ fn catch_up(index: &SharedIndex, handle: &File, root: EntryId, journal: &Journal
 }
 
 /// Brings an NTFS Volume up to date. `Ok(false)` leaves the Volume to the portable walk.
-pub(crate) fn sync_windows(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::Result<bool> {
+pub(crate) fn sync_windows(index: &SharedIndex, volume: VolumeId, progress: &Progress, full: bool) -> io::Result<bool> {
     let (root, mount, state) = {
         let r = index.read();
         let Some(v) = r.volume(volume) else {
@@ -307,14 +317,15 @@ pub(crate) fn sync_windows(index: &SharedIndex, volume: VolumeId, progress: &Pro
         Err(e) => return Err(e),
     };
 
-    if let SyncState::Ntfs { journal_id, next_usn } = state
+    if !full
+        && let SyncState::Ntfs { journal_id, next_usn } = state
         && journal_id == journal.id
         && journal.first_usn <= next_usn
     {
         if next_usn >= journal.next_usn {
             return Ok(true); // nothing changed since the last sync
         }
-        match catch_up(index, &handle, root, &journal, next_usn) {
+        match catch_up(index, &handle, root, &journal, next_usn, progress) {
             Ok(Some(next)) => {
                 index.write().set_sync_state(
                     volume,

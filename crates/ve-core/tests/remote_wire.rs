@@ -110,6 +110,30 @@ fn webdav_and_azure_remotes_round_trip_settings_and_are_told_apart() {
 }
 
 #[test]
+fn a_remote_name_is_display_only_and_changes_neither_identity_nor_the_saved_index() {
+    let remote = Remote::new("me@box", "/srv").unwrap();
+    assert_eq!(remote.display_name(None), "me@box:/srv");
+    assert_eq!(remote.display_name(Some("  ")), "me@box:/srv");
+    assert_eq!(remote.display_name(Some(" Backup box ")), "Backup box");
+    let mut index = Index::new();
+    let id = index.add_remote(&remote);
+    let root = index.volume(id).unwrap().root;
+    assert_eq!(index.display_name(root), "ssh:me@box:/srv");
+    index.set_remote_name(id, Some(" Backup box "));
+    assert_eq!(index.display_name(root), "Backup box");
+    assert_eq!(index.name(root), "ssh:me@box:/srv");
+    assert_eq!(index.volume(id).unwrap().remote_display_name().as_deref(), Some("Backup box"));
+    // The name is not saved in the Index: the v0.1.0 layout is unchanged and loads as before.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.bin");
+    index.save(&path).unwrap();
+    let back = Index::load(&path).unwrap();
+    let volume = back.volumes().next().unwrap().1;
+    assert_eq!(volume.remote(), Some(remote));
+    assert_eq!(volume.name, None);
+}
+
+#[test]
 fn webdav_and_azure_remotes_are_validated_and_identified() {
     let dav = WebdavRemote::new(" https://h/dav// ", " me ").unwrap();
     assert_eq!(

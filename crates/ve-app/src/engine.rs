@@ -3,11 +3,12 @@
 mod live;
 
 use crate::settings;
-use crate::view::View;
+use crate::tasks::{Outcome, TaskKind, Tasks};
+use crate::view::{FileOrder, View};
 use chrono::{Local, Utc};
 use live::Live;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -15,7 +16,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use ve_core::snapshot::{self, Snapshot};
-use ve_core::{BitSet, CategoryMap, Index, Query, QueryContext, Remote, SyncState, VolumeId};
+use ve_core::{BitSet, CategoryMap, EntryId, Filter, Index, Query, QueryContext, Remote, SyncState, Volume, VolumeId};
 use ve_scan::duplicates::{self, Group, HashCache, HashProgress};
 use ve_scan::{Progress, SharedIndex, VolumeInfo};
 
@@ -53,9 +54,14 @@ pub struct Shared {
     /// Duplicates found by hashing, and how far a running search has got.
     pub duplicates: Mutex<DuplicateState>,
     pub hash_progress: HashProgress,
+    /// The Duplicate Exclusions Query text, as set in Settings.
+    pub duplicate_exclusions: Mutex<String>,
+    categories: CategoryMap,
     hashing: AtomicBool,
     /// Held while the Index is written to disk, so two saves never share the temporary file.
     saving: Mutex<()>,
+    /// The names the user gave Remotes, by identity; copied onto the Index's Remote Locations.
+    remote_names: Mutex<HashMap<String, String>>,
     /// Set while a Snapshot is being captured and written.
     snapshotting: AtomicBool,
     /// The FSEvents event id up to which changes are in the Index; 0 when there is none.
@@ -65,8 +71,13 @@ pub struct Shared {
     /// replay from past the lost changes.
     live_lost: AtomicU32,
     live_held: AtomicU64,
+    /// The Volumes a running Live updates source keeps current, as of the last time the
+    /// indexer looked (see `Live::covered`). The sidebar shows these as Live.
+    pub followed: Mutex<HashSet<VolumeId>>,
+    /// Background work the sidebar lists (Sync, Duplicate search, Cleaner, ...).
+    pub tasks: Tasks,
     /// Called from the background threads whenever something the GUI shows has changed.
-    repaint: Repaint,
+    pub(crate) repaint: Repaint,
 }
 
 /// The Duplicates found so far; replaced whole when a search finishes.
@@ -82,6 +93,12 @@ pub struct DuplicateState {
     pub generation: Option<u64>,
     /// When the latest search finished.
     pub finished: Option<std::time::Instant>,
+    /// The Duplicate Exclusions the latest search ran under.
+    pub exclusions: String,
+    /// Files the latest search skipped because of them.
+    pub skipped: u64,
+    /// Why the Duplicate Exclusions could not be used (they were ignored), if so.
+    pub exclusion_error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -108,11 +125,14 @@ pub enum Phase {
 enum Command {
     /// Every Volume mounted, the ones of them to index, and the Remotes to hold.
     SetVolumes(Vec<VolumeInfo>, Vec<VolumeInfo>, Vec<Remote>),
-    /// Syncs the Location with this identity now (Refresh).
+    /// Syncs the Location with this identity now (Sync now), in full.
     RefreshLocation(String),
     /// Drops an Offline Volume, by identity, from the Index.
     Forget(String),
+    /// Live updates lost changes or came back: every online Volume is caught up.
     Refresh,
+    /// The user's Sync now of every online Volume.
+    SyncNow,
     SetIntervals(Intervals),
     /// Turns the Linux `fanotify` helper on or off.
     SetLiveHelper(bool),
@@ -123,7 +143,9 @@ pub struct Engine {
     pub shared: Arc<Shared>,
     commands: Sender<Command>,
     queries: Sender<String>,
-    indexer: Option<JoinHandle<()>>,
+    /// How many Queries were sent; the view thread stops computing one when this has moved on.
+    newest_query: Arc<AtomicU64>,
+    indexer: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Engine {
@@ -137,6 +159,11 @@ impl Engine {
         categories: CategoryMap,
         live_helper: bool,
     ) -> Engine {
+        let tasks = Tasks::new();
+        {
+            let repaint = repaint.clone();
+            tasks.set_repaint(move || repaint());
+        }
         let shared = Arc::new(Shared {
             index: SharedIndex::new(Index::new()),
             progress: Progress::default(),
@@ -149,16 +176,22 @@ impl Engine {
             busy: AtomicBool::new(true),
             duplicates: Mutex::new(DuplicateState::default()),
             hash_progress: HashProgress::default(),
+            duplicate_exclusions: Mutex::new(String::new()),
+            remote_names: Mutex::new(HashMap::new()),
+            categories: categories.clone(),
             hashing: AtomicBool::new(false),
             saving: Mutex::new(()),
             snapshotting: AtomicBool::new(false),
             live_position: AtomicU64::new(0),
             live_lost: AtomicU32::new(0),
             live_held: AtomicU64::new(0),
+            followed: Mutex::new(HashSet::new()),
+            tasks,
             repaint,
         });
         let (commands, command_rx) = mpsc::channel();
         let (queries, query_rx) = mpsc::channel();
+        let newest_query = Arc::new(AtomicU64::new(0));
         let indexer = {
             let shared = shared.clone();
             let command_tx = commands.clone();
@@ -169,9 +202,10 @@ impl Engine {
         };
         {
             let shared = shared.clone();
+            let newest = newest_query.clone();
             thread::Builder::new()
                 .name("ve-view".into())
-                .spawn(move || run_viewer(&shared, &query_rx, &categories))
+                .spawn(move || run_viewer(&shared, &query_rx, &newest, &categories))
                 .expect("spawn view thread");
         }
         let _ = commands.send(Command::SetLiveHelper(live_helper));
@@ -180,12 +214,21 @@ impl Engine {
             shared,
             commands,
             queries,
-            indexer: Some(indexer),
+            newest_query,
+            indexer: Mutex::new(Some(indexer)),
         }
     }
 
     pub fn set_query(&self, text: String) {
+        self.newest_query.fetch_add(1, Ordering::Relaxed);
         let _ = self.queries.send(text);
+    }
+
+    /// Sets the names the user gave Remotes (by identity), shown wherever a Remote is named.
+    pub fn set_remote_names(&self, names: &std::collections::BTreeMap<String, String>) {
+        *self.shared.remote_names.lock() = names.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        self.shared.apply_remote_names();
+        (self.shared.repaint)();
     }
 
     pub fn set_volumes(&self, mounted: Vec<VolumeInfo>, volumes: Vec<VolumeInfo>, remotes: Vec<Remote>) {
@@ -210,10 +253,26 @@ impl Engine {
         let _ = self.commands.send(Command::SetIntervals(intervals));
     }
 
-    // Rescan-now has no button yet; the Dashboard brings it.
-    #[allow(dead_code)]
-    pub fn refresh(&self) {
-        let _ = self.commands.send(Command::Refresh);
+    /// Sets the Query naming the files Duplicate searches leave out. A search made under other
+    /// text is stale: the next look at the Duplicates redoes it.
+    pub fn set_duplicate_exclusions(&self, text: String) {
+        let mut current = self.shared.duplicate_exclusions.lock();
+        if *current != text {
+            *current = text;
+            drop(current);
+            (self.shared.repaint)();
+        }
+    }
+
+    /// Sync now: every online Volume (not the Remotes) is read again in full, even one Live
+    /// updates cover; an NTFS Volume's whole Master File Table is read.
+    pub fn sync_now(&self) {
+        let _ = self.commands.send(Command::SyncNow);
+    }
+
+    /// Syncs `folder` (a file's parent, for a file) alone, as a cancellable Task.
+    pub fn sync_folder(&self, folder: EntryId) {
+        sync_folder(&self.shared, folder);
     }
 
     pub fn is_busy(&self) -> bool {
@@ -222,7 +281,7 @@ impl Engine {
 
     /// Saves the Index and stops. If a sync is still running, the Index as filled so far is
     /// saved without waiting for it: the next launch's Catch-up completes it.
-    pub fn shutdown(&mut self) {
+    pub fn shutdown(&self) {
         if self.is_busy() {
             if let Some(path) = settings::index_path() {
                 let _saving = self.shared.saving.lock();
@@ -233,13 +292,45 @@ impl Engine {
             return;
         }
         let _ = self.commands.send(Command::Shutdown);
-        if let Some(indexer) = self.indexer.take() {
+        if let Some(indexer) = self.indexer.lock().take() {
             let _ = indexer.join();
         }
     }
 }
 
 impl Shared {
+    /// Copies the Remote names onto the Index's Remote Locations.
+    fn apply_remote_names(&self) {
+        let names = self.remote_names.lock().clone();
+        let mut index = self.index.write();
+        let remotes: Vec<_> = index
+            .volumes()
+            .filter(|(_, v)| v.is_remote())
+            .map(|(id, v)| (id, v.identity.clone()))
+            .collect();
+        for (id, identity) in remotes {
+            index.set_remote_name(id, names.get(&identity).map(String::as_str));
+        }
+    }
+
+    /// Whether Volumes are being read now (a Sync or Catch-up Task is running).
+    pub fn is_syncing(&self) -> bool {
+        matches!(self.status.lock().phase, Phase::Syncing { .. })
+    }
+
+    /// Whether the saved Index is still being loaded.
+    pub fn is_loading(&self) -> bool {
+        matches!(self.status.lock().phase, Phase::LoadingIndex)
+    }
+
+    /// The mount paths of the Volumes being read now.
+    pub fn syncing_mounts(&self) -> Vec<PathBuf> {
+        match &self.status.lock().phase {
+            Phase::Syncing { volumes, .. } => volumes.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn hashing_now(&self) -> bool {
         self.hashing.load(Ordering::Relaxed)
     }
@@ -300,6 +391,7 @@ fn run_indexer(
     let returned = reconcile_volumes(shared, &mounted, &wanted, &remotes);
     // The saved Index is already on screen; Catch-up runs where it has gone stale, and for a
     // Volume that is back (possibly at another path).
+    let retry_tx = command_tx.clone();
     let mut live = Live::new(shared, command_tx);
     #[cfg(target_os = "macos")]
     let replaying = {
@@ -329,9 +421,15 @@ fn run_indexer(
     let mut quiet = false;
     // The lost-changes count the pending re-walk of every Volume answers.
     let mut answers: Option<u32> = None;
+    // Volumes the user asked to Sync now: read in full, not caught up.
+    let mut forced: HashSet<VolumeId> = HashSet::new();
+    // The first sync after launch is the Catch-up of the saved Index.
+    let mut launch = true;
     loop {
         if !pending.is_empty() {
-            sync_volumes(shared, &pending, quiet);
+            sync_volumes(shared, &pending, &forced, launch, quiet, &retry_tx);
+            launch = false;
+            forced.clear();
             if let Some(count) = answers.take() {
                 release_position(shared, count);
             }
@@ -376,6 +474,7 @@ fn run_indexer(
                 {
                     pending.push(id);
                 }
+                forced.extend(target);
             }
             Ok(Command::Forget(identity)) => {
                 let mut index = shared.index.write();
@@ -391,6 +490,23 @@ fn run_indexer(
                 // Others queued for catch-up stay queued.
                 let index = shared.index.read();
                 pending.retain(|&id| index.volume(id).is_some());
+            }
+            Ok(Command::SyncNow) => {
+                // Every online Volume, not the Remotes, read again in full whatever Live updates cover.
+                pending = shared
+                    .index
+                    .read()
+                    .volumes()
+                    .filter(|(_, v)| v.online && !v.is_remote())
+                    .map(|(id, _)| id)
+                    .collect();
+                forced.extend(pending.iter().copied());
+                let count = shared.live_lost.load(Ordering::Relaxed);
+                if pending.is_empty() {
+                    release_position(shared, count);
+                } else {
+                    answers = Some(count);
+                }
             }
             Ok(Command::Refresh) => {
                 pending = shared.index.read().volumes().filter(|(_, v)| v.online).map(|(id, _)| id).collect();
@@ -509,7 +625,7 @@ pub fn last_synced_label(oldest: Option<Option<i64>>, now: i64) -> Option<String
     })
 }
 
-/// The Location to sync for a Refresh of `identity`: only that one, and only while it is
+/// The Location to sync for a Sync now of `identity`: only that one, and only while it is
 /// reachable (an Offline Volume has no mount to read).
 fn refresh_target(index: &Index, identity: &str) -> Option<VolumeId> {
     let id = index.volume_with_identity(identity)?;
@@ -521,6 +637,7 @@ fn refresh_target(index: &Index, identity: &str) -> Option<VolumeId> {
 fn reconcile_volumes(shared: &Shared, mounted: &[VolumeInfo], wanted: &[VolumeInfo], remotes: &[Remote]) -> Vec<VolumeId> {
     let (mut added, failed) = ve_scan::reconcile(&shared.index, mounted, wanted);
     added.extend(ve_scan::reconcile_remotes(&shared.index, remotes));
+    shared.apply_remote_names();
     for (mount, e) in failed {
         shared.report(
             format!("volume {}", mount.display()),
@@ -536,7 +653,125 @@ fn reconcile_volumes(shared: &Shared, mounted: &[VolumeInfo], wanted: &[VolumeIn
     added
 }
 
-fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
+/// The folders being Synced alone now, so the same one is not started twice.
+static FOLDER_SYNCING: Mutex<Vec<EntryId>> = Mutex::new(Vec::new());
+
+struct FolderGuard(EntryId);
+
+impl Drop for FolderGuard {
+    fn drop(&mut self) {
+        FOLDER_SYNCING.lock().retain(|&f| f != self.0);
+    }
+}
+
+/// Whether a Sync of this folder alone is running.
+pub fn folder_syncing(folder: EntryId) -> bool {
+    FOLDER_SYNCING.lock().contains(&folder)
+}
+
+/// The folder a Sync this folder acts on: `entry` for a folder, its parent for a file.
+pub fn sync_target(index: &Index, entry: EntryId) -> EntryId {
+    if index.is_dir(entry) {
+        entry
+    } else {
+        index.parent(entry).unwrap_or(entry)
+    }
+}
+
+/// Syncs the folder of `entry` (its parent, for a file) alone, as a cancellable Task.
+pub fn sync_folder(shared: &Arc<Shared>, entry: EntryId) {
+    let folder = sync_target(&shared.index.read(), entry);
+    spawn_folder_sync(shared, folder);
+}
+
+/// Whether `folder` can be synced alone: always on an online local Volume, on a Remote only where
+/// its protocol lists one folder.
+pub fn can_sync_folder(index: &Index, folder: EntryId) -> bool {
+    let Some(volume) = index.volume_of(folder) else { return false };
+    let Some(v) = index.volume(volume) else { return false };
+    if v.is_remote() {
+        ve_scan::remote::can_sync_folder(index, volume)
+    } else {
+        v.online
+    }
+}
+
+/// Why a folder cannot be synced alone, for the disabled button's tooltip.
+pub const WHOLE_ONLY: &str = "This Remote can only be synced whole";
+
+/// Syncs one folder on a thread of its own, as a cancellable Task (kind Sync, "Sync <folder>").
+/// Its Progress is its own, so it neither blocks nor is stopped by a whole-Volume Sync.
+fn spawn_folder_sync(shared: &Arc<Shared>, folder: EntryId) {
+    let (label, path, remote) = {
+        let index = shared.index.read();
+        let remote = index.volume_of(folder).and_then(|v| index.volume(v)).is_some_and(|v| v.is_remote());
+        let path = index.path(folder);
+        let remote_name = index
+            .volume_of(folder)
+            .and_then(|v| index.volume(v))
+            .filter(|v| v.root == folder)
+            .and_then(Volume::remote_display_name);
+        let name = if let Some(name) = remote_name {
+            name
+        } else if index.parent(folder).is_none() || index.name(folder).is_empty() {
+            path.display().to_string()
+        } else {
+            index.name(folder).to_owned()
+        };
+        (format!("Sync {name}"), path, remote)
+    };
+    {
+        let mut syncing = FOLDER_SYNCING.lock();
+        if syncing.contains(&folder) {
+            return;
+        }
+        syncing.push(folder);
+    }
+    let guard = FolderGuard(folder);
+    let task = shared.tasks.begin(TaskKind::Sync, label, true);
+    let shared = shared.clone();
+    let spawned = thread::Builder::new().name("ve-sync-folder".into()).spawn({
+        let shared = shared.clone();
+        move || {
+            let _guard = guard;
+            let progress = Progress::default();
+            let done = AtomicBool::new(false);
+            let result = thread::scope(|scope| {
+                scope.spawn(|| {
+                    while !done.load(Ordering::Relaxed) {
+                        task.set_progress(progress.entries(), None);
+                        if task.is_cancelled() {
+                            progress.cancel.store(true, Ordering::Relaxed);
+                        }
+                        thread::sleep(PROGRESS_NUDGE);
+                    }
+                });
+                let result = if remote {
+                    ve_scan::remote::sync_folder(&shared.index, folder, &progress)
+                } else {
+                    ve_scan::sync_folder(&shared.index, folder, &path, &progress)
+                };
+                done.store(true, Ordering::Relaxed);
+                result
+            });
+            let outcome = match result {
+                _ if progress.cancelled() || task.is_cancelled() => Outcome::Cancelled,
+                Ok(()) => Outcome::Done(format!("{} Entries read", crate::format::count(progress.entries()))),
+                Err(e) => {
+                    let retry_shared = shared.clone();
+                    task.set_retry(Arc::new(move |_| spawn_folder_sync(&retry_shared, folder)));
+                    Outcome::Failed(e.to_string())
+                }
+            };
+            task.finish(outcome);
+            (shared.repaint)();
+        }
+    });
+    // No thread: the Task handle was dropped with the closure, which fails it as "stopped".
+    let _ = spawned;
+}
+
+fn sync_volumes(shared: &Shared, volumes: &[VolumeId], forced: &HashSet<VolumeId>, launch: bool, quiet: bool, retry: &Sender<Command>) {
     // Measuring (examples/gen_index.rs): the synthetic Index's Volume does not exist on disk.
     #[cfg(feature = "bench")]
     if std::env::var_os("VE_BENCH_MOUNT").is_some() {
@@ -548,10 +783,12 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
             .iter()
             .filter_map(|&id| Some((id, index.volume(id)?.mount.clone())))
             .collect();
-        let catching_up = volumes
-            .iter()
-            .filter_map(|&id| index.volume(id))
-            .any(|v| !index.children(v.root).is_empty());
+        // Catch-up is only the launch-time bring-up-to-date of a saved Index.
+        let catching_up = launch
+            && volumes
+                .iter()
+                .filter_map(|&id| index.volume(id))
+                .any(|v| !index.children(v.root).is_empty());
         (mounts, catching_up)
     };
     if !quiet {
@@ -564,24 +801,50 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
         });
     }
     let done = AtomicBool::new(false);
+    let failed: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    shared.progress.cancel.store(false, Ordering::Relaxed);
+    // A quiet journal poll is not a Task: it neither shows as busy nor takes long.
+    let task = (!quiet).then(|| {
+        let kind = if catching_up { TaskKind::CatchUp } else { TaskKind::Sync };
+        let label = match mounts.as_slice() {
+            [(id, m)] => {
+                let shown = shared.index.read().volume(*id).and_then(Volume::remote_display_name);
+                format!("{} {}", kind.name(), shown.unwrap_or_else(|| m.display().to_string()))
+            }
+            all => format!("{} {} Locations", kind.name(), all.len()),
+        };
+        shared.tasks.begin(kind, label, true)
+    });
     thread::scope(|outer| {
-        // The entry count moves without a notice, so the GUI is nudged while a sync runs.
-        if !quiet {
+        // The entry count moves without a notice, so the GUI is nudged while a sync runs; the
+        // same loop carries a cancel from the Task to the walk.
+        if let Some(task) = &task {
             outer.spawn(|| {
                 while !done.load(Ordering::Relaxed) {
-                    (shared.repaint)();
+                    task.set_progress(shared.progress.entries(), None);
+                    if task.is_cancelled() {
+                        shared.progress.cancel.store(true, Ordering::Relaxed);
+                    }
                     thread::sleep(PROGRESS_NUDGE);
                 }
             });
         }
         thread::scope(|scope| {
             for (id, mount) in &mounts {
+                let failed = &failed;
                 scope.spawn(move || {
                     let cause = format!("volume {}", mount.display());
                     let remote = shared.index.read().volume(*id).is_some_and(|v| v.is_remote());
                     // Stamped before the walk: changes made while it runs are not covered.
                     let started = now_secs();
-                    match ve_scan::sync(&shared.index, *id, &shared.progress) {
+                    let synced = if forced.contains(id) {
+                        ve_scan::sync_full(&shared.index, *id, &shared.progress)
+                    } else {
+                        ve_scan::sync(&shared.index, *id, &shared.progress)
+                    };
+                    match synced {
+                        // A cancelled walk covered only part of the Volume: it is not Synced.
+                        Ok(_) if shared.progress.cancelled() => {}
                         Ok(_) => {
                             shared.resolve(&cause);
                             // A Remote has no mount to measure: its sync stored what `df` said.
@@ -592,14 +855,44 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
                             };
                             shared.index.write().mark_synced(*id, started, capacity);
                         }
-                        Err(e) if remote => shared.report(cause, format!("Could not refresh {}: {e}", mount.display())),
-                        Err(e) => shared.report(cause, format!("Could not read {}: {e}", mount.display())),
+                        // A cancel interrupts the read; that is not a failure.
+                        Err(_) if shared.progress.cancelled() => {}
+                        Err(e) => {
+                            let identity = shared.index.read().volume(*id).map(|v| v.identity.clone());
+                            failed.lock().extend(identity);
+                            if remote {
+                                let shown = shared.index.read().volume(*id).and_then(|v| v.name.clone());
+                                let shown = shown.unwrap_or_else(|| mount.display().to_string());
+                                shared.report(cause, format!("Could not refresh {shown}: {e}"));
+                            } else {
+                                shared.report(cause, format!("Could not read {}: {e}", mount.display()));
+                            }
+                        }
                     }
                 });
             }
         });
         done.store(true, Ordering::Relaxed);
     });
+    if let Some(task) = task {
+        let entries = shared.progress.entries();
+        let failed = failed.into_inner();
+        let outcome = if shared.progress.cancelled() {
+            Outcome::Cancelled
+        } else if !failed.is_empty() {
+            let retry = retry.clone();
+            task.set_retry(Arc::new(move |_| {
+                for identity in &failed {
+                    let _ = retry.send(Command::RefreshLocation(identity.clone()));
+                }
+            }));
+            Outcome::Failed("A Location could not be read".into())
+        } else {
+            Outcome::Done(format!("{} Entries read", crate::format::count(entries)))
+        };
+        task.finish(outcome);
+    }
+    shared.progress.cancel.store(false, Ordering::Relaxed);
 }
 
 /// Saves the Index if an Entry changed since the last save, or always when `force`.
@@ -674,14 +967,39 @@ fn hashes_path() -> Option<PathBuf> {
 /// is still being read (hashing would chase every change). Cached hashes keep a repeat cheap.
 pub fn refresh_duplicates(shared: &Arc<Shared>) {
     let generation = shared.index.read().generation();
+    let exclusions = shared.duplicate_exclusions.lock().clone();
     let state = shared.duplicates.lock();
     // The Index moves on with every live change: a finished search is redone only once it is
     // a while old, so painting the panel does not keep every Volume being walked and hashed.
-    let current = state.generation == Some(generation) || state.finished.is_some_and(|at| at.elapsed() < DUPLICATES_MAX_AGE);
+    // New Duplicate Exclusions make a finished search stale at once.
+    let current = state.exclusions == exclusions
+        && (state.generation == Some(generation) || state.finished.is_some_and(|at| at.elapsed() < DUPLICATES_MAX_AGE));
     drop(state);
     if !current && matches!(shared.status.lock().phase, Phase::Idle) {
         start_hashing(shared);
     }
+}
+
+/// The files the Duplicate Exclusions Query selects (inside a matching folder counts), and why
+/// the Query was not usable. Unusable exclusions exclude nothing.
+fn excluded_files(shared: &Shared, text: &str) -> (BitSet, Option<String>) {
+    let index = shared.index.read();
+    let mut set = BitSet::new(index.capacity());
+    if text.trim().is_empty() {
+        return (set, None);
+    }
+    let context = QueryContext::new(shared.categories.clone(), Local::now());
+    let query = match Query::parse(text, &context) {
+        Ok(query) => query,
+        Err(e) => return (set, Some(e.to_string())),
+    };
+    let filter = Filter::compute(&index, Some(&query));
+    for i in 0..index.capacity() {
+        if filter.is_counted(EntryId(i as u32)) {
+            set.insert(i);
+        }
+    }
+    (set, None)
 }
 
 /// Searches for Duplicates redone at most this often because the Index changed.
@@ -702,12 +1020,23 @@ pub fn start_hashing(shared: &Arc<Shared>) {
     }
     let generation = shared.index.read().generation();
     let shared = shared.clone();
-    // Redraws the progress while files are hashed.
+    let task = Arc::new(Mutex::new(Some(shared.tasks.begin(
+        TaskKind::DuplicateSearch,
+        "Duplicate search".into(),
+        true,
+    ))));
+    let cancel = task.lock().as_ref().expect("just begun").cancel_flag();
+    // Redraws the progress while files are hashed, and reports it to the Task.
     {
         let shared = shared.clone();
+        let task = task.clone();
         let _ = thread::Builder::new().name("ve-hash-progress".into()).spawn(move || {
             while shared.hashing.load(Ordering::Relaxed) {
                 thread::sleep(PROGRESS_NUDGE);
+                let total = shared.hash_progress.total.load(Ordering::Relaxed);
+                if let Some(task) = task.lock().as_ref() {
+                    task.set_progress(shared.hash_progress.done.load(Ordering::Relaxed), (total > 0).then_some(total));
+                }
                 (shared.repaint)();
             }
         });
@@ -717,32 +1046,57 @@ pub fn start_hashing(shared: &Arc<Shared>) {
         move || {
             // Clears `hashing` even if the search panics, so Rescan and `dupe:` keep working.
             let done = HashingDone(shared.clone());
+            let exclusions = shared.duplicate_exclusions.lock().clone();
+            let (excluded, exclusion_error) = excluded_files(&shared, &exclusions);
             let path = hashes_path();
             let mut cache = path.as_deref().map(HashCache::load).unwrap_or_default();
-            let (groups, _) = duplicates::find(
+            let (groups, stats) = duplicates::find(
                 &shared.index,
                 &mut cache,
                 duplicates::DEFAULT_MIN_SIZE,
+                &excluded,
                 &shared.hash_progress,
-                &AtomicBool::new(false),
+                &cancel,
             );
             if let Some(path) = &path
                 && let Err(e) = cache.save(path)
             {
                 eprintln!("Could not save the hash cache to {}: {e}", path.display());
             }
-            let mut set = BitSet::new(shared.index.read().capacity());
-            for id in groups.iter().flat_map(|g| &g.files) {
-                set.insert(id.index());
-            }
+            let cancelled = cancel.load(Ordering::Relaxed);
             let mut state = shared.duplicates.lock();
-            state.groups = Arc::new(groups);
-            state.set = Arc::new(set);
-            state.version += 1;
-            state.generation = Some(generation);
+            if cancelled {
+                // What was found is partial: keep the earlier result, and do not start again
+                // until asked or the Index is old.
+                state.exclusions = exclusions;
+            } else {
+                let mut set = BitSet::new(shared.index.read().capacity());
+                for id in groups.iter().flat_map(|g| &g.files) {
+                    set.insert(id.index());
+                }
+                state.groups = Arc::new(groups);
+                state.set = Arc::new(set);
+                state.version += 1;
+                state.generation = Some(generation);
+                state.exclusions = exclusions;
+                state.skipped = stats.excluded;
+                state.exclusion_error = exclusion_error;
+            }
             state.finished = Some(std::time::Instant::now());
             drop(state);
             drop(done);
+            if let Some(task) = task.lock().take() {
+                task.finish(if cancelled {
+                    Outcome::Cancelled
+                } else if stats.excluded > 0 {
+                    Outcome::Done(format!(
+                        "{} files skipped by Duplicate Exclusions",
+                        crate::format::count(stats.excluded)
+                    ))
+                } else {
+                    Outcome::Done(String::new())
+                });
+            }
             (shared.repaint)();
         }
     });
@@ -751,19 +1105,29 @@ pub fn start_hashing(shared: &Arc<Shared>) {
     }
 }
 
-fn run_viewer(shared: &Arc<Shared>, queries: &Receiver<String>, categories: &CategoryMap) {
+fn run_viewer(shared: &Arc<Shared>, queries: &Receiver<String>, newest: &AtomicU64, categories: &CategoryMap) {
+    let mut seen_query = 0;
     let mut text = String::new();
     let mut query: Option<Query> = None;
     let mut computed: Option<(String, u64, u64)> = None;
     let mut last_compute = Instant::now() - VIEW_THROTTLE;
+    let mut order = FileOrder::default();
     let mut seen_duplicates = 0;
     loop {
         let received = match queries.recv_timeout(Duration::from_millis(200)) {
             Ok(latest) => {
                 text = queries.try_iter().last().unwrap_or(latest);
+                seen_query = newest.load(Ordering::Relaxed);
                 true
             }
-            Err(RecvTimeoutError::Timeout) => false,
+            Err(RecvTimeoutError::Timeout) => {
+                // Idle: sort the files of the newest generation now, so the next keystroke does
+                // not, at most as often as a changing Index gets a new View.
+                if last_compute.elapsed() >= VIEW_THROTTLE {
+                    order.ensure(&shared.index.read());
+                }
+                false
+            }
             Err(RecvTimeoutError::Disconnected) => return,
         };
         // `dupe:` needs the hashes.
@@ -807,8 +1171,11 @@ fn run_viewer(shared: &Arc<Shared>, queries: &Receiver<String>, categories: &Cat
         }
         let view = {
             let index = shared.index.read();
-            View::compute(&index, &text, query.as_ref(), categories)
+            let stale = || newest.load(Ordering::Relaxed) != seen_query;
+            View::compute_until(&index, &text, query.as_ref(), categories, &mut order, &stale)
         };
+        // Superseded mid-compute: the newer Query is in the channel; take it now.
+        let Some(view) = view else { continue };
         *shared.view.lock() = Some(Arc::new(view));
         computed = Some((text.clone(), generation, seen_duplicates));
         last_compute = Instant::now();
@@ -833,12 +1200,17 @@ mod tests {
             busy: AtomicBool::new(false),
             duplicates: Mutex::new(DuplicateState::default()),
             hash_progress: HashProgress::default(),
+            duplicate_exclusions: Mutex::new(String::new()),
+            remote_names: Mutex::new(HashMap::new()),
+            categories: CategoryMap::builtin(),
             hashing: AtomicBool::new(false),
             saving: Mutex::new(()),
             snapshotting: AtomicBool::new(false),
             live_position: AtomicU64::new(0),
             live_lost: AtomicU32::new(0),
             live_held: AtomicU64::new(0),
+            followed: Mutex::new(HashSet::new()),
+            tasks: Tasks::new(),
             repaint: Arc::new(|| {}),
         }
     }
@@ -918,7 +1290,7 @@ mod tests {
         let hit = index.insert(root, "quarterly-report.pdf", file);
         let categories = CategoryMap::builtin();
         let query = Query::parse("report", &QueryContext::new(categories.clone(), Local::now())).unwrap();
-        let view = View::compute(&index, "report", Some(&query), &categories);
+        let view = View::compute(&index, "report", Some(&query), &categories, &mut FileOrder::default());
         assert_eq!(view.flat, vec![hit]);
         assert_eq!(index.path(hit).to_string_lossy(), "ssh:me@box:/srv/quarterly-report.pdf");
         // Never synced, Manual: launch Catch-up leaves it alone; with an interval it is due.
