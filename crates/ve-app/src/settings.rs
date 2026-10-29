@@ -32,7 +32,7 @@ pub struct Settings {
     /// Light, Dark, or following the system.
     #[serde(default)]
     pub theme: ThemeChoice,
-    /// The Remotes (SSH and S3) the user added. Their refresh interval is in `volume_refresh_minutes`
+    /// The Remotes (SSH, S3 and FTP) the user added. Their refresh interval is in `volume_refresh_minutes`
     /// under their identity; Manual unless set.
     #[serde(default)]
     pub remotes: Vec<Remote>,
@@ -304,6 +304,26 @@ mod tests {
         // A settings file from before S3 Remotes has only SSH ones, in their old shape.
         let old: Settings = toml::from_str("[[remotes]]\nhost = \"me@box\"\npath = \"/srv\"\n").unwrap();
         assert_eq!(old.remotes, [Remote::new("me@box", "/srv").unwrap()]);
+    }
+
+    #[test]
+    fn an_ftp_remote_is_saved_with_its_tls_mode_and_no_password_and_ssh_and_s3_still_load_beside_it() {
+        let ftp = Remote::Ftp(ve_core::FtpRemote::new("ftp.example.com", 2121, "me", "/pub", ve_core::FtpTls::Plain).unwrap());
+        let mut s = Settings::default();
+        s.add_remote(ftp.clone(), 0);
+        s.add_remote(Remote::new("me@box", "/srv").unwrap(), 60);
+        s.add_remote(Remote::S3(S3Remote::new("bkt", "", "", "us-east-1", false, "", "").unwrap()), 0);
+        let text = toml::to_string(&s).unwrap();
+        assert!(!text.to_lowercase().contains("password") && !text.to_lowercase().contains("secret"), "{text}");
+        for field in ["host = \"ftp.example.com\"", "port = 2121", "user = \"me\"", "path = \"/pub\"", "tls = \"plain\""] {
+            assert!(text.contains(field), "{field} in {text}");
+        }
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(back.remotes, s.remotes, "each Remote comes back as the kind it was");
+        // TLS mode is Explicit unless the file says otherwise.
+        let file: Settings = toml::from_str("[[remotes]]\nhost = \"h\"\nport = 21\nuser = \"u\"\npath = \"/\"\n").unwrap();
+        assert_eq!(file.remotes, [Remote::Ftp(ve_core::FtpRemote::new("h", 21, "u", "/", ve_core::FtpTls::Explicit).unwrap())]);
+        assert_eq!(s.remote_refresh_minutes(&ftp), 0);
     }
 
     #[test]
