@@ -21,10 +21,12 @@
         <File Id="ViewEverythingExe" Name="view-everything.exe"
               Source="target\release\view-everything.exe" KeyPath="yes" />
       </Component>
-      <!-- Geist and Geist Mono are compiled into the executable; the OFL travels with them. -->
-      <Component Id="FontLicense" Guid="B49779C9-FC4C-44C4-99B8-36A03CF92DE4" Win64="yes">
-        <File Id="GeistOfl" Name="OFL-Geist.txt"
-              Source="crates\ve-app\assets\fonts\OFL.txt" KeyPath="yes" />
+      <!-- Instrument Sans and Instrument Serif are compiled into the executable; their OFL travels with them. -->
+      <Component Id="FontLicense" Guid="42329E3C-CAB4-4D55-A1D2-23A0A8027E08" Win64="yes">
+        <File Id="InstrumentSansOfl" Name="OFL-InstrumentSans.txt"
+              Source="crates\ve-app\assets\fonts\OFL-InstrumentSans.txt" KeyPath="yes" />
+        <File Id="InstrumentSerifOfl" Name="OFL-InstrumentSerif.txt"
+              Source="crates\ve-app\assets\fonts\OFL-InstrumentSerif.txt" />
       </Component>
     </DirectoryRef>
 
