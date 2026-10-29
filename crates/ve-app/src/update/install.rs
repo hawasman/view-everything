@@ -200,12 +200,16 @@ fn make_executable(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The exe inside the portable zip.
+/// The exe inside the portable zip. Nothing is extracted by entry name: only the one root-level
+/// entry named exactly `view-everything.exe` is read into memory, and a symlink there is refused.
 fn exe_from_zip(zip: &[u8]) -> Result<Vec<u8>, String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).map_err(|e| format!("bad zip: {e}"))?;
     let mut exe = archive
         .by_name("view-everything.exe")
         .map_err(|_| "the zip has no view-everything.exe".to_owned())?;
+    if !exe.is_file() || exe.is_symlink() {
+        return Err("view-everything.exe in the zip is not a regular file".to_owned());
+    }
     let mut bytes = Vec::new();
     exe.by_ref()
         .take(MAX_ASSET)
@@ -571,6 +575,40 @@ mod tests {
         zip.write_all(content).unwrap();
         zip.finish().unwrap();
         out.into_inner()
+    }
+
+    fn zip_with(name: &str, content: &[u8], symlink: bool) -> Vec<u8> {
+        let mut out = Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(&mut out);
+        let opts = zip::write::SimpleFileOptions::default();
+        if symlink {
+            zip.add_symlink(name, std::str::from_utf8(content).unwrap(), opts).unwrap();
+        } else {
+            zip.start_file(name, opts).unwrap();
+            zip.write_all(content).unwrap();
+        }
+        zip.finish().unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn zip_exe_with_dotdot_or_absolute_name_is_not_found() {
+        for name in [
+            "../view-everything.exe",
+            "sub/../../view-everything.exe",
+            "/view-everything.exe",
+            "C:/view-everything.exe",
+        ] {
+            let err = exe_from_zip(&zip_with(name, b"evil", false)).unwrap_err();
+            assert!(err.contains("no view-everything.exe"), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn zip_exe_that_is_a_symlink_is_refused() {
+        let err = exe_from_zip(&zip_with("view-everything.exe", b"/etc/passwd", true)).unwrap_err();
+        assert!(err.contains("not a regular file"), "{err}");
+        assert_eq!(exe_from_zip(&zip_with_exe(b"ok")).unwrap(), b"ok");
     }
 
     #[test]
