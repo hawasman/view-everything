@@ -17,25 +17,24 @@ pub(crate) fn walk(body: &str, mut f: impl FnMut(Ev)) -> Result<(), String> {
         match reader.read_event().map_err(|e| e.to_string())? {
             Event::Start(e) => {
                 text.clear();
-                f(Ev::Start(name(e.local_name().as_ref())?));
+                f(Ev::Start(e.local_name().into_inner()));
             }
             Event::Empty(e) => {
-                let local = e.local_name();
-                let name = name(local.as_ref())?;
+                let name = e.local_name().into_inner();
                 f(Ev::Start(name));
                 f(Ev::End(name, ""));
             }
             Event::End(e) => {
-                f(Ev::End(name(e.local_name().as_ref())?, text.trim()));
+                f(Ev::End(e.local_name().into_inner(), text.trim()));
                 text.clear();
             }
-            Event::Text(t) => text.push_str(&t.decode().map_err(|e| e.to_string())?),
-            Event::CData(c) => text.push_str(&c.decode().map_err(|e| e.to_string())?),
+            Event::Text(t) => text.push_str(&t.into_inner()),
+            Event::CData(c) => text.push_str(&c.into_inner()),
             Event::GeneralRef(r) => {
                 if let Some(c) = r.resolve_char_ref().map_err(|e| e.to_string())? {
                     text.push(c);
                 } else {
-                    match r.decode().map_err(|e| e.to_string())?.as_ref() {
+                    match r.into_inner().as_ref() {
                         "amp" => text.push('&'),
                         "lt" => text.push('<'),
                         "gt" => text.push('>'),
@@ -49,10 +48,6 @@ pub(crate) fn walk(body: &str, mut f: impl FnMut(Ev)) -> Result<(), String> {
             _ => {}
         }
     }
-}
-
-fn name(bytes: &[u8]) -> Result<&str, String> {
-    std::str::from_utf8(bytes).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
