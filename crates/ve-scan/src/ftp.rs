@@ -39,6 +39,8 @@ pub enum Line {
         is_dir: bool,
         size: u64,
         modified: i64,
+        /// The MLSD `create` fact; 0 when the server does not say (LIST never does).
+        created: i64,
     },
     /// Not an Entry: `.`/`..`, a symlink or special file, a `total` line, a blank.
     Skip,
@@ -127,12 +129,14 @@ fn parse_unix(line: &str, now: NaiveDateTime) -> Line {
             is_dir: true,
             size: 0,
             modified,
+            created: 0,
         },
         Some('-') if usable(name) => Line::Item {
             name: name.into(),
             is_dir: false,
             size,
             modified,
+            created: 0,
         },
         // Symlinks are skipped; so are devices, pipes and sockets.
         Some('l' | 'c' | 'b' | 'p' | 's') => Line::Skip,
@@ -194,6 +198,7 @@ fn parse_dos(line: &str) -> Line {
             is_dir,
             size,
             modified,
+            created: 0,
         }
     } else {
         unusable(name)
@@ -213,7 +218,7 @@ pub fn parse_list_line(line: &str, now: NaiveDateTime) -> Line {
     }
 }
 
-/// `YYYYMMDDHHMMSS[.sss]` (UTC), the `modify` fact of MLSD, as nanoseconds.
+/// `YYYYMMDDHHMMSS[.sss]` (UTC), the `modify` and `create` facts of MLSD, as nanoseconds.
 fn mlsd_time(text: &str) -> Option<i64> {
     let digits = text.split_once('.').map_or(text, |(d, _)| d);
     Some(nanos(NaiveDateTime::parse_from_str(digits, "%Y%m%d%H%M%S").ok()?))
@@ -227,7 +232,7 @@ pub fn parse_mlsd_line(line: &str) -> Line {
     let Some((facts, name)) = line.split_once("; ") else {
         return if line.trim().is_empty() { Line::Skip } else { Line::Bad };
     };
-    let (mut kind, mut size, mut modified) = (None, 0, 0);
+    let (mut kind, mut size, mut modified, mut created) = (None, 0, 0, 0);
     for fact in facts.split(';') {
         let Some((key, value)) = fact.split_once('=') else { continue };
         match key.to_ascii_lowercase().as_str() {
@@ -238,6 +243,7 @@ pub fn parse_mlsd_line(line: &str) -> Line {
             },
             // A server's missing or odd time is not a failed listing: the Entry has none.
             "modify" => modified = mlsd_time(value).unwrap_or(0),
+            "create" => created = mlsd_time(value).unwrap_or(0),
             _ => {}
         }
     }
@@ -247,12 +253,14 @@ pub fn parse_mlsd_line(line: &str) -> Line {
             is_dir: false,
             size,
             modified,
+            created,
         },
         Some("dir") if usable(name) => Line::Item {
             name: name.into(),
             is_dir: true,
             size: 0,
             modified,
+            created,
         },
         Some("file" | "dir") => unusable(name),
         Some("cdir" | "pdir") => Line::Skip,
@@ -388,6 +396,7 @@ fn walk(ftp: &mut RustlsFtpStream, root: &str, mut emit: impl FnMut(String, Entr
                     is_dir,
                     size,
                     modified,
+                    created,
                 } => {
                     let path = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
                     // Folders carry no size of their own: Folder Size is the sum of their contents.
@@ -399,6 +408,7 @@ fn walk(ftp: &mut RustlsFtpStream, root: &str, mut emit: impl FnMut(String, Entr
                             logical,
                             on_disk,
                             modified,
+                            created,
                             ..EntryMeta::default()
                         },
                     );
@@ -508,6 +518,7 @@ mod tests {
             is_dir,
             size,
             modified,
+            created: 0,
         }
     }
 
@@ -580,6 +591,16 @@ mod tests {
         assert_eq!(
             parse_mlsd_line("Type=DIR;Modify=20240102030405;UNIX.mode=0755; sub"),
             item("sub", true, 0, at(2024, 1, 2, 3, 4) + 5_000_000_000)
+        );
+        assert_eq!(
+            parse_mlsd_line("type=file;size=1;modify=20240102030405;create=20230101000000; made"),
+            Line::Item {
+                name: "made".into(),
+                is_dir: false,
+                size: 1,
+                modified: at(2024, 1, 2, 3, 4) + 5_000_000_000,
+                created: at(2023, 1, 1, 0, 0),
+            }
         );
         assert_eq!(parse_mlsd_line("type=cdir;modify=20240102030405; ."), Line::Skip);
         assert_eq!(parse_mlsd_line("type=pdir; .."), Line::Skip);

@@ -2,22 +2,24 @@
 //!
 //! The helper (`ve-fanotify`, a separate program) runs as root, started with pkexec only while
 //! the app runs. It reads fanotify events for the Volumes it is told about and writes the changed
-//! paths to its stdout, each followed by a NUL byte; `!lost` stands for an overflowed queue and `!ready` says that every Volume it was
-//! started with is being watched. It
-//! reads `mark <mount>` lines from stdin to watch Volumes mounted later, and exits at the end of
-//! stdin, which is how it stops when the app does. It writes no files.
+//! paths to its stdout, each followed by a NUL byte; `!lost` stands for an overflowed queue and
+//! `!ready` says that every Volume it was started with is being watched. It reads
+//! `mark <mount>` lines from stdin to watch Volumes mounted later, exits at the end of stdin
+//! (which is how it stops when the app does) and on any other input. It writes no files.
 
 use super::Event;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 /// The helper's file name, next to the app or in the packaged libexec folder.
 pub const HELPER: &str = "ve-fanotify";
+/// A record longer than a path can be (`PATH_MAX`) is not one.
+const MAX_RECORD: usize = 4096;
 const LIBEXEC: &str = "/usr/libexec/view-everything";
 
 /// The helper pkexec will run: it must have an absolute path.
@@ -37,6 +39,7 @@ pub fn describe_exit(code: Option<i32>) -> String {
         Some(126) => "Authentication was dismissed".to_owned(),
         Some(127) => "Authentication failed or the helper is not allowed to run".to_owned(),
         Some(2) => "This kernel does not allow the helper to watch filesystems".to_owned(),
+        Some(4) => "The helper could not watch any of the filesystems".to_owned(),
         Some(c) => format!("The helper stopped (exit code {c})"),
         None => "The helper was stopped by a signal".to_owned(),
     }
@@ -50,11 +53,12 @@ pub struct Helper {
 
 impl Helper {
     /// Asks for authentication with pkexec and starts `program` on `mounts`. Changes go to `events`.
-    /// `ready` is called once the helper is watching (after authentication). `ended` is called, with what to tell the user, if the helper ends on its own.
+    /// `ready` is called once the helper is watching (after authentication). `ended` is called,
+    /// with what to tell the user, if the helper ends on its own.
     pub fn start(
         program: &Path,
         mounts: &[PathBuf],
-        events: Sender<Event>,
+        events: SyncSender<Event>,
         ready: impl FnOnce() + Send + 'static,
         ended: impl FnOnce(String) + Send + 'static,
     ) -> io::Result<Helper> {
@@ -65,7 +69,7 @@ impl Helper {
 
     fn spawn(
         mut command: Command,
-        events: Sender<Event>,
+        events: SyncSender<Event>,
         ready: impl FnOnce() + Send + 'static,
         ended: impl FnOnce(String) + Send + 'static,
     ) -> io::Result<Helper> {
@@ -132,12 +136,26 @@ pub fn read_events(mut from: impl BufRead, mut send: impl FnMut(Event), ready: i
     let mut record = Vec::new();
     loop {
         record.clear();
-        match from.read_until(0, &mut record) {
+        match (&mut from).take(MAX_RECORD as u64 + 1).read_until(0, &mut record) {
             Ok(0) | Err(_) => return,
             Ok(_) => {}
         }
         if record.last() == Some(&0) {
             record.pop();
+        } else if record.len() > MAX_RECORD {
+            // Longer than any path: what follows up to the next NUL is skipped, and what it
+            // may have said is lost.
+            send(Event::Lost);
+            let mut rest = Vec::new();
+            loop {
+                rest.clear();
+                match (&mut from).take(MAX_RECORD as u64).read_until(0, &mut rest) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) if rest.last() == Some(&0) => break,
+                    Ok(_) => {}
+                }
+            }
+            continue;
         }
         if record == b"!ready" {
             if let Some(ready) = ready.take() {
@@ -147,7 +165,9 @@ pub fn read_events(mut from: impl BufRead, mut send: impl FnMut(Event), ready: i
             send(Event::Lost);
         } else if record.first() == Some(&b'/') {
             use std::os::unix::ffi::OsStringExt;
-            send(Event::Changed(PathBuf::from(std::ffi::OsString::from_vec(record.clone()))));
+            send(Event::Changed(PathBuf::from(std::ffi::OsString::from_vec(std::mem::take(
+                &mut record,
+            )))));
         }
     }
 }
@@ -156,6 +176,10 @@ pub fn read_events(mut from: impl BufRead, mut send: impl FnMut(Event), ready: i
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    fn channel() -> (SyncSender<Event>, mpsc::Receiver<Event>) {
+        mpsc::sync_channel(16)
+    }
 
     #[test]
     fn records_are_nul_separated_paths_and_a_lost_marker() {
@@ -179,8 +203,17 @@ mod tests {
     }
 
     #[test]
+    fn an_overlong_record_is_lost_and_skipped() {
+        let mut input = vec![b'/'; MAX_RECORD * 3];
+        input.extend(b"\0/after\0");
+        let mut got = Vec::new();
+        read_events(&input[..], |e| got.push(e), || ());
+        assert_eq!(got, [Event::Lost, Event::Changed("/after".into())]);
+    }
+
+    #[test]
     fn a_helper_that_ends_on_its_own_is_reported_with_its_exit_code() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = channel();
         let (done_tx, done_rx) = mpsc::channel();
         let mut sh = Command::new("sh");
         sh.args(["-c", "printf '/x/y\\0'; exit 126"]);
@@ -191,7 +224,7 @@ mod tests {
 
     #[test]
     fn stopping_closes_stdin_and_is_not_reported_as_a_failure() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = channel();
         let (done_tx, done_rx) = mpsc::channel::<String>();
         let mut sh = Command::new("sh");
         // Like the helper: runs until the end of stdin, and passes on what it was told to watch.

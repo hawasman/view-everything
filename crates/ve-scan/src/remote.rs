@@ -497,6 +497,8 @@ mod tests {
 
     #[test]
     fn a_record_parses_with_tabs_in_the_name_and_fractional_time() {
+        // find before 4.9 has no %B: it prints the directive as it is, and the time is unknown.
+        assert_eq!(Record::parse(b"1\t1\t1\t8\t1.0\t%B@\tf\ta").unwrap().created, 0);
         let r = Record::parse(b"1234\t2\t5120\t16\t1700000000.5000000000\t1600000000.2500000000\tf\tdir/odd\tname").unwrap();
         assert_eq!(
             r,

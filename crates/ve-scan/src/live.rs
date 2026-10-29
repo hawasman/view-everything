@@ -21,6 +21,15 @@ const QUIET: Duration = Duration::from_millis(800);
 /// A constant stream of news is applied at least this often.
 const LONGEST: Duration = Duration::from_secs(5);
 
+/// Events waiting for the applier at most: a source that is faster blocks (the kernel's own
+/// queue overflows, and that is reported as lost changes) instead of filling memory.
+pub const QUEUE: usize = 8192;
+/// More distinct folders than this in one burst (a `git checkout`, a `cargo build`) are
+/// re-walked as one subtree instead of re-listed one by one.
+const MAX_FOLDERS: usize = 256;
+/// More subtrees than this, and the Volumes are re-walked.
+const MAX_SUBTREES: usize = 64;
+
 /// What a source reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -52,21 +61,63 @@ impl Batch {
         *self == Batch::default()
     }
 
+    /// Whether a re-walk of a subtree of this batch (or of every Volume) already covers `path`.
+    fn covered(&self, path: &Path) -> bool {
+        self.lost || path.ancestors().any(|a| self.subtrees.contains(a))
+    }
+
     pub fn push(&mut self, event: Event) {
         match event {
             // Re-listing the parent finds a create, remove or rename of this path as well.
             Event::Changed(path) => {
-                if let Some(parent) = path.parent() {
+                if let Some(parent) = path.parent()
+                    && !self.covered(parent)
+                {
                     self.folders.insert(parent.to_path_buf());
+                    if self.folders.len() > MAX_FOLDERS {
+                        // Their common folder is walked once; the batch stays small.
+                        if let Some(common) = common_folder(&self.folders) {
+                            self.push(Event::Subtree(common));
+                        }
+                        self.folders.clear();
+                    }
                 }
             }
             Event::Subtree(path) => {
+                if self.covered(&path) {
+                    return;
+                }
+                self.subtrees.retain(|s| !s.starts_with(&path));
+                self.folders.retain(|f| !f.starts_with(&path));
                 self.subtrees.insert(path);
+                if self.subtrees.len() > MAX_SUBTREES {
+                    self.lost = true;
+                    self.subtrees.clear();
+                    self.folders.clear();
+                }
             }
-            Event::Lost => self.lost = true,
+            Event::Lost => {
+                self.lost = true;
+                self.subtrees.clear();
+                self.folders.clear();
+            }
             Event::Position(at) => self.position = self.position.max(Some(at)),
         }
     }
+}
+
+/// The deepest folder that holds all of `folders`.
+fn common_folder(folders: &BTreeSet<PathBuf>) -> Option<PathBuf> {
+    // Sorted, so the first and last differ the most.
+    let (first, last) = (folders.first()?, folders.last()?);
+    let mut common = PathBuf::new();
+    for (a, b) in first.components().zip(last.components()) {
+        if a != b {
+            break;
+        }
+        common.push(a);
+    }
+    Some(common)
 }
 
 /// Reads `events` until the sender is gone, calling `apply` with each burst once it has been
@@ -145,6 +196,31 @@ mod tests {
         assert_eq!(b.subtrees.len(), 1);
         assert_eq!(b.position, Some(7));
         assert!(!b.lost);
+    }
+
+    #[test]
+    fn a_storm_collapses_to_one_subtree_and_stays_small() {
+        let mut batch = Batch::default();
+        for i in 0..5000 {
+            batch.push(Event::Changed(format!("/v/repo/d{}/sub{}/f", i % 50, i).into()));
+        }
+        batch.push(Event::Changed("/v/other/f".into()));
+        assert!(batch.folders.len() <= MAX_FOLDERS + 1, "{}", batch.folders.len());
+        assert!(!batch.lost);
+        assert!(batch.subtrees.iter().all(|s| s.starts_with("/v")), "{:?}", batch.subtrees);
+        // Nothing under a walked subtree is listed on top of it.
+        for f in &batch.folders {
+            assert!(!f.ancestors().any(|a| batch.subtrees.contains(a)));
+        }
+    }
+
+    #[test]
+    fn many_unrelated_subtrees_become_a_full_re_walk() {
+        let mut batch = Batch::default();
+        for i in 0..=MAX_SUBTREES {
+            batch.push(Event::Subtree(format!("/v{i}/x").into()));
+        }
+        assert!(batch.lost && batch.subtrees.is_empty());
     }
 
     #[test]

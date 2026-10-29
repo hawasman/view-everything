@@ -39,11 +39,11 @@ When a Location was last brought fully up to date. The app's overall Last Synced
 _Avoid_: last updated, last scan, last refresh
 
 **Catch-up**:
-Bringing a Location up to date with changes made while the app was not running, done at launch for Locations whose Last Synced is stale.
+Bringing a Location up to date with changes made while the app was not running, done at launch for Locations whose Last Synced is stale. On macOS a Volume with a saved event id is caught up by replaying the changes since it instead of a re-walk.
 _Avoid_: rescan, resync, refresh
 
 **Live updates**:
-Following changes to a Location while the app runs, from FSEvents on macOS or the opt-in `fanotify` helper on Linux, instead of waiting for a re-walk. On macOS the same source also provides Catch-up, by replaying the changes since the last saved event id.
+Following changes to a local Volume while the app runs, from FSEvents on macOS or the opt-in `fanotify` helper on Linux, instead of waiting for a re-walk. On macOS the same source also provides Catch-up, by replaying the changes since the last saved event id.
 _Avoid_: watching, monitoring, real-time sync
 
 **Snapshot**:

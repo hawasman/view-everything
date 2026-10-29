@@ -14,6 +14,15 @@ const MASK: u64 = libc::FAN_CREATE
     | libc::FAN_ONDIR;
 const EVENT_INFO_DFID_NAME: u8 = 2;
 const EVENT_INFO_DFID: u8 = 3;
+/// Filesystems that can be watched at once, and the longest line the app may send: a caller
+/// that goes past either is not the app.
+const MAX_MARKS: usize = 256;
+const MAX_LINE: usize = 1 << 16;
+/// What `run` returns: the kernel refuses fanotify, no filesystem could be watched, and input the
+/// app would never send.
+const EXIT_NO_FANOTIFY: i32 = 2;
+const EXIT_NOTHING_WATCHED: i32 = 4;
+const EXIT_BAD_INPUT: i32 = 3;
 const EVENT_HEADER: usize = std::mem::size_of::<libc::fanotify_event_metadata>();
 
 /// A change as the kernel reports it: the folder as a file handle, and the name in it.
@@ -120,7 +129,8 @@ fn is_mount_point(path: &Path) -> bool {
 }
 
 fn mark(fan: &OwnedFd, mount: &Path) -> io::Result<Mark> {
-    if !is_mount_point(mount) {
+    // Followed links are not what was asked for: only a mount point named as it really is.
+    if std::fs::canonicalize(mount).ok().as_deref() != Some(mount) || !is_mount_point(mount) {
         return Err(io::Error::other("not a mount point"));
     }
     mark_filesystem(fan, mount)
@@ -193,10 +203,15 @@ fn drain(fan: &OwnedFd, marks: &[Mark], out: &mut impl Write) -> io::Result<()> 
         if n == 0 {
             return Ok(());
         }
+        // A burst in one folder names the folder once per read: the app re-lists it either way.
+        let mut seen = std::collections::HashSet::new();
         for event in parse(&buf[..n as usize]) {
             match event {
                 Parsed::Overflow => out.write_all(b"!lost\0")?,
                 Parsed::Change(raw) => {
+                    if !seen.insert((raw.fsid, raw.handle.clone())) {
+                        continue;
+                    }
                     if let Some(mut path) = record(marks, &raw) {
                         path.push(0);
                         out.write_all(&path)?;
@@ -209,32 +224,36 @@ fn drain(fan: &OwnedFd, marks: &[Mark], out: &mut impl Write) -> io::Result<()> 
 }
 
 pub fn run(mounts: Vec<OsString>) -> i32 {
-    // SAFETY: plain syscall; dies with the parent (pkexec), whatever happens to the app.
-    unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) };
+    // SAFETY: plain syscalls. No new privileges can be gained by anything this process runs; and
+    // it ends with pkexec, its parent. The normal stop is the end of stdin, when the app ends.
+    unsafe {
+        libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+    }
     let fan = match init() {
         Ok(fan) => fan,
         Err(e) => {
             eprintln!("ve-fanotify: fanotify_init: {e}");
-            return 2;
+            return EXIT_NO_FANOTIFY;
         }
     };
     let mut marks = Vec::new();
     let asked = mounts.len();
-    for mount in mounts {
+    for mount in mounts.into_iter().take(MAX_MARKS) {
         match mark(&fan, Path::new(&mount)) {
-            Ok(m) => marks.push(m),
+            Ok(m) => add(&mut marks, m),
             Err(e) => eprintln!("ve-fanotify: {}: {e}", mount.to_string_lossy()),
         }
     }
     if asked > 0 && marks.is_empty() {
         eprintln!("ve-fanotify: no filesystem could be watched");
-        return 2;
+        return EXIT_NOTHING_WATCHED;
     }
     let mut out = io::stdout().lock();
     if out.write_all(b"!ready\0").and_then(|()| out.flush()).is_err() {
         return 0;
     }
-    let mut told = Vec::new();
+    let mut told: Vec<u8> = Vec::new();
     loop {
         let mut fds = [
             libc::pollfd {
@@ -266,18 +285,31 @@ pub fn run(mounts: Vec<OsString>) -> i32 {
             told.extend_from_slice(&chunk[..n as usize]);
             while let Some(end) = told.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = told.drain(..=end).collect();
-                if let Some(path) = line[..end].strip_prefix(b"mark ") {
-                    let path = PathBuf::from(OsString::from_vec(path.to_vec()));
-                    // Only an absolute folder: a malformed line must not widen what is watched.
-                    if path.is_absolute() {
-                        match mark(&fan, &path) {
-                            Ok(m) => marks.push(m),
-                            Err(e) => eprintln!("ve-fanotify: {}: {e}", path.display()),
-                        }
-                    }
+                // The only thing the app says: `mark` and the absolute mount point of a
+                // filesystem mounted later. Anything else ends the helper.
+                let Some(path) = line[..end].strip_prefix(b"mark ") else {
+                    return EXIT_BAD_INPUT;
+                };
+                let path = PathBuf::from(OsString::from_vec(path.to_vec()));
+                if !path.is_absolute() || marks.len() >= MAX_MARKS {
+                    return EXIT_BAD_INPUT;
+                }
+                match mark(&fan, &path) {
+                    Ok(m) => add(&mut marks, m),
+                    Err(e) => eprintln!("ve-fanotify: {}: {e}", path.display()),
                 }
             }
+            if told.len() > MAX_LINE {
+                return EXIT_BAD_INPUT;
+            }
         }
+    }
+}
+
+/// Keeps a filesystem once, however many times it is named.
+fn add(marks: &mut Vec<Mark>, mark: Mark) {
+    if !marks.iter().any(|m| m.fsid == mark.fsid) {
+        marks.push(mark);
     }
 }
 

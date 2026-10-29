@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Sender, SyncSender};
 use std::thread;
 use ve_core::{SyncState, VolumeId};
 use ve_scan::live::{self, Event};
@@ -18,7 +18,7 @@ const POSITION_FILE: &str = "fsevents-id";
 
 pub(super) struct Live {
     #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
-    events: Sender<Event>,
+    events: SyncSender<Event>,
     /// Whether a source is running now, so the Volumes in `watched` are followed live.
     active: Arc<AtomicBool>,
     /// Volumes count as followed only if walked after this time (Unix seconds): a source without
@@ -43,7 +43,7 @@ pub(super) struct Live {
 impl Live {
     /// Starts the thread that applies what sources report.
     pub(super) fn new(shared: &Arc<Shared>, commands: Sender<Command>) -> Live {
-        let (events, received) = mpsc::channel();
+        let (events, received) = mpsc::sync_channel(live::QUEUE);
         let ignored = super::settings::index_path().and_then(|p| p.parent().map(Path::to_path_buf));
         let applier = {
             let (shared, commands) = (shared.clone(), commands.clone());
@@ -55,8 +55,14 @@ impl Live {
                         batch.subtrees.retain(|f| !f.starts_with(own));
                     }
                     let lost = live::apply(&shared.index, &batch, &shared.progress);
+                    if lost {
+                        shared.live_lost.fetch_add(1, Ordering::Relaxed);
+                    }
                     if let Some(position) = batch.position {
-                        shared.live_position.store(position, Ordering::Relaxed);
+                        // While a re-walk is owed the position is held back.
+                        let held = shared.live_lost.load(Ordering::Relaxed) != 0;
+                        let slot = if held { &shared.live_held } else { &shared.live_position };
+                        slot.fetch_max(position, Ordering::Relaxed);
                     }
                     if lost {
                         let _ = commands.send(Command::Refresh);
@@ -144,7 +150,7 @@ impl Live {
         if self.watched.is_empty() {
             return;
         }
-        match live::fsevents::Stream::start(&self.watched, Some(since), self.events.clone()) {
+        match live::fsevents::Stream::start(&self.watched, since, self.events.clone()) {
             Ok(stream) => {
                 self.stream = Some(stream);
                 self.active.store(true, Ordering::Relaxed);
@@ -186,10 +192,10 @@ impl Live {
             );
             return;
         };
-        let (ready, ended) = (self.active.clone(), self.active.clone());
-        let (shared, commands, gone) = (self.shared.clone(), self.commands.clone(), self.helper_ended.clone());
-        let on_ready = self.shared.clone();
-        let (since, refresh) = (self.followed_since.clone(), self.commands.clone());
+        let (active, ended_flag, since) = (self.active.clone(), self.helper_ended.clone(), self.followed_since.clone());
+        let (shared, commands) = (self.shared.clone(), self.commands.clone());
+        let (shared_ready, commands_ready) = (shared.clone(), commands.clone());
+        let active_ended = active.clone();
         let started = {
             live::fanotify::Helper::start(
                 &program,
@@ -199,13 +205,13 @@ impl Live {
                     // Nothing is replayed: walk once now that changes are being reported, and
                     // count the Volumes as followed from that walk on.
                     since.store(super::now_secs(), Ordering::Relaxed);
-                    ready.store(true, Ordering::Relaxed);
-                    on_ready.resolve("live");
-                    let _ = refresh.send(Command::Refresh);
+                    active.store(true, Ordering::Relaxed);
+                    shared_ready.resolve("live");
+                    let _ = commands_ready.send(Command::Refresh);
                 },
                 move |why| {
-                    ended.store(false, Ordering::Relaxed);
-                    gone.store(true, Ordering::Relaxed);
+                    active_ended.store(false, Ordering::Relaxed);
+                    ended_flag.store(true, Ordering::Relaxed);
                     shared.report("live", format!("{why}; changes are found by the periodic re-walk"));
                     // Whatever changed while the helper was not watching is found now.
                     let _ = commands.send(Command::Refresh);

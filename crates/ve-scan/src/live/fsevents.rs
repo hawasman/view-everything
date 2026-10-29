@@ -5,24 +5,26 @@
 //! delivered on a dispatch queue, so no run loop is needed.
 
 use super::Event;
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{CStr, OsStr, c_char, c_void};
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 
 type Id = u64;
 type Flags = u32;
 type CfIndex = isize;
 type Callback = extern "C" fn(*const c_void, *mut c_void, usize, *mut c_void, *const Flags, *const Id);
 
-const SINCE_NOW: Id = u64::MAX;
 const UTF8: u32 = 0x0800_0100;
 const NO_DEFER: Flags = 0x02;
+const WATCH_ROOT: Flags = 0x04;
 const FILE_EVENTS: Flags = 0x10;
 
 const MUST_SCAN_SUBDIRS: Flags = 0x01;
 const USER_DROPPED: Flags = 0x02;
 const KERNEL_DROPPED: Flags = 0x04;
 const IDS_WRAPPED: Flags = 0x08;
+const HISTORY_DONE: Flags = 0x10;
 const ROOT_CHANGED: Flags = 0x20;
 
 /// Seconds FSEvents may gather changes before delivering them.
@@ -80,17 +82,15 @@ pub struct Stream {
     stream: *mut c_void,
     queue: *mut c_void,
     /// The callback's sender, freed after the stream is stopped.
-    sender: *mut Sender<Event>,
+    sender: *mut SyncSender<Event>,
 }
 
 // SAFETY: the pointers are only used to stop and release the stream when it is dropped.
 unsafe impl Send for Stream {}
 
 impl Stream {
-    /// Follows changes under `mounts`, first replaying those after event id `since` (the changes
-    /// from now on when `None`).
-    pub fn start(mounts: &[PathBuf], since: Option<u64>, events: Sender<Event>) -> Result<Stream, String> {
-        use std::os::unix::ffi::OsStrExt;
+    /// Follows changes under `mounts`, first replaying those after event id `since`.
+    pub fn start(mounts: &[PathBuf], since: Id, events: SyncSender<Event>) -> Result<Stream, String> {
         let strings: Vec<*const c_void> = mounts
             .iter()
             .map(|m| {
@@ -118,9 +118,9 @@ impl Stream {
                 deliver,
                 &context,
                 paths,
-                since.unwrap_or(SINCE_NOW),
+                since,
                 LATENCY,
-                FILE_EVENTS | NO_DEFER,
+                FILE_EVENTS | NO_DEFER | WATCH_ROOT,
             )
         };
         // SAFETY: each object was created above and is no longer needed by us.
@@ -135,10 +135,20 @@ impl Stream {
         }
         // SAFETY: a valid stream; the queue is serial (null attributes) and kept until drop.
         let queue = unsafe { dispatch_queue_create(c"ve-fsevents".as_ptr(), std::ptr::null()) };
-        let running = unsafe {
-            FSEventStreamSetDispatchQueue(stream, queue);
-            FSEventStreamStart(stream) != 0
-        };
+        // SAFETY: the stream and the queue are valid (the queue is checked just here).
+        let running = !queue.is_null()
+            && unsafe {
+                FSEventStreamSetDispatchQueue(stream, queue);
+                FSEventStreamStart(stream) != 0
+            };
+        if queue.is_null() {
+            // SAFETY: never started, so no callback can run.
+            unsafe {
+                FSEventStreamRelease(stream);
+                drop(Box::from_raw(sender));
+            }
+            return Err("FSEvents could not make its queue".to_owned());
+        }
         let this = Stream { stream, queue, sender };
         if running {
             Ok(this)
@@ -157,21 +167,21 @@ impl Drop for Stream {
             FSEventStreamInvalidate(self.stream);
             FSEventStreamRelease(self.stream);
             // A callback already running on the queue finishes before the sender is freed.
-            dispatch_sync_f(self.queue, std::ptr::null_mut(), nothing);
+            dispatch_sync_f(self.queue, std::ptr::null_mut(), barrier);
             dispatch_release(self.queue);
             drop(Box::from_raw(self.sender));
         }
     }
 }
 
-extern "C" fn nothing(_: *mut c_void) {}
+extern "C" fn barrier(_: *mut c_void) {}
 
 extern "C" fn deliver(_: *const c_void, info: *mut c_void, count: usize, paths: *mut c_void, flags: *const Flags, ids: *const Id) {
     // SAFETY: `info` is the sender given at creation; FSEvents passes `count` C-string paths,
     // flags and ids (we did not ask for CFTypes).
     let (sender, paths, flags, ids) = unsafe {
         (
-            &*info.cast::<Sender<Event>>(),
+            &*info.cast::<SyncSender<Event>>(),
             std::slice::from_raw_parts(paths.cast::<*const c_char>(), count),
             std::slice::from_raw_parts(flags, count),
             std::slice::from_raw_parts(ids, count),
@@ -179,8 +189,11 @@ extern "C" fn deliver(_: *const c_void, info: *mut c_void, count: usize, paths: 
     };
     for ((&path, &flag), &id) in paths.iter().zip(flags).zip(ids) {
         // SAFETY: each path is a valid C string for the duration of the callback.
-        let path = PathBuf::from(unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned());
-        let _ = sender.send(classify(path, flag));
+        let path = PathBuf::from(OsStr::from_bytes(unsafe { CStr::from_ptr(path) }.to_bytes()));
+        // The end of the replay marks no change.
+        if flag & HISTORY_DONE == 0 {
+            let _ = sender.send(classify(path, flag));
+        }
         let _ = sender.send(Event::Position(id));
     }
 }
@@ -207,5 +220,6 @@ mod tests {
         assert_eq!(classify(p(), 0x1000), Event::Changed(p()));
         assert_eq!(classify(p(), MUST_SCAN_SUBDIRS | KERNEL_DROPPED), Event::Subtree(p()));
         assert_eq!(classify(p(), IDS_WRAPPED), Event::Lost);
+        assert_eq!(classify(p(), ROOT_CHANGED), Event::Lost);
     }
 }

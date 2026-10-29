@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -60,6 +60,11 @@ pub struct Shared {
     snapshotting: AtomicBool,
     /// The FSEvents event id up to which changes are in the Index; 0 when there is none.
     live_position: AtomicU64,
+    /// Changes were missed and a re-walk of every Volume is owed (counts them): the position
+    /// reported meanwhile waits in `live_held`, so a restart before the re-walk is done does not
+    /// replay from past the lost changes.
+    live_lost: AtomicU32,
+    live_held: AtomicU64,
     /// Called from the background threads whenever something the GUI shows has changed.
     repaint: Repaint,
 }
@@ -105,7 +110,6 @@ enum Command {
     RefreshLocation(String),
     /// Drops an Offline Volume, by identity, from the Index.
     Forget(String),
-    #[allow(dead_code)]
     Refresh,
     SetIntervals(Intervals),
     /// Turns the Linux `fanotify` helper on or off.
@@ -147,16 +151,18 @@ impl Engine {
             saving: Mutex::new(()),
             snapshotting: AtomicBool::new(false),
             live_position: AtomicU64::new(0),
+            live_lost: AtomicU32::new(0),
+            live_held: AtomicU64::new(0),
             repaint,
         });
         let (commands, command_rx) = mpsc::channel();
         let (queries, query_rx) = mpsc::channel();
         let indexer = {
             let shared = shared.clone();
-            let again = commands.clone();
+            let command_tx = commands.clone();
             thread::Builder::new()
                 .name("ve-indexer".into())
-                .spawn(move || run_indexer(&shared, mounted, volumes, remotes, intervals, &command_rx, again))
+                .spawn(move || run_indexer(&shared, mounted, volumes, remotes, intervals, &command_rx, command_tx))
                 .expect("spawn indexer thread")
         };
         {
@@ -319,9 +325,14 @@ fn run_indexer(
     let mut last_attempt: HashMap<VolumeId, Instant> = HashMap::new();
     // Journal polls run every few seconds; they neither show as busy nor save every time.
     let mut quiet = false;
+    // The lost-changes count the pending re-walk of every Volume answers.
+    let mut answers: Option<u32> = None;
     loop {
         if !pending.is_empty() {
             sync_volumes(shared, &pending, quiet);
+            if let Some(count) = answers.take() {
+                release_position(shared, count);
+            }
             let now = Instant::now();
             last_attempt.extend(pending.drain(..).map(|id| (id, now)));
             if !quiet || last_save.elapsed() >= POLL_SAVE_INTERVAL {
@@ -379,7 +390,15 @@ fn run_indexer(
                 let index = shared.index.read();
                 pending.retain(|&id| index.volume(id).is_some());
             }
-            Ok(Command::Refresh) => pending = shared.index.read().volumes().filter(|(_, v)| v.online).map(|(id, _)| id).collect(),
+            Ok(Command::Refresh) => {
+                pending = shared.index.read().volumes().filter(|(_, v)| v.online).map(|(id, _)| id).collect();
+                let count = shared.live_lost.load(Ordering::Relaxed);
+                if pending.is_empty() {
+                    release_position(shared, count);
+                } else {
+                    answers = Some(count);
+                }
+            }
             Ok(Command::SetIntervals(new)) => {
                 intervals = new;
                 pending = Vec::new();
@@ -411,6 +430,20 @@ fn run_indexer(
         if !pending.is_empty() && !quiet {
             shared.busy.store(true, Ordering::Relaxed);
         }
+    }
+}
+
+/// Everything missed up to `count` lost-changes reports is in the Index now: the position held
+/// back meanwhile is the one to save.
+fn release_position(shared: &Shared, count: u32) {
+    if shared
+        .live_lost
+        .compare_exchange(count, 0, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        shared
+            .live_position
+            .fetch_max(shared.live_held.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 }
 
@@ -587,6 +620,8 @@ fn save_if_changed(shared: &Arc<Shared>, path: Option<&Path>, saved_generation: 
             // A Location still on its first scan would make a partial Snapshot, and a comparison
             // with it would call everything the scan has not reached yet removed.
             if matches!(index.oldest_synced(), Some(Some(_))) {
+                // The rebuild after a format change is complete.
+                shared.resolve("Index format");
                 snapshot_first_save_of_day(shared, path);
             }
         }
@@ -780,6 +815,8 @@ mod tests {
             saving: Mutex::new(()),
             snapshotting: AtomicBool::new(false),
             live_position: AtomicU64::new(0),
+            live_lost: AtomicU32::new(0),
+            live_held: AtomicU64::new(0),
             repaint: Arc::new(|| {}),
         }
     }
