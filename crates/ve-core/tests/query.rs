@@ -360,6 +360,9 @@ fn parent_matches_entries_directly_inside_a_folder() {
     assert!(matches("parent:/ !x", &at("/home")));
     assert!(matches("parent:\"/my docs\"", &at("/my docs/a")));
     assert!(matches("parent:/a|parent:/b", &at("/b/c")));
+    // A Location root is inside nothing.
+    assert!(!matches("parent:/", &at("/")));
+    assert!(!matches("parent:C:/", &at("C:/")));
     assert!(Query::parse("parent:", &context()).is_err());
 }
 

@@ -196,7 +196,8 @@ impl Term {
                 .path
                 .expect("Query::needs_path requires candidates to carry their path")
                 .rsplit_once('/')
-                .is_some_and(|(parent, _)| eq_ignore_case(parent.trim_end_matches('/'), folder)),
+                // A Location root's path ends in `/` (`/`, `C:/`): nothing follows it, so it has no parent.
+                .is_some_and(|(parent, leaf)| !leaf.is_empty() && eq_ignore_case(parent.trim_end_matches('/'), folder)),
             Term::Depth { min, max } => (*min..=*max).contains(&candidate.depth),
             Term::Child(text) => {
                 candidate.is_dir
