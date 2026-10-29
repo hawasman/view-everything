@@ -44,6 +44,23 @@ containing `/` or `\` matches the full path. Text ignores case unless told other
 `case:` and `wholeword:` prefix a plain or wildcard term, chain (`case:wholeword:Cat`), and combine
 with `!` and `|` (`!wholeword:tmp`, `case:Foo|case:Bar`).
 
+## Command line
+
+`ve` reads the saved Index (it never writes it, so it works while the app runs; open the app once to
+build the Index). It ships beside the app: in `usr/bin` of the AppImage (`./view-everything-x86_64.AppImage --appimage-extract`
+to get it out), next to `view-everything.exe` on Windows, and in `View Everything.app/Contents/MacOS/` on macOS.
+
+```
+ve find [--csv|--json] [--path DIR] <QUERY>...   matching paths, one per line
+ve top  [--csv|--json] [--path DIR] [--files] [-n N] [QUERY]...   largest folders (or files) by On-disk Size; `du` is the same
+ve export [--path DIR] [QUERY]...                 CSV of a Query's results (everything without one)
+```
+
+The Query is the same language as the app's; quote it for your shell or put `--` before words that start with `-`.
+`top` prints `<bytes>\t<path>`. `--index FILE` reads another saved Index. The Index's Last Synced goes to stderr so
+pipes stay clean. Exit code 0: something was printed; 1: no match; 2: a bad argument, Query or unreadable Index.
+`dupe:` finds nothing from the CLI (it does not read `hashes.bin`).
+
 ## Cleanup rules
 
 The Cleaner's rules are written in TOML; the built-in ones (`crates/ve-app/src/cleaner/builtin.toml`) use the same format as your own, which go in `cleanup.toml` next to `settings.toml` (`~/.config/view-everything/` on Linux, `~/Library/Application Support/view-everything/` on macOS, `%APPDATA%\view-everything\` on Windows). The file is read again whenever it changes. A mistake shows in the Cleaner with the file, line and reason; the built-in rules keep working (a syntax error skips the whole file, a bad rule only itself).

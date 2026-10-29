@@ -3,10 +3,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use ve_core::{CategoryMap, MANUAL_REFRESH, Remote};
+use ve_core::{MANUAL_REFRESH, Remote};
 use ve_scan::VolumeInfo;
 
-const APP_DIR: &str = "view-everything";
+use ve_core::paths::APP_DIR;
+pub use ve_core::paths::load_categories;
 
 /// User choices that outlive a session, stored as `settings.toml`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -332,30 +333,12 @@ fn settings_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join(APP_DIR).join("settings.toml"))
 }
 
-pub fn categories_path() -> Option<PathBuf> {
-    Some(dirs::config_dir()?.join(APP_DIR).join("categories.toml"))
-}
-
 /// The user's own Cleanup Rules, next to `settings.toml`.
 pub fn cleanup_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join(APP_DIR).join("cleanup.toml"))
 }
 
-pub fn index_path() -> Option<PathBuf> {
-    Some(dirs::data_local_dir()?.join(APP_DIR).join("index.bin"))
-}
-
-/// The built-in Categories with the user's `categories.toml` overrides, if any.
-pub fn load_categories() -> Result<CategoryMap, String> {
-    let Some(path) = categories_path() else {
-        return Ok(CategoryMap::builtin());
-    };
-    match fs::read_to_string(&path) {
-        Ok(text) => CategoryMap::from_toml(&text).map_err(|e| format!("{}: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(CategoryMap::builtin()),
-        Err(e) => Err(format!("{}: {e}", path.display())),
-    }
-}
+pub use ve_core::paths::index_path;
 
 #[cfg(test)]
 mod tests {

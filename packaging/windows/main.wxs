@@ -20,6 +20,7 @@
       <Component Id="MainExecutable" Guid="2A9D4E71-5B3C-4F86-A0D2-7C14E9B8F305" Win64="yes">
         <File Id="ViewEverythingExe" Name="view-everything.exe"
               Source="target\release\view-everything.exe" KeyPath="yes" />
+        <File Id="VeExe" Name="ve.exe" Source="target\release\ve.exe" />
       </Component>
       <!-- Instrument Sans and Instrument Serif are compiled into the executable; their OFL travels with them. -->
       <Component Id="FontLicense" Guid="42329E3C-CAB4-4D55-A1D2-23A0A8027E08" Win64="yes">

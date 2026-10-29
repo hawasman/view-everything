@@ -35,11 +35,13 @@ build() {
   export CARGO_TARGET_DIR=target
   # The package manager updates this build: no update checks.
   cargo build --release --frozen -p ve-app --no-default-features
+  cargo build --release --frozen -p ve-cli
 }
 
 package() {
   cd "$pkgname"
   install -Dm755 target/release/view-everything "$pkgdir/usr/bin/view-everything"
+  install -Dm755 target/release/ve "$pkgdir/usr/bin/ve"
   install -Dm644 packaging/linux/view-everything.desktop \
     "$pkgdir/usr/share/applications/view-everything.desktop"
   install -Dm644 packaging/icons/view-everything.svg \

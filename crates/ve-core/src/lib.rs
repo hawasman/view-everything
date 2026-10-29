@@ -9,6 +9,7 @@ pub mod category;
 pub mod export;
 mod filter;
 mod index;
+pub mod paths;
 pub mod query;
 
 pub use bits::BitSet;

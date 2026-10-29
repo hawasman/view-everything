@@ -15,13 +15,16 @@ cd "$root"
 targets=(aarch64-apple-darwin x86_64-apple-darwin)
 for target in "${targets[@]}"; do
     rustup target add "$target" >/dev/null
-    cargo build --release --locked -p ve-app --target "$target"
+    cargo build --release --locked -p ve-app -p ve-cli --target "$target"
 done
 
 rm -rf "$work"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$out"
 lipo -create -output "$app/Contents/MacOS/view-everything" \
     target/aarch64-apple-darwin/release/view-everything target/x86_64-apple-darwin/release/view-everything
+# The CLI sits beside the app binary: run it as "View Everything.app/Contents/MacOS/ve".
+lipo -create -output "$app/Contents/MacOS/ve" \
+    target/aarch64-apple-darwin/release/ve target/x86_64-apple-darwin/release/ve
 
 iconset="$work/view-everything.iconset"
 mkdir -p "$iconset"

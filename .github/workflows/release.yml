@@ -38,12 +38,12 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --release --locked -p ve-app --target x86_64-pc-windows-msvc
+        run: cargo build --release --locked -p ve-app -p ve-cli --target x86_64-pc-windows-msvc
       - name: Portable zip
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/view-everything.exe `
+          Compress-Archive -Path target/x86_64-pc-windows-msvc/release/view-everything.exe,target/x86_64-pc-windows-msvc/release/ve.exe `
             -DestinationPath dist/view-everything-windows-x86_64-portable.zip
       - name: Install WiX 3 and cargo-wix
         shell: pwsh
@@ -56,7 +56,7 @@ jobs:
         run: |
           # main.wxs expects the exe at target\release; mirror the msvc output there.
           New-Item -ItemType Directory -Force target/release | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/view-everything.exe target/release/
+          Copy-Item target/x86_64-pc-windows-msvc/release/view-everything.exe,target/x86_64-pc-windows-msvc/release/ve.exe target/release/
           cargo wix -p ve-app --include packaging/windows/main.wxs --no-build --nocapture `
             --output dist/view-everything-windows-x86_64.msi
       - uses: actions/upload-artifact@v4

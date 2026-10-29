@@ -34,11 +34,18 @@ pub fn write_csv(out: &mut impl Write, index: &Index, filter: &Filter, categorie
 }
 
 /// One RFC 4180 record: fields containing a comma, quote, CR or LF are quoted, quotes doubled.
+/// A field a spreadsheet would read as a formula (starting with `=`, `+`, `-`, `@`, tab or CR)
+/// gets a leading `'`, so a hostile file name cannot run when the CSV is opened.
 fn write_row(out: &mut impl Write, fields: &[&str]) -> io::Result<()> {
     for (i, field) in fields.iter().enumerate() {
         if i > 0 {
             out.write_all(b",")?;
         }
+        let field = if field.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+            format!("'{field}")
+        } else {
+            field.to_string()
+        };
         if field.contains([',', '"', '\r', '\n']) {
             write!(out, "\"{}\"", field.replace('"', "\"\""))?;
         } else {
@@ -94,6 +101,14 @@ mod tests {
     #[test]
     fn plain_fields_are_not_quoted() {
         assert_eq!(row(&["a", "b c", ""]), "a,b c,\r\n");
+    }
+
+    #[test]
+    fn formula_looking_fields_get_a_leading_quote() {
+        assert_eq!(
+            row(&["=1+1", "+a", "-a", "@a", "\ta", "\ra,b", "a=b"]),
+            "'=1+1,'+a,'-a,'@a,'\ta,\"'\ra,b\",a=b\r\n"
+        );
     }
 
     #[test]

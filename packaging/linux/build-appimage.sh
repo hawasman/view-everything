@@ -10,12 +10,13 @@ out="$root/dist"
 
 cd "$root"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-cargo build --release -p ve-app --locked
+cargo build --release -p ve-app -p ve-cli --locked
 
 rm -rf "$appdir"
 icons="$appdir/usr/share/icons/hicolor"
 mkdir -p "$appdir/usr/bin" "$icons/scalable/apps" "$icons/256x256/apps" "$out"
 install -m755 target/release/view-everything "$appdir/usr/bin/view-everything"
+install -m755 target/release/ve "$appdir/usr/bin/ve"
 # App stores and launchers read the version from the desktop entry (Shelly shows "Unknown" without it).
 { cat packaging/linux/view-everything.desktop; echo "X-AppImage-Version=$version"; } > "$appdir/view-everything.desktop"
 install -m644 packaging/icons/view-everything.svg "$icons/scalable/apps/view-everything.svg"
