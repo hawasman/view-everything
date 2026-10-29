@@ -623,7 +623,8 @@ impl DashboardPage {
         let mut bar = h_flex().h(px(12.)).gap(px(1.)).rounded(px(3.)).overflow_hidden().bg(p.free).when(!l.online, |d| d.opacity(0.6));
         for category in Category::ALL.into_iter().filter(|&c| wide(l.lane.categories[c as usize])) {
             let bytes = l.lane.categories[category as usize];
-            let tip = format!("{} {}", category.name(), format::size(bytes));
+            // Widths may be scaled to fit the used space; the tooltip says what the files hold.
+            let tip = format!("{} {}", category.name(), format::size(l.categories[category as usize]));
             bar = bar.child(
                 seg(bytes)
                     .id(("segment", ix * 8 + category as usize))

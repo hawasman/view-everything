@@ -247,24 +247,25 @@ pub struct Lane {
 
 impl Lane {
     /// Splits a Volume of `capacity` given the On-disk Size of its files per Category. Without a
-    /// capacity (never synced) the bar is only the Categories.
+    /// capacity (never synced) the bar is only the Categories. Free is always what the filesystem
+    /// reports.
     pub fn new(mut categories: [u64; 8], capacity: Option<Capacity>) -> Lane {
         let Some(capacity) = capacity else {
             return Lane { categories, unindexed: 0, free: 0 };
         };
-        let total = capacity.total;
-        let used = total.saturating_sub(capacity.free);
+        let free = capacity.free.min(capacity.total);
+        let used = capacity.total - free;
         let indexed: u64 = categories.iter().sum();
-        // More indexed than the Volume holds (a stale Index, sparse tricks): scale it to fit.
-        if indexed > total {
+        // More indexed than the filesystem uses (btrfs compression and shared extents count
+        // per file, a stale Index): scale the Categories into the used space.
+        if indexed > used {
             for c in &mut categories {
-                *c = (*c as u128 * total as u128 / indexed as u128) as u64;
+                *c = (*c as u128 * used as u128 / indexed as u128) as u64;
             }
         }
         let indexed: u64 = categories.iter().sum();
-        // Whatever used space the Entries do not explain is Unindexed Space; the rest is free.
-        let unindexed = used.saturating_sub(indexed);
-        Lane { categories, unindexed, free: total - indexed - unindexed }
+        // Whatever used space the Entries do not explain is Unindexed Space.
+        Lane { categories, unindexed: used - indexed, free }
     }
 
     pub fn total(&self) -> u64 {
@@ -423,9 +424,10 @@ mod tests {
         let lane = Lane::new(cats, Some(Capacity { total: 1000, free: 500 }));
         assert_eq!((lane.unindexed, lane.free), (100, 500));
         assert_eq!(lane.total(), 1000);
-        // Indexed more than used: no Unindexed Space, free shrinks, still the capacity.
+        // Indexed more than used: no Unindexed Space, Categories scaled, free as reported.
         let lane = Lane::new(cats, Some(Capacity { total: 1000, free: 700 }));
-        assert_eq!((lane.unindexed, lane.free), (0, 600));
+        assert_eq!((lane.unindexed, lane.free), (0, 700));
+        assert_eq!(lane.categories.iter().sum::<u64>(), 300);
         assert_eq!(lane.total(), 1000);
         // Indexed more than the capacity: scaled to fit.
         let lane = Lane::new(cats, Some(Capacity { total: 200, free: 0 }));
