@@ -5,12 +5,14 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use ve_core::{CategoryMap, EntryId, Filter, Index, Query, QueryContext, export::write_csv};
 
+const DEFAULT_LIMIT: usize = 20;
+
 const USAGE: &str = "\
 Usage:
   ve find [OPTIONS] [--] <QUERY>...   Entries matching a Query, one path per line
-  ve top  [OPTIONS] [--] [QUERY]...   Largest folders (or --files) by On-disk Size
+  ve top  [OPTIONS] [--] [QUERY]...   Largest folders (or --files) by On-disk Size (Filtered Size under a Query)
   ve du   ...                         Same as top
-  ve export [OPTIONS] [--] [QUERY]... CSV of a Query's results (everything without one)
+  ve export [OPTIONS] [--] [QUERY]... CSV of a Query's results (everything without one; --json for JSON)
 
 Options:
   --csv           CSV output (path, name, Logical Size, On-disk Size, modified, Category)
@@ -43,7 +45,7 @@ struct Args {
     query: String,
     path: Option<PathBuf>,
     index: Option<PathBuf>,
-    limit: usize,
+    limit: Option<usize>,
     files: bool,
 }
 
@@ -64,7 +66,7 @@ fn parse_args(args: &[String]) -> Result<Option<Args>, String> {
         query: String::new(),
         path: None,
         index: None,
-        limit: 20,
+        limit: None,
         files: false,
     };
     let mut words = Vec::new();
@@ -82,7 +84,7 @@ fn parse_args(args: &[String]) -> Result<Option<Args>, String> {
             "--files" => parsed.files = true,
             "--path" => parsed.path = Some(value("--path")?.into()),
             "--index" => parsed.index = Some(value("--index")?.into()),
-            "-n" => parsed.limit = value("-n")?.parse().map_err(|_| "-n needs a number".to_string())?,
+            "-n" => parsed.limit = Some(value("-n")?.parse().map_err(|_| "-n needs a number".to_string())?),
             "--" => {
                 words.extend(it.by_ref().cloned());
             }
@@ -90,7 +92,7 @@ fn parse_args(args: &[String]) -> Result<Option<Args>, String> {
             word => words.push(word.to_string()),
         }
     }
-    if (parsed.files || parsed.limit != 20) && parsed.command != Command::Top {
+    if (parsed.files || parsed.limit.is_some()) && parsed.command != Command::Top {
         return Err("--files and -n only apply to top/du".into());
     }
     parsed.format = format.unwrap_or(if parsed.command == Command::Export {
@@ -171,6 +173,9 @@ fn run(args: &Args, out: &mut impl Write, err: &mut impl Write) -> Result<usize,
         "" => None,
         text => Some(Query::parse(text, &context).map_err(|e| Failure::Message(format!("bad Query: {e}")))?),
     };
+    if query.as_ref().is_some_and(Query::needs_duplicates) {
+        writeln!(err, "ve: dupe: finds nothing here; the CLI does not read the app's hashes")?;
+    }
     let filter = Filter::compute(&index, query.as_ref());
     let scope = scope(&index, args.path.as_deref())?;
     let mut ids: Vec<EntryId> = match args.command {
@@ -183,8 +188,9 @@ fn run(args: &Args, out: &mut impl Write, err: &mut impl Write) -> Result<usize,
     };
     if args.command == Command::Top {
         ids.sort_by_cached_key(|&id| (std::cmp::Reverse(filter.totals(&index, id).on_disk), index.path(id)));
-        if args.limit > 0 {
-            ids.truncate(args.limit);
+        match args.limit.unwrap_or(DEFAULT_LIMIT) {
+            0 => {}
+            n => ids.truncate(n),
         }
     } else {
         ids.sort_by_cached_key(|&id| index.path(id));
@@ -290,7 +296,7 @@ mod tests {
         assert_eq!((a.command, a.format, a.path), (Command::Find, Format::Csv, Some("/w".into())));
         assert_eq!(a.query, "*.txt size:>1k");
         let a = parse("du -n 5 --files --json");
-        assert_eq!((a.command, a.limit, a.files, a.format), (Command::Top, 5, true, Format::Json));
+        assert_eq!((a.command, a.limit, a.files, a.format), (Command::Top, Some(5), true, Format::Json));
         assert_eq!(parse("find -- -x").query, "-x");
         assert_eq!((parse("export").query.as_str(), parse("export").format), ("", Format::Csv));
     }
@@ -386,6 +392,20 @@ mod tests {
         let (n, out, _) = run_line("top --path /w --files .log", &index);
         assert_eq!((n.unwrap(), out.as_str()), (1, "20\t/w/sub/=evil.log\n"));
         assert!(matches!(run_line("top --path /nowhere", &index).0, Err(Failure::Message(_))));
+    }
+
+    #[test]
+    fn find_path_scopes_and_top_takes_the_output_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = fixture(dir.path());
+        let (_, out, _) = run_line("find --path /w/sub txt", &index);
+        assert_eq!(out, "/w/sub/b.txt\n");
+        let (_, csv, _) = run_line("top --csv --files -n 1", &index);
+        assert!(csv.contains("/w/sub/b.txt,b.txt,500,500,"), "{csv}");
+        let (_, json, _) = run_line("du --json -n 1", &index);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&json).unwrap()[0]["path"], "/w");
+        let (_, _, err) = run_line("find dupe:", &index);
+        assert!(err.contains("dupe:"), "{err}");
     }
 
     #[test]

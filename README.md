@@ -52,8 +52,8 @@ to get it out), next to `view-everything.exe` on Windows, and in `View Everythin
 
 ```
 ve find [--csv|--json] [--path DIR] <QUERY>...   matching paths, one per line
-ve top  [--csv|--json] [--path DIR] [--files] [-n N] [QUERY]...   largest folders (or files) by On-disk Size; `du` is the same
-ve export [--path DIR] [QUERY]...                 CSV of a Query's results (everything without one)
+ve top  [--csv|--json] [--path DIR] [--files] [-n N] [QUERY]...   largest folders (or files) by On-disk Size (Filtered Size under a Query); `du` is the same
+ve export [--json] [--path DIR] [QUERY]...         CSV of a Query's results (everything without one)
 ```
 
 The Query is the same language as the app's; quote it for your shell or put `--` before words that start with `-`.
