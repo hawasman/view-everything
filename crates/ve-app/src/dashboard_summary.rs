@@ -239,6 +239,8 @@ fn matches(index: &Index, query: &Query, id: EntryId, scratch: &mut (String, Vec
         is_dir: false,
         logical: index.logical(id),
         modified: index.modified(id),
+        depth: if query.needs_depth() { index.depth(id) } else { 0 },
+        ..Candidate::default()
     })
 }
 

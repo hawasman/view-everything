@@ -682,6 +682,11 @@ impl Index {
         (p != NO_PARENT).then_some(EntryId(p))
     }
 
+    /// Levels below the Location root; the root is 0.
+    pub fn depth(&self, id: EntryId) -> u32 {
+        std::iter::successors(self.parent(id), |&p| self.parent(p)).count() as u32
+    }
+
     #[inline]
     pub fn logical(&self, id: EntryId) -> u64 {
         self.logical[id.index()]

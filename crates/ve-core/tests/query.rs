@@ -12,6 +12,7 @@ fn file(name: &str) -> Candidate<'_> {
         is_dir: false,
         logical: 0,
         modified: 0,
+        ..Default::default()
     }
 }
 
@@ -68,6 +69,7 @@ fn at(path: &str) -> Candidate<'_> {
         is_dir: false,
         logical: 0,
         modified: 0,
+        ..Default::default()
     }
 }
 
@@ -104,6 +106,7 @@ fn folder(name: &str) -> Candidate<'_> {
         is_dir: true,
         logical: 0,
         modified: 0,
+        ..Default::default()
     }
 }
 
@@ -150,6 +153,7 @@ fn sized(logical: u64) -> Candidate<'static> {
         is_dir: false,
         logical,
         modified: 0,
+        ..Default::default()
     }
 }
 
@@ -187,6 +191,7 @@ fn modified_at(y: i32, mo: u32, d: u32, h: u32) -> Candidate<'static> {
         is_dir: false,
         logical: 0,
         modified,
+        ..Default::default()
     }
 }
 
@@ -329,4 +334,112 @@ fn case_and_wholeword_need_a_text_term() {
     }
     // Quoted, the colon is part of the name.
     assert!(matches("\"case:x\"", &file("case:x")));
+}
+
+fn placed<'a>(path: &'a str, depth: u32, children: &[&'a str]) -> Candidate<'a> {
+    Candidate {
+        name: path.rsplit('/').next().unwrap(),
+        path: Some(path),
+        is_dir: !children.is_empty() || path.ends_with("dir"),
+        depth,
+        children: children.to_vec(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn parent_matches_entries_directly_inside_a_folder() {
+    let query = Query::parse("parent:/home/me/Docs", &context()).unwrap();
+    assert!(query.needs_path());
+    assert!(query.matches(&at("/home/me/docs/a.txt")));
+    assert!(!query.matches(&at("/home/me/docs/sub/a.txt")));
+    assert!(!query.matches(&at("/home/me/docs2/a.txt")));
+    assert!(!query.matches(&at("/home/me/Docs")));
+    assert!(matches("parent:/home/me/Docs/", &at("/home/me/docs/a.txt")));
+    assert!(matches("parent:C:\\Users", &at("C:/Users/me")));
+    assert!(matches("parent:/ !x", &at("/home")));
+    assert!(matches("parent:\"/my docs\"", &at("/my docs/a")));
+    assert!(matches("parent:/a|parent:/b", &at("/b/c")));
+    assert!(Query::parse("parent:", &context()).is_err());
+}
+
+#[test]
+fn depth_counts_levels_below_the_location_root() {
+    let at_depth = |d| placed("/r/x", d, &[]);
+    assert!(Query::parse("depth:2", &context()).unwrap().needs_depth());
+    assert!(matches("depth:2", &at_depth(2)));
+    assert!(!matches("depth:2", &at_depth(3)));
+    assert!(matches("depth:>1", &at_depth(2)) && !matches("depth:>1", &at_depth(1)));
+    assert!(matches("depth:>=1", &at_depth(1)) && !matches("depth:>=1", &at_depth(0)));
+    assert!(matches("depth:<2", &at_depth(1)) && !matches("depth:<2", &at_depth(2)));
+    assert!(!matches("depth:<0", &at_depth(0)));
+    assert!(matches("depth:<=2", &at_depth(2)) && !matches("depth:<=2", &at_depth(3)));
+    assert!(matches("depth:1..3", &at_depth(3)) && !matches("depth:1..3", &at_depth(4)));
+    assert!(matches("!depth:1..3 log", &placed("/r/log", 4, &[])));
+    for bad in ["depth:", "depth:x", "depth:-1"] {
+        assert!(Query::parse(bad, &context()).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn child_matches_folders_with_a_direct_child_by_name() {
+    let query = Query::parse("child:.git", &context()).unwrap();
+    assert!(query.needs_children());
+    assert!(query.matches(&placed("/r/proj", 1, &["src", ".GIT"])));
+    assert!(!query.matches(&placed("/r/proj", 1, &["src"])));
+    // Files never have children, so a negated `child:` keeps them.
+    assert!(!query.matches(&file("proj")));
+    assert!(matches("!child:.git", &file("proj")));
+    assert!(matches("child:*.toml", &placed("/r/p", 1, &["Cargo.toml"])));
+    assert!(!matches("child:*.toml", &placed("/r/p", 1, &["Cargo.toml.bak"])));
+    assert!(matches("child:readme|child:license", &placed("/r/p", 1, &["LICENSE"])));
+    assert!(Query::parse("child:", &context()).is_err());
+    assert!(Query::parse("child:a/b", &context()).is_err());
+}
+
+#[test]
+fn empty_matches_folders_without_children() {
+    let query = Query::parse("empty:", &context()).unwrap();
+    assert!(query.needs_children());
+    assert!(query.matches(&placed("/r/emptydir", 1, &[])));
+    assert!(!query.matches(&placed("/r/full", 1, &["a"])));
+    assert!(!query.matches(&file("a.txt")));
+    assert!(matches("!empty:", &placed("/r/full", 1, &["a"])));
+    assert!(Query::parse("empty:x", &context()).is_err());
+}
+
+#[test]
+fn tree_modifiers_combine_with_each_other_and_with_text() {
+    let candidate = placed("/r/build/emptydir", 2, &[]);
+    assert!(matches("empty: depth:2 parent:/r/build dir", &candidate));
+    assert!(!matches("empty: depth:3", &candidate));
+    assert!(matches("depth:5|empty:", &candidate));
+    assert!(!Query::parse("build", &context()).unwrap().needs_children());
+}
+
+#[test]
+fn tree_modifiers_filter_a_real_index() {
+    use std::path::Path;
+    use ve_core::{EntryMeta, Filter, Index, SyncState};
+    let dir = EntryMeta {
+        is_dir: true,
+        ..EntryMeta::default()
+    };
+    let mut index = Index::new();
+    let vol = index.add_volume(Path::new("/m/loc"), "ext4", "loc", dir, SyncState::Walk);
+    let root = index.volume(vol).unwrap().root;
+    let proj = index.insert(root, "proj", dir);
+    let git = index.insert(proj, ".git", dir);
+    let hollow = index.insert(proj, "hollow", dir);
+    let file = index.insert(proj, "a.txt", EntryMeta::default());
+    let nested = index.insert(git, "HEAD", EntryMeta::default());
+    let matched = |q: &str| {
+        let query = Query::parse(q, &context()).unwrap();
+        let filter = Filter::compute(&index, Some(&query));
+        [proj, git, hollow, file, nested].map(|id| filter.is_matched(id))
+    };
+    assert_eq!(matched("depth:2"), [false, true, true, true, false]);
+    assert_eq!(matched("child:.git"), [true, false, false, false, false]);
+    assert_eq!(matched("empty:"), [false, false, true, false, false]);
+    assert_eq!(matched("parent:/m/loc/proj"), [false, true, true, true, false]);
 }

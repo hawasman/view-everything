@@ -505,6 +505,7 @@ mod tests {
                 is_dir: false,
                 logical: 0,
                 modified: 0,
+                ..Default::default()
             })
         };
         assert!(holds(&format!("{home}/Documents/a.pdf")));

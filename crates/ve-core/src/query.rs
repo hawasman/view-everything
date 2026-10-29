@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::Arc;
 
 /// What a Query is matched against: one Entry's name and attributes.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Candidate<'a> {
     pub name: &'a str,
     /// Full path with `/` separators; required only when [`Query::needs_path`] is true.
@@ -14,6 +14,10 @@ pub struct Candidate<'a> {
     pub logical: u64,
     /// Modification time in nanoseconds since the Unix epoch.
     pub modified: i64,
+    /// Levels below the Location root (the root is 0); required only when [`Query::needs_depth`].
+    pub depth: u32,
+    /// Names of a folder's direct children; required only when [`Query::needs_children`].
+    pub children: Vec<&'a str>,
 }
 
 /// Everything a Query's meaning depends on besides its text.
@@ -42,6 +46,9 @@ impl std::error::Error for QueryError {}
 
 /// A parsed search expression selecting which Entries count.
 ///
+/// `case:` and `wholeword:` before a term change how it matches; `parent:`, `depth:`, `child:` and
+/// `empty:` select by where an Entry sits in the folder tree.
+///
 /// Syntax (a subset of Everything's): terms separated by spaces must all match; `a|b` matches
 /// either and binds tighter than a space; `!term` excludes; `"quotes"` keep spaces; `*` and `?`
 /// match the whole name; a term containing `/` or `\` matches the full path.
@@ -50,6 +57,8 @@ pub struct Query {
     /// Every clause must hold; a clause holds when any of its literals does.
     clauses: Vec<Vec<Literal>>,
     needs_path: bool,
+    needs_depth: bool,
+    needs_children: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +84,17 @@ enum Term {
         until: i64,
     },
     Regex(regex::Regex),
+    /// Lower-cased full path of the containing folder, without a trailing `/`.
+    Parent(String),
+    /// Inclusive bounds on depth below the Location root.
+    Depth {
+        min: u32,
+        max: u32,
+    },
+    /// Folders with a direct child whose name matches.
+    Child(Text),
+    /// Folders with no children.
+    Empty,
 }
 
 #[derive(Clone, Debug)]
@@ -112,13 +132,31 @@ impl Query {
                 }
             }
         }
-        let needs_path = clauses.iter().flatten().any(|l| matches!(&l.term, Term::Text(t) if t.on_path));
-        Ok(Query { clauses, needs_path })
+        let any = |f: fn(&Term) -> bool| clauses.iter().flatten().any(|l| f(&l.term));
+        let needs_path = any(|t| matches!(t, Term::Text(t) if t.on_path) || matches!(t, Term::Parent(_)));
+        let needs_depth = any(|t| matches!(t, Term::Depth { .. }));
+        let needs_children = any(|t| matches!(t, Term::Child(_) | Term::Empty));
+        Ok(Query {
+            clauses,
+            needs_path,
+            needs_depth,
+            needs_children,
+        })
     }
 
     /// Whether candidates must carry their full path.
     pub fn needs_path(&self) -> bool {
         self.needs_path
+    }
+
+    /// Whether candidates must carry their depth.
+    pub fn needs_depth(&self) -> bool {
+        self.needs_depth
+    }
+
+    /// Whether folder candidates must carry their children's names.
+    pub fn needs_children(&self) -> bool {
+        self.needs_children
     }
 
     pub fn matches(&self, candidate: &Candidate) -> bool {
@@ -154,6 +192,22 @@ impl Term {
             Term::Size { min, max } => !candidate.is_dir && (*min..=*max).contains(&candidate.logical),
             Term::Modified { from, until } => !candidate.is_dir && (*from..*until).contains(&candidate.modified),
             Term::Regex(regex) => regex.is_match(candidate.name),
+            Term::Parent(folder) => candidate
+                .path
+                .expect("Query::needs_path requires candidates to carry their path")
+                .rsplit_once('/')
+                .is_some_and(|(parent, _)| eq_ignore_case(parent.trim_end_matches('/'), folder)),
+            Term::Depth { min, max } => (*min..=*max).contains(&candidate.depth),
+            Term::Child(text) => {
+                candidate.is_dir
+                    && candidate.children.iter().any(|&name| {
+                        text.matches(&Candidate {
+                            name,
+                            ..Candidate::default()
+                        })
+                    })
+            }
+            Term::Empty => candidate.is_dir && candidate.children.is_empty(),
         }
     }
 
@@ -204,12 +258,40 @@ impl Term {
                 .build()
                 .map(Term::Regex)
                 .map_err(|e| QueryError(format!("regex: {e}"))),
+            "parent" => {
+                if value.is_empty() {
+                    return Err(missing());
+                }
+                // `parent:/` trims to empty, which is the filesystem root's own path once trimmed.
+                let folder = value.replace('\\', "/");
+                let folder = folder.trim_end_matches('/');
+                Ok(Term::Parent(folder.to_lowercase()))
+            }
+            "depth" => {
+                let (min, max) = depth_bounds(value).map_err(|e| QueryError(format!("depth: {e}")))?;
+                Ok(Term::Depth { min, max })
+            }
+            "child" => {
+                if value.is_empty() {
+                    return Err(missing());
+                }
+                if value.contains(['/', '\\']) {
+                    return Err(QueryError("child: takes a name, not a path".into()));
+                }
+                Ok(Term::Child(Text::new(value, false, false)))
+            }
+            "empty" => {
+                if !value.is_empty() {
+                    return Err(QueryError("`empty:` takes no value".into()));
+                }
+                Ok(Term::Empty)
+            }
             _ => unreachable!("Word::modifier returns only known names"),
         }
     }
 }
 
-const MODIFIERS: &[&str] = &["ext", "type", "size", "dm", "regex"];
+const MODIFIERS: &[&str] = &["ext", "type", "size", "dm", "regex", "parent", "depth", "child", "empty"];
 /// Prefixes that change how the term after them matches; they chain (`case:wholeword:Foo`).
 const FLAGS: &[&str] = &["case", "wholeword"];
 
@@ -259,6 +341,22 @@ fn size_bounds(value: &str) -> Result<(u64, u64), String> {
         },
         Comparison::AtMost(v) => (0, parse_size(v)?),
         Comparison::Between(a, b) => (parse_size(a)?, parse_size(b)?),
+    })
+}
+
+/// Inclusive depth bounds; an empty range is `min > max`.
+fn depth_bounds(value: &str) -> Result<(u32, u32), String> {
+    let number = |v: &str| v.trim().parse::<u32>().map_err(|_| format!("`{v}` is not a depth"));
+    Ok(match Comparison::parse(value)? {
+        Comparison::Exact(v) => (number(v)?, number(v)?),
+        Comparison::Above(v) => (number(v)?.saturating_add(1), u32::MAX),
+        Comparison::AtLeast(v) => (number(v)?, u32::MAX),
+        Comparison::Below(v) => match number(v)? {
+            0 => (1, 0),
+            n => (0, n - 1),
+        },
+        Comparison::AtMost(v) => (0, number(v)?),
+        Comparison::Between(a, b) => (number(a)?, number(b)?),
     })
 }
 
@@ -394,6 +492,15 @@ fn whole_word_match(pattern: &str, subject: &str, wildcard: bool) -> bool {
             .iter()
             .any(|&end| apart(at, end) && wildcard_match(pattern, &subject[at..end]))
     })
+}
+
+/// Case-insensitive equality; `lowered` is already lower-cased.
+fn eq_ignore_case(text: &str, lowered: &str) -> bool {
+    if text.is_ascii() && lowered.is_ascii() {
+        text.eq_ignore_ascii_case(lowered)
+    } else {
+        text.to_lowercase() == lowered
+    }
 }
 
 /// Case-insensitive substring search; `needle` is already lower-cased.
@@ -535,7 +642,7 @@ pub struct ClauseSource<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WordSource {
     pub negated: bool,
-    /// The known modifier the word starts with: `ext`, `type`, `size`, `dm` or `regex`.
+    /// The known modifier the word starts with: one of [`MODIFIERS`] such as `ext`.
     pub modifier: Option<&'static str>,
     /// The text after the modifier's colon, or the whole word; quotes removed.
     pub value: String,
