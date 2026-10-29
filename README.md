@@ -14,6 +14,7 @@ never wait on a scan.
   from Settings.
 - **Trash**: Move to Trash and Empty Trash with confirmation.
 - **Cleaner**: lists Rust `target/` folders found in the Index (a sibling `Cargo.toml` or a `CACHEDIR.TAG` inside confirms them) with their On-disk Size. Tick them to form a Cleanup Plan, review the exact paths under Advanced, and Clean removes them permanently (not via the Trash) after re-checking each on disk. Remotes, Offline Volumes and read-only mounts are never offered.
+- **Duplicates**: the Explorer's third tab groups files with identical content (see `dupe:` below), largest wasted space first. Pick the copy to keep in each group; **Trash others** moves the rest to the Trash after the usual confirmation, and the Index and groups update. Hashing runs in the background with progress in the status bar.
 
 The vocabulary used in the app and the code is defined in [CONTEXT.md](CONTEXT.md); design
 decisions are recorded in [docs/adr](docs/adr).

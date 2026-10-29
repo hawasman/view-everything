@@ -118,6 +118,7 @@ impl Render for DuplicatesPanel {
                 });
                 let others: Vec<EntryId> = group.copies.iter().copied().filter(|&id| id != kept).collect();
                 v_flex()
+                    .flex_none()
                     .gap(px(4.))
                     .py(px(10.))
                     .border_b_1()
