@@ -2,7 +2,7 @@
 //! Settings) and the status bar.
 
 use crate::categories::CategoryPanel;
-use crate::cleaner::CleanerPage;
+use crate::cleaner::{CleanerPage, ShowInExplorer};
 use crate::dashboard::{Act, DashboardPage};
 use crate::duplicates::DuplicatesPanel;
 use crate::engine::{Engine, Phase, Repaint, last_synced_label};
@@ -139,9 +139,11 @@ impl Shell {
 
         let trash = Trash::new(engine.shared.clone(), repaint.clone());
 
+        let cleaner = cx.new(|_| CleanerPage::new(engine.shared.clone(), repaint.clone(), volumes.clone(), &settings));
         let dashboard = cx.new(|cx| {
             let mut page = DashboardPage::new(
                 engine.shared.clone(),
+                cleaner.clone(),
                 trash.clone(),
                 categories.clone(),
                 &settings,
@@ -153,10 +155,14 @@ impl Shell {
             page
         });
         let duplicates = cx.new(|_| DuplicatesPanel::new(engine.shared.clone(), trash.clone(), volumes.clone()));
-        let cleaner = cx.new(|_| CleanerPage::new(engine.shared.clone(), repaint.clone(), volumes.clone(), &settings));
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
         cx.subscribe_in(&dashboard, window, |this, _, act: &Act, window, cx| {
             this.dashboard_act(act, window, cx)
+        })
+        .detach();
+        cx.subscribe_in(&cleaner, window, |this, _, show: &ShowInExplorer, window, cx| {
+            this.dashboard_act(&Act::Explore(show.0.clone().or(Some(String::new()))), window, cx);
+            cx.notify();
         })
         .detach();
         cx.subscribe(&settings_page, |this, _, changed: &Changed, cx| {
@@ -875,6 +881,10 @@ impl Shell {
                     self.set_query_text(text, window, cx);
                 }
                 self.page = Page::Explorer;
+            }
+            Act::OpenCleaner => {
+                self.page = Page::Cleaner;
+                cx.notify();
             }
             Act::Forget(identity, mount) => {
                 self.settings_page

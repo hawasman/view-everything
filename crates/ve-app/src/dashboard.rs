@@ -41,6 +41,8 @@ pub enum Act {
     /// Bring the Location with these Volume identities (one filesystem's) up to date now.
     Refresh(Vec<String>),
     MoveToTrash(EntryId),
+    /// Open the Cleaner.
+    OpenCleaner,
     /// Save the Recently modified Query; `None` restores the default.
     SaveQuery(Option<String>),
 }
@@ -102,6 +104,7 @@ fn locations_phrase(locations: &[Location]) -> String {
 
 pub struct DashboardPage {
     shared: Arc<Shared>,
+    cleaner: Entity<crate::cleaner::CleanerPage>,
     trash: Trash,
     /// The newest summary the worker computed.
     latest: Arc<Mutex<Option<Arc<Summary>>>>,
@@ -116,8 +119,10 @@ pub struct DashboardPage {
 }
 
 impl DashboardPage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shared: Arc<Shared>,
+        cleaner: Entity<crate::cleaner::CleanerPage>,
         trash: Trash,
         categories: CategoryMap,
         settings: &Settings,
@@ -144,6 +149,7 @@ impl DashboardPage {
         let _ = window;
         let mut page = Self {
             shared,
+            cleaner,
             trash,
             latest,
             shown: None,
@@ -851,6 +857,27 @@ impl DashboardPage {
                 ),
             );
 
+        // The Cleaner looks again only when the Index changed, so this follows every Clean.
+        let (reclaim, found) = self.cleaner.update(cx, |c, _| {
+            c.refresh();
+            c.reclaimable()
+        });
+        let cleaner = panel(cx)
+            .child(div().font_weight(FontWeight::MEDIUM).child("Cleaner"))
+            .child(
+                div()
+                    .mt(px(12.))
+                    .text_size(px(32.))
+                    .line_height(px(38.))
+                    .child(format::size(reclaim)),
+            )
+            .child(div().text_xs().text_color(p.muted).mb(px(16.)).child(format!(
+                "Could be reclaimed from {} Cleanable{}.",
+                format::count(found as u64),
+                if found == 1 { "" } else { "s" }
+            )))
+            .child(div().child(pill("open-cleaner", "Open Cleaner").build(cx, cx.listener(|_, _, _, cx| cx.emit(Act::OpenCleaner)))));
+
         let old = oldest_ix.map(|i| &locations[i]);
         let (big, note) = match old {
             Some(l) => match l.last_synced {
@@ -900,6 +927,7 @@ impl DashboardPage {
             .overflow_hidden()
             .gap(px(16.))
             .child(trash)
+            .child(cleaner)
             .child(synced)
     }
 

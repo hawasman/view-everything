@@ -14,7 +14,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rules::{Cleanable, CommandReport, Rule, Rules, clean};
+use rules::{CAN_ELEVATE, Cleanable, CommandReport, Rule, Rules, admin_clean, admin_command, clean, foreign};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,6 +22,11 @@ use std::time::SystemTime;
 use ve_scan::VolumeInfo;
 
 type Key = (String, PathBuf);
+
+/// "Show in Explorer": the Query that selects one Cleanable (None: the Index has no folder to scope to).
+pub struct ShowInExplorer(pub Option<String>);
+
+impl EventEmitter<ShowInExplorer> for CleanerPage {}
 
 pub struct CleanerPage {
     shared: Arc<Shared>,
@@ -40,9 +45,30 @@ pub struct CleanerPage {
     /// user's stays.
     known: HashSet<Key>,
     ticked: HashSet<Key>,
+    /// Cleanables the user does not own (or anything inside them): never in the normal Clean,
+    /// only in the admin step, and never pre-ticked.
+    admin: Vec<Cleanable>,
+    admin_ticked: HashSet<Key>,
+    /// Why each Cleanable of the last admin step was not removed.
+    admin_report: Vec<(PathBuf, String)>,
     /// What the commands of the last Clean said.
     report: Vec<CommandReport>,
     advanced: bool,
+}
+
+/// Whatever left the disk leaves the Index, skipped-because-vanished included.
+fn drop_from_index(shared: &Shared, outcome: &rules::Outcome) {
+    let mut index = shared.index.write();
+    let vanished = outcome
+        .skipped
+        .iter()
+        .filter(|(p, _)| std::fs::symlink_metadata(p).is_err())
+        .map(|(p, _)| p);
+    for path in outcome.removed.iter().chain(vanished) {
+        if let Some(id) = index.find_path(path) {
+            index.remove(id);
+        }
+    }
 }
 
 fn rules_stamp() -> Option<SystemTime> {
@@ -63,6 +89,9 @@ impl CleanerPage {
             cleanables: Vec::new(),
             known: HashSet::new(),
             ticked: HashSet::new(),
+            admin: Vec::new(),
+            admin_ticked: HashSet::new(),
+            admin_report: Vec::new(),
             report: Vec::new(),
             advanced: false,
         }
@@ -88,7 +117,7 @@ impl CleanerPage {
 
     /// Looks for Cleanables again when the Index or `cleanup.toml` changed since the last look.
     // ponytail: scans on the render thread; move to a background thread if a 10M-Entry Index makes it visible.
-    fn refresh(&mut self) {
+    pub fn refresh(&mut self) {
         let stamp = rules_stamp();
         if stamp != self.rules_stamp {
             self.rules_stamp = stamp;
@@ -99,7 +128,11 @@ impl CleanerPage {
         if self.seen == Some(index.generation()) {
             return;
         }
-        self.cleanables = rules::find(&index, &self.volumes, &self.rules.rules);
+        let (admin, own): (Vec<_>, Vec<_>) = rules::find(&index, &self.volumes, &self.rules.rules)
+            .into_iter()
+            .partition(|c| foreign(&c.path, !c.rule.is_command()).is_some());
+        self.cleanables = own;
+        self.admin = admin;
         self.seen = Some(index.generation());
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
         for c in &self.cleanables {
@@ -110,6 +143,115 @@ impl CleanerPage {
         let present: HashSet<Key> = self.cleanables.iter().map(Cleanable::key).collect();
         self.known.retain(|k| present.contains(k));
         self.ticked.retain(|k| present.contains(k));
+        let admin: HashSet<Key> = self.admin.iter().map(Cleanable::key).collect();
+        self.admin_ticked.retain(|k| admin.contains(k));
+    }
+
+    /// What the Cleaner could reclaim, with admin-only Cleanables too: size and count.
+    pub fn reclaimable(&self) -> (u64, usize) {
+        let all = self.cleanables.iter().chain(&self.admin);
+        (all.clone().map(|c| c.on_disk).sum(), all.count())
+    }
+
+    fn show_in_explorer(&mut self, path: &std::path::Path, is_file: bool, cx: &mut Context<Self>) {
+        let index = self.shared.index.read();
+        // A file is shown by the folder it sits in.
+        let at = if is_file { path.parent() } else { Some(path) };
+        let term = at.and_then(|p| index.find_path(p)).and_then(|id| crate::scope::term(&index, id));
+        drop(index);
+        cx.emit(ShowInExplorer(term));
+    }
+
+    /// The Cleanables of the admin step that are ticked and can run (command rules cannot).
+    fn admin_plan(&self) -> Vec<&Cleanable> {
+        self.admin
+            .iter()
+            .filter(|c| !c.rule.is_command() && self.admin_ticked.contains(&c.key()))
+            .collect()
+    }
+
+    fn ask_admin_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let plan: Vec<Cleanable> = self.admin_plan().into_iter().cloned().collect();
+        if plan.is_empty() {
+            return;
+        }
+        let paths: Vec<PathBuf> = plan.iter().map(|c| c.path.clone()).collect();
+        let total: u64 = plan.iter().map(|c| c.on_disk).sum();
+        let command = admin_command(&paths);
+        let items: Vec<(Arc<Rule>, PathBuf, Option<u64>)> = plan.iter().map(|c| (c.rule.clone(), c.path.clone(), None)).collect();
+        let (this, volumes) = (cx.entity(), self.volumes.clone());
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
+            let this = this.clone();
+            let (items, volumes) = (items.clone(), volumes.clone());
+            dialog
+                .confirm()
+                .title("Clean with admin rights?")
+                .description(
+                    div()
+                        .child(format!(
+                            "This permanently removes {} item(s), freeing about {}, and cannot be undone. It runs exactly:",
+                            plan.len(),
+                            format::size(total)
+                        ))
+                        .child(
+                            div()
+                                .mt(px(8.))
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .child(command.clone()),
+                        ),
+                )
+                .ok_text("Clean as admin")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    this.update(cx, |page, cx| page.start_admin_clean(items.clone(), volumes.clone(), window, cx));
+                    true
+                })
+        });
+    }
+
+    fn start_admin_clean(
+        &mut self,
+        plan: Vec<(Arc<Rule>, PathBuf, Option<u64>)>,
+        volumes: Vec<VolumeInfo>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window
+            .spawn(cx, {
+                let this = cx.entity();
+                async move |cx| {
+                    let outcome = cx.background_executor().spawn(async move { admin_clean(&plan, &volumes) }).await;
+                    cx.update(|window, cx| {
+                        let (shared, repaint) = {
+                            let page = this.read(cx);
+                            (page.shared.clone(), page.repaint.clone())
+                        };
+                        drop_from_index(&shared, &outcome);
+                        repaint();
+                        let text = format!(
+                            "Permanently removed {} item(s) with admin rights; {} not removed (listed under Admin only).",
+                            outcome.removed.len(),
+                            outcome.skipped.len()
+                        );
+                        let ok = outcome.skipped.is_empty();
+                        this.update(cx, |page, cx| {
+                            page.admin_ticked.clear();
+                            page.admin_report = outcome.skipped;
+                            cx.notify();
+                        });
+                        window.push_notification(
+                            if ok {
+                                Notification::info(text)
+                            } else {
+                                Notification::warning(text)
+                            },
+                            cx,
+                        );
+                    })
+                    .ok();
+                }
+            })
+            .detach();
     }
 
     fn plan(&self) -> Vec<&Cleanable> {
@@ -194,21 +336,7 @@ impl CleanerPage {
                             let page = this.read(cx);
                             (page.shared.clone(), page.repaint.clone())
                         };
-                        {
-                            let mut index = shared.index.write();
-                            // Whatever left the disk leaves the Index, skipped-because-vanished included.
-                            for path in outcome.removed.iter().chain(
-                                outcome
-                                    .skipped
-                                    .iter()
-                                    .filter(|(p, _)| std::fs::symlink_metadata(p).is_err())
-                                    .map(|(p, _)| p),
-                            ) {
-                                if let Some(id) = index.find_path(path) {
-                                    index.remove(id);
-                                }
-                            }
-                        }
+                        drop_from_index(&shared, &outcome);
                         // Wakes the Dashboard and status bar, which read the changed Index.
                         repaint();
                         let failed = outcome.commands.iter().filter(|c| !c.succeeded()).count();
@@ -240,6 +368,108 @@ impl CleanerPage {
                 }
             })
             .detach();
+    }
+
+    fn show_button(&self, id: (&'static str, usize), c: &Cleanable, cx: &mut Context<Self>) -> impl IntoElement {
+        let (path, command) = (c.path.clone(), c.rule.is_command());
+        pill(id, "Show in Explorer").small().build(
+            cx,
+            cx.listener(move |this, _, _, cx| this.show_in_explorer(&path, !command && !path.is_dir(), cx)),
+        )
+    }
+
+    /// The admin-only Cleanables, each with the command that would remove it, and the admin step.
+    fn admin_panel(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.admin.is_empty() && self.admin_report.is_empty() {
+            return None;
+        }
+        let p = palette(cx);
+        let mono = cx.theme().mono_font_family.clone();
+        let plan = self.admin_plan();
+        let total: u64 = plan.iter().map(|c| c.on_disk).sum();
+        let rows: Vec<AnyElement> = self
+            .admin
+            .iter()
+            .enumerate()
+            .map(|(ix, c)| {
+                let key = c.key();
+                let command = if c.rule.is_command() {
+                    format!(
+                        "{} (in {}): a command rule is not run with admin rights; run it yourself",
+                        c.rule.argv_text(),
+                        c.path.display()
+                    )
+                } else {
+                    admin_command(std::slice::from_ref(&c.path))
+                };
+                h_flex()
+                    .gap(px(12.))
+                    .py(px(6.))
+                    .border_b_1()
+                    .border_color(p.rule)
+                    .items_center()
+                    .child(if c.rule.is_command() {
+                        div().w(px(16.)).into_any_element()
+                    } else {
+                        Checkbox::new(("admin-cleanable", ix))
+                            .checked(self.admin_ticked.contains(&key))
+                            .on_click(cx.listener(move |this, on: &bool, _, cx| {
+                                if *on {
+                                    this.admin_ticked.insert(key.clone());
+                                } else {
+                                    this.admin_ticked.remove(&key);
+                                }
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    })
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().child(c.path.display().to_string()))
+                            .child(caption(format!("{}: {}", c.rule.name, c.rule.group.title()), cx))
+                            .child(div().font_family(mono.clone()).text_xs().child(command)),
+                    )
+                    .child(div().flex_none().child(format::size(c.on_disk)))
+                    .child(self.show_button(("admin-show", ix), c, cx))
+                    .into_any_element()
+            })
+            .collect();
+        let why = if !CAN_ELEVATE {
+            Some("This system cannot run the command elevated from here; run it yourself")
+        } else if plan.is_empty() {
+            Some("Tick what to clean first")
+        } else {
+            None
+        };
+        Some(
+            panel(cx).child(
+                v_flex()
+                    .gap_2()
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Admin only"))
+                    .child(caption(
+                        "You do not own these (or something inside them), so the normal Clean never touches them. Each is removed only in this separate step, which shows the exact command first.",
+                        cx,
+                    ))
+                    .children(rows)
+                    .when(!self.admin_report.is_empty(), |d| {
+                        d.child(div().text_color(p.warning).child("Not removed by the last admin step:"))
+                            .children(self.admin_report.iter().map(|(path, why)| div().text_color(p.warning).child(format!("{} ({why})", path.display()))))
+                    })
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .items_center()
+                            .child(div().flex_1().child(format!("{} selected, {}", plan.len(), format::size(total))))
+                            .child(
+                                pill("admin-clean", "Clean as admin…")
+                                    .disabled(why)
+                                    .build(cx, cx.listener(|this, _, window, cx| this.ask_admin_clean(window, cx))),
+                            ),
+                    ),
+            ),
+        )
     }
 
     fn report_panel(&self, cx: &App) -> Option<Div> {
@@ -338,6 +568,7 @@ impl Render for CleanerPage {
                             .child(format::size(c.on_disk))
                             .when(c.rule.is_command(), |d| d.child(caption("Estimated", cx))),
                     )
+                    .child(self.show_button(("show", ix), c, cx))
                     .into_any_element(),
             );
         }
@@ -415,6 +646,7 @@ impl Render for CleanerPage {
                         )
                         .children(advanced),
                 )
+                .children(self.admin_panel(cx))
                 .children(self.report_panel(cx)),
         )
     }

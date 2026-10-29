@@ -503,6 +503,118 @@ pub fn recheck(rule: &Rule, path: &Path, volumes: &[VolumeInfo], min_age_days: O
     Ok(())
 }
 
+/// The first path at or under `path` (links not followed) that the user does not own: removing
+/// it needs admin rights (ADR-0008). `deep` false judges `path` alone, as for a command rule's
+/// working folder. Where ownership cannot be told (no uid, an unreadable folder) it counts as not
+/// the user's: the admin step shows the command instead of a Clean that might fail half-way.
+// ponytail: walks every file of each Cleanable on the render thread, once per Index generation; move to the background if a huge node_modules makes it visible.
+#[cfg(unix)]
+pub fn foreign(path: &Path, deep: bool) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    // A file this process creates is owned by its user: no libc call needed to learn the uid.
+    static UID: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    let Some(uid) = *UID.get_or_init(|| {
+        let probe = std::env::temp_dir().join(format!("ve-uid-{}", std::process::id()));
+        let uid = std::fs::File::create(&probe).and_then(|f| f.metadata()).map(|m| m.uid()).ok();
+        let _ = std::fs::remove_file(&probe);
+        uid
+    }) else {
+        return Some(path.to_path_buf());
+    };
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(meta) = std::fs::symlink_metadata(&current) else { continue };
+        if meta.uid() != uid {
+            return Some(current);
+        }
+        if deep && meta.is_dir() {
+            match std::fs::read_dir(&current) {
+                Ok(entries) => stack.extend(entries.flatten().map(|e| e.path())),
+                Err(_) => return Some(current),
+            }
+        }
+    }
+    None
+}
+
+/// Windows has no cheap owner test: what lies under the Windows folder is taken as needing admin.
+#[cfg(windows)]
+pub fn foreign(path: &Path, _deep: bool) -> Option<PathBuf> {
+    let root = std::env::var_os("SystemRoot")?;
+    let (text, root) = (path.to_string_lossy().to_lowercase(), root.to_string_lossy().to_lowercase());
+    text.starts_with(&root).then(|| path.to_path_buf())
+}
+
+/// Whether the app can run the admin step itself: only through `pkexec`, on Linux.
+pub const CAN_ELEVATE: bool = cfg!(target_os = "linux");
+
+/// `rm` by absolute path: pkexec runs it as root, so it must not be looked up via `PATH`.
+const RM: &str = "/usr/bin/rm";
+
+/// The exact command that removes `paths` with admin rights, as shown before it runs: with
+/// `pkexec` on Linux (what the app runs), otherwise what the user would run themselves.
+pub fn admin_command(paths: &[PathBuf]) -> String {
+    let quoted = |p: &PathBuf| format!("'{}'", p.display().to_string().replace('\'', "'\\''"));
+    if cfg!(windows) {
+        paths
+            .iter()
+            .map(|p| format!("rd /s /q \"{}\"", p.display()))
+            .collect::<Vec<_>>()
+            .join(" & ")
+    } else {
+        let lead = if cfg!(target_os = "linux") {
+            format!("pkexec {RM}")
+        } else {
+            "sudo rm".to_owned()
+        };
+        format!("{lead} -rf -- {}", paths.iter().map(quoted).collect::<Vec<_>>().join(" "))
+    }
+}
+
+/// The admin step: rechecks each Cleanable as Clean does, then removes the ones that still match
+/// with one `pkexec rm` (a single password prompt) and reports per Cleanable whether it is gone.
+/// Command rules are never run elevated.
+pub fn admin_clean(plan: &[(Arc<Rule>, PathBuf, Option<u64>)], volumes: &[VolumeInfo]) -> Outcome {
+    let mut out = Outcome::default();
+    let mut go: Vec<PathBuf> = Vec::new();
+    for (rule, path, min_age_days) in plan {
+        if rule.is_command() {
+            out.skipped
+                .push((path.clone(), "command rules are not run with admin rights".into()));
+        } else if let Err(why) = recheck(rule, path, volumes, *min_age_days) {
+            out.skipped.push((path.clone(), why));
+        } else {
+            go.push(path.clone());
+        }
+    }
+    if go.is_empty() {
+        return out;
+    }
+    let why = if !CAN_ELEVATE {
+        "this system cannot run it elevated from here; run the command shown".to_owned()
+    } else {
+        match Command::new("pkexec").arg(RM).args(["-rf", "--"]).args(&go).status() {
+            Err(e) => format!("could not start pkexec ({e})"),
+            // pkexec: 126 = the password prompt was dismissed, 127 = not authorized.
+            Ok(s) => match s.code() {
+                Some(0) => String::new(),
+                Some(126) => "cancelled".to_owned(),
+                Some(127) => "not authorized".to_owned(),
+                _ => format!("rm failed ({s})"),
+            },
+        }
+    };
+    for path in go {
+        if std::fs::symlink_metadata(&path).is_err() {
+            out.removed.push(path);
+        } else {
+            out.skipped
+                .push((path, if why.is_empty() { "it is still there".into() } else { why.clone() }));
+        }
+    }
+    out
+}
+
 /// What running one command did.
 #[derive(Debug)]
 pub struct CommandReport {
@@ -554,6 +666,9 @@ pub fn clean(plan: &[(Arc<Rule>, PathBuf, Option<u64>)], volumes: &[VolumeInfo])
     for (rule, path, min_age_days) in plan {
         if let Err(why) = recheck(rule, path, volumes, *min_age_days) {
             out.skipped.push((path.clone(), why));
+        } else if let Some(other) = foreign(path, !rule.is_command()) {
+            out.skipped
+                .push((path.clone(), format!("{} is not yours; it needs the admin step", other.display())));
         } else if rule.is_command() {
             out.commands.push(CommandReport {
                 argv: rule.argv_text(),
@@ -966,6 +1081,31 @@ mod tests {
         std::fs::remove_file(project.join("marker")).unwrap();
         let out = clean(&[(ok, project, None)], &vols);
         assert!(out.commands.is_empty() && out.skipped.len() == 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn what_the_user_does_not_own_goes_to_the_admin_step() {
+        let base = std::env::temp_dir().join(format!("ve-cleaner-own-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("target")).unwrap();
+        assert_eq!(foreign(&base, true), None);
+        // Not run as root: /usr is root's, and so is anything inside a root-owned folder.
+        if std::fs::metadata("/usr").is_ok_and(|m| std::os::unix::fs::MetadataExt::uid(&m) == 0) && foreign(&base, false).is_none() {
+            assert_eq!(foreign(Path::new("/usr"), false), Some(PathBuf::from("/usr")));
+            assert!(foreign(Path::new("/usr"), true).is_some());
+        }
+        // The admin command names every path, quoted; a vanished one is reported and nothing is started.
+        let paths = [base.join("a b"), base.join("c")];
+        let text = admin_command(&paths);
+        assert!(
+            text.contains(&format!("'{}'", paths[0].display())) && text.contains("rm -rf --"),
+            "{text}"
+        );
+        let rust = rule("Rust build artefacts");
+        let out = admin_clean(&[(rust, base.join("target"), None)], &[]);
+        assert!(out.removed.is_empty() && out.skipped.len() == 1, "{out:?}");
         std::fs::remove_dir_all(&base).unwrap();
     }
 }
