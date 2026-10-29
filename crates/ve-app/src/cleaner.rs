@@ -1,10 +1,12 @@
-//! The Cleaner: Cleanables found from the Index by a Cleanup Rule, reviewed as a Cleanup Plan
-//! and removed permanently by Clean (ADR-0008).
+//! The Cleaner: Cleanables found from the Index by Cleanup Rules, reviewed as a Cleanup Plan
+//! and removed permanently by Clean (ADR-0008). The rules themselves are in `rules`.
+
+mod rules;
 
 use crate::engine::{Repaint, Shared};
 use crate::format;
+use crate::settings::{Settings, cleanup_path};
 use crate::theme::palette;
-use crate::trash::{subtree_on_disk, volume_blocker};
 use crate::ui::{caption, panel, pill};
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::checkbox::Checkbox;
@@ -12,133 +14,56 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rules::{Cleanable, CommandReport, Rule, Rules, clean};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use ve_core::{EntryId, Index};
+use std::time::SystemTime;
 use ve_scan::VolumeInfo;
 
-/// What a `CACHEDIR.TAG` must start with (https://bford.info/cachedir/).
-const CACHEDIR_SIGNATURE: &str = "Signature: 8a477f597d28d172789f06886806bc55";
-
-/// One thing the Rust build-artefact rule found.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Cleanable {
-    pub path: PathBuf,
-    pub on_disk: u64,
-}
-
-/// Rust `target/` folders in the Index confirmed by a sibling `Cargo.toml` or a `CACHEDIR.TAG`
-/// inside, on Locations that can be changed, largest first. Nested ones are left out: the
-/// outer folder takes them along.
-pub fn find_rust_targets(index: &Index, volumes: &[VolumeInfo]) -> Vec<Cleanable> {
-    let mut found: Vec<EntryId> = (0..index.capacity() as u32)
-        .map(EntryId)
-        .filter(|&id| index.is_live(id) && index.is_dir(id) && index.name(id) == "target")
-        .filter(|&id| {
-            let Some(parent) = index.parent(id) else { return false };
-            let is_file = |dir, name| index.child_named(dir, name).is_some_and(|c| !index.is_dir(c));
-            is_file(parent, "Cargo.toml") || is_file(id, "CACHEDIR.TAG")
-        })
-        .filter(|&id| {
-            index
-                .volume_of(id)
-                .and_then(|v| index.volume(v))
-                .is_some_and(|v| volume_blocker(v, volumes).is_none())
-        })
-        .collect();
-    let all: HashSet<EntryId> = found.iter().copied().collect();
-    found.retain(|&id| {
-        let mut up = index.parent(id);
-        while let Some(a) = up {
-            if all.contains(&a) {
-                return false;
-            }
-            up = index.parent(a);
-        }
-        true
-    });
-    let mut out: Vec<Cleanable> = found
-        .into_iter()
-        .map(|id| Cleanable {
-            path: index.path(id),
-            on_disk: subtree_on_disk(index, id),
-        })
-        .collect();
-    out.sort_by(|a, b| b.on_disk.cmp(&a.on_disk).then_with(|| a.path.cmp(&b.path)));
-    out
-}
-
-/// Checks `path` on disk against the rule again: still a real folder (not a link) named
-/// `target`, with a sibling `Cargo.toml` or a genuine `CACHEDIR.TAG` inside.
-pub fn recheck(path: &Path, volumes: &[VolumeInfo]) -> Result<(), String> {
-    if !path.is_absolute() {
-        return Err("it is not an absolute path".into());
-    }
-    // A Volume mounted on or inside it would be emptied too: removal does not stop at mount points.
-    if volumes.iter().any(|v| v.mount.starts_with(path)) {
-        return Err("a Volume is mounted on or inside it".into());
-    }
-    let meta = std::fs::symlink_metadata(path).map_err(|_| "it no longer exists".to_owned())?;
-    if !meta.is_dir() {
-        return Err("it is no longer a folder".into());
-    }
-    if path.file_name().is_none_or(|n| n != "target") {
-        return Err("it is not named target".into());
-    }
-    // Markers must be plain files: a link could point anywhere.
-    let plain = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
-    let cargo = path.parent().is_some_and(|p| plain(&p.join("Cargo.toml")));
-    let tag = path.join("CACHEDIR.TAG");
-    let tagged = plain(&tag) && std::fs::read(&tag).is_ok_and(|b| b.starts_with(CACHEDIR_SIGNATURE.as_bytes()));
-    if cargo || tagged {
-        Ok(())
-    } else {
-        Err("its Cargo.toml and CACHEDIR.TAG marker are gone".into())
-    }
-}
-
-/// What Clean did.
-#[derive(Debug, Default)]
-pub struct Outcome {
-    pub removed: Vec<PathBuf>,
-    /// Paths left alone, each with why.
-    pub skipped: Vec<(PathBuf, String)>,
-}
-
-/// Rechecks each path and permanently removes the ones that still match. `remove_dir_all` never
-/// follows links, so a folder swapped for a link after the recheck loses only the link.
-pub fn clean(paths: &[PathBuf], volumes: &[VolumeInfo]) -> Outcome {
-    let mut out = Outcome::default();
-    for path in paths {
-        match recheck(path, volumes).and_then(|()| std::fs::remove_dir_all(path).map_err(|e| e.to_string())) {
-            Ok(()) => out.removed.push(path.clone()),
-            Err(why) => out.skipped.push((path.clone(), why)),
-        }
-    }
-    out
-}
+type Key = (String, PathBuf);
 
 pub struct CleanerPage {
     shared: Arc<Shared>,
     repaint: Repaint,
     volumes: Vec<VolumeInfo>,
+    rules: Rules,
+    /// When `cleanup.toml` was last read, as its modification time (None: no such file).
+    rules_stamp: Option<SystemTime>,
+    /// Age limits in days for pre-ticking temporary files and build artefacts.
+    temp_days: u64,
+    build_days: u64,
     /// Index generation `cleanables` was found in.
     seen: Option<u64>,
     cleanables: Vec<Cleanable>,
-    ticked: HashSet<PathBuf>,
+    /// Cleanables already shown, so one that appears later is pre-ticked once and a choice of the
+    /// user's stays.
+    known: HashSet<Key>,
+    ticked: HashSet<Key>,
+    /// What the commands of the last Clean said.
+    report: Vec<CommandReport>,
     advanced: bool,
 }
 
+fn rules_stamp() -> Option<SystemTime> {
+    std::fs::metadata(cleanup_path()?).ok()?.modified().ok()
+}
+
 impl CleanerPage {
-    pub fn new(shared: Arc<Shared>, repaint: Repaint, volumes: Vec<VolumeInfo>) -> Self {
+    pub fn new(shared: Arc<Shared>, repaint: Repaint, volumes: Vec<VolumeInfo>, settings: &Settings) -> Self {
         Self {
             shared,
             repaint,
             volumes,
+            rules: rules::load(cleanup_path().as_deref()),
+            rules_stamp: rules_stamp(),
+            temp_days: settings.cleaner_temp_days,
+            build_days: settings.cleaner_build_days,
             seen: None,
             cleanables: Vec::new(),
+            known: HashSet::new(),
             ticked: HashSet::new(),
+            report: Vec::new(),
             advanced: false,
         }
     }
@@ -149,21 +74,46 @@ impl CleanerPage {
         cx.notify();
     }
 
-    /// Looks for Cleanables again when the Index changed since the last look.
+    /// Takes the age limits; new ones start the Cleanup Plan over with the new pre-ticking.
+    pub fn set_settings(&mut self, settings: &Settings, cx: &mut Context<Self>) {
+        if (self.temp_days, self.build_days) != (settings.cleaner_temp_days, settings.cleaner_build_days) {
+            self.temp_days = settings.cleaner_temp_days;
+            self.build_days = settings.cleaner_build_days;
+            self.known.clear();
+            self.ticked.clear();
+            self.seen = None;
+            cx.notify();
+        }
+    }
+
+    /// Looks for Cleanables again when the Index or `cleanup.toml` changed since the last look.
     // ponytail: scans on the render thread; move to a background thread if a 10M-Entry Index makes it visible.
     fn refresh(&mut self) {
+        let stamp = rules_stamp();
+        if stamp != self.rules_stamp {
+            self.rules_stamp = stamp;
+            self.rules = rules::load(cleanup_path().as_deref());
+            self.seen = None;
+        }
         let index = self.shared.index.read();
         if self.seen == Some(index.generation()) {
             return;
         }
-        self.cleanables = find_rust_targets(&index, &self.volumes);
+        self.cleanables = rules::find(&index, &self.volumes, &self.rules.rules);
         self.seen = Some(index.generation());
-        let present: HashSet<&PathBuf> = self.cleanables.iter().map(|c| &c.path).collect();
-        self.ticked.retain(|p| present.contains(p));
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
+        for c in &self.cleanables {
+            if self.known.insert(c.key()) && c.pre_ticked(now, self.temp_days, self.build_days) {
+                self.ticked.insert(c.key());
+            }
+        }
+        let present: HashSet<Key> = self.cleanables.iter().map(Cleanable::key).collect();
+        self.known.retain(|k| present.contains(k));
+        self.ticked.retain(|k| present.contains(k));
     }
 
     fn plan(&self) -> Vec<&Cleanable> {
-        self.cleanables.iter().filter(|c| self.ticked.contains(&c.path)).collect()
+        self.cleanables.iter().filter(|c| self.ticked.contains(&c.key())).collect()
     }
 
     fn ask_clean(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -172,35 +122,59 @@ impl CleanerPage {
             return;
         }
         let total: u64 = plan.iter().map(|c| c.on_disk).sum();
+        let commands = plan.iter().filter(|c| c.rule.is_command()).count();
         let this = cx.entity();
         let volumes = self.volumes.clone();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let this = this.clone();
-            let paths: Vec<PathBuf> = plan.iter().map(|c| c.path.clone()).collect();
+            let items: Vec<(Arc<Rule>, PathBuf)> = plan.iter().map(|c| (c.rule.clone(), c.path.clone())).collect();
             let volumes = volumes.clone();
+            let mut what = format!("This permanently removes {} item(s)", plan.len() - commands);
+            if commands > 0 {
+                what.push_str(&format!(" and runs {commands} command(s)"));
+            }
             dialog
                 .confirm()
                 .title("Clean these now?")
                 .description(format!(
-                    "This permanently removes {} folder(s), freeing about {}. It bypasses the Trash and cannot be undone.",
-                    plan.len(),
+                    "{what}, freeing about {}. It bypasses the Trash and cannot be undone.",
                     format::size(total)
                 ))
                 .ok_text("Clean")
                 .ok_variant(ButtonVariant::Danger)
                 .on_ok(move |_, window, cx| {
-                    this.update(cx, |page, cx| page.start_clean(paths.clone(), volumes.clone(), window, cx));
+                    this.update(cx, |page, cx| page.start_clean(items.clone(), volumes.clone(), window, cx));
                     true
                 })
         });
     }
 
-    fn start_clean(&mut self, paths: Vec<PathBuf>, volumes: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_clean(&mut self, plan: Vec<(Arc<Rule>, PathBuf)>, volumes: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) {
+        let shared = self.shared.clone();
         window
             .spawn(cx, {
                 let this = cx.entity();
                 async move |cx| {
-                    let outcome = cx.background_executor().spawn(async move { clean(&paths, &volumes) }).await;
+                    let outcome = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let outcome = clean(&plan, &volumes);
+                            // Whatever a command changed is read back into the Index.
+                            // ponytail: re-syncs the whole Volume; sync only the working folder when that is cheaper.
+                            let mut synced = Vec::new();
+                            for command in outcome.commands.iter().filter(|c| c.result.is_ok()) {
+                                let volume = {
+                                    let index = shared.index.read();
+                                    index.find_path(&command.cwd).and_then(|id| index.volume_of(id))
+                                };
+                                if let Some(volume) = volume.filter(|v| !synced.contains(v)) {
+                                    let _ = ve_scan::sync(&shared.index, volume, &shared.progress);
+                                    synced.push(volume);
+                                }
+                            }
+                            outcome
+                        })
+                        .await;
                     cx.update(|window, cx| {
                         let (shared, repaint) = {
                             let page = this.read(cx);
@@ -223,27 +197,70 @@ impl CleanerPage {
                         }
                         // Wakes the Dashboard and status bar, which read the changed Index.
                         repaint();
-                        this.update(cx, |page, cx| {
-                            page.ticked.clear();
-                            cx.notify();
-                        });
-                        let mut text = format!("Permanently removed {} folder(s).", outcome.removed.len());
+                        let failed = outcome.commands.iter().filter(|c| !c.succeeded()).count();
+                        let mut text = format!("Permanently removed {} item(s).", outcome.removed.len());
+                        if !outcome.commands.is_empty() {
+                            text.push_str(&format!(" Ran {} command(s), {failed} failed.", outcome.commands.len()));
+                        }
                         if !outcome.skipped.is_empty() {
                             text.push_str(&format!(" Skipped {}: ", outcome.skipped.len()));
                             let why: Vec<String> = outcome.skipped.iter().map(|(p, w)| format!("{} ({w})", p.display())).collect();
                             text.push_str(&why.join("; "));
                         }
-                        let note = if outcome.skipped.is_empty() {
-                            Notification::info(text)
-                        } else {
-                            Notification::warning(text)
-                        };
-                        window.push_notification(note, cx);
+                        let ok = outcome.skipped.is_empty() && failed == 0;
+                        this.update(cx, |page, cx| {
+                            page.ticked.clear();
+                            page.report = outcome.commands;
+                            cx.notify();
+                        });
+                        window.push_notification(
+                            if ok {
+                                Notification::info(text)
+                            } else {
+                                Notification::warning(text)
+                            },
+                            cx,
+                        );
                     })
                     .ok();
                 }
             })
             .detach();
+    }
+
+    fn report_panel(&self, cx: &App) -> Option<Div> {
+        if self.report.is_empty() {
+            return None;
+        }
+        let p = palette(cx);
+        let mono = cx.theme().mono_font_family.clone();
+        let entries = self.report.iter().map(|r| {
+            let (status, color, output) = match &r.result {
+                Ok((Some(0), out)) => ("exit status 0".to_owned(), p.muted, out.clone()),
+                Ok((Some(code), out)) => (format!("failed: exit status {code}"), p.warning, out.clone()),
+                Ok((None, out)) => ("failed: stopped by a signal".to_owned(), p.warning, out.clone()),
+                Err(why) => (format!("not run: {why}"), p.warning, String::new()),
+            };
+            v_flex()
+                .gap_1()
+                .child(
+                    div()
+                        .font_family(mono.clone())
+                        .child(format!("{}  (in {})", r.argv, r.cwd.display())),
+                )
+                .child(div().text_color(color).child(status))
+                .when(!output.is_empty(), |d| {
+                    d.child(div().font_family(mono.clone()).text_xs().child(output))
+                })
+        });
+        Some(
+            panel(cx).child(
+                v_flex()
+                    .gap_2()
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Output of the last Clean"))
+                    .children(entries),
+            ),
+        )
     }
 }
 
@@ -251,39 +268,68 @@ impl Render for CleanerPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh();
         let p = palette(cx);
-        let (muted, rule) = (p.muted, p.rule);
+        let (muted, rule, warning) = (p.muted, p.rule, p.warning);
         let plan = self.plan();
         let (count, total) = (plan.len(), plan.iter().map(|c| c.on_disk).sum::<u64>());
-        let rows = self.cleanables.iter().enumerate().map(|(ix, c)| {
-            let path = c.path.clone();
-            h_flex()
-                .gap(px(12.))
-                .py(px(6.))
-                .border_b_1()
-                .border_color(rule)
-                .items_center()
-                .child(
-                    Checkbox::new(("cleanable", ix))
-                        .checked(self.ticked.contains(&c.path))
-                        .on_click(cx.listener(move |this, on: &bool, _, cx| {
-                            if *on {
-                                this.ticked.insert(path.clone());
-                            } else {
-                                this.ticked.remove(&path);
-                            }
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .child(div().truncate().child(c.path.display().to_string()))
-                        .child(caption("Rust build artefacts", cx)),
-                )
-                .child(div().flex_none().child(format::size(c.on_disk)))
-        });
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut group = None;
+        for (ix, c) in self.cleanables.iter().enumerate() {
+            if group != Some(c.rule.group) {
+                group = Some(c.rule.group);
+                rows.push(
+                    div()
+                        .mt(px(if rows.is_empty() { 0. } else { 12. }))
+                        .pb(px(4.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(c.rule.group.title())
+                        .into_any_element(),
+                );
+            }
+            let key = c.key();
+            let by = if c.rule.is_command() {
+                format!("{}: runs {}", c.rule.name, c.rule.argv_text())
+            } else {
+                c.rule.name.clone()
+            };
+            rows.push(
+                h_flex()
+                    .gap(px(12.))
+                    .py(px(6.))
+                    .border_b_1()
+                    .border_color(rule)
+                    .items_center()
+                    .child(
+                        Checkbox::new(("cleanable", ix))
+                            .checked(self.ticked.contains(&key))
+                            .on_click(cx.listener(move |this, on: &bool, _, cx| {
+                                if *on {
+                                    this.ticked.insert(key.clone());
+                                } else {
+                                    this.ticked.remove(&key);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().child(c.path.display().to_string()))
+                            .child(caption(by, cx)),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_none()
+                            .items_end()
+                            .child(format::size(c.on_disk))
+                            .when(c.rule.is_command(), |d| d.child(caption("Estimated", cx))),
+                    )
+                    .into_any_element(),
+            );
+        }
         let advanced = self.advanced.then(|| {
+            let paths: Vec<_> = plan.iter().filter(|c| !c.rule.is_command()).collect();
+            let commands: Vec<_> = plan.iter().filter(|c| c.rule.is_command()).collect();
             v_flex()
                 .gap_1()
                 .mt(px(12.))
@@ -291,20 +337,40 @@ impl Render for CleanerPage {
                 .rounded_md()
                 .bg(cx.theme().muted)
                 .font_family(cx.theme().mono_font_family.clone())
-                .child(caption("Removed permanently, exactly these paths:", cx))
-                .children(plan.iter().map(|c| div().child(c.path.display().to_string())))
+                .when(!paths.is_empty(), |d| {
+                    d.child(caption("Removed permanently, exactly these paths:", cx))
+                        .children(paths.iter().map(|c| div().child(c.path.display().to_string())))
+                })
+                .when(!commands.is_empty(), |d| {
+                    d.child(caption(
+                        "Run without a shell, exactly this argv, in this working folder (the size is Estimated):",
+                        cx,
+                    ))
+                    .children(commands.iter().map(|c| {
+                        v_flex()
+                            .child(div().child(c.rule.argv_text()))
+                            .child(caption(format!("in {}", c.path.display()), cx))
+                    }))
+                })
                 .when(count == 0, |d| d.child(caption("Nothing ticked.", cx)))
+        });
+        let problems = (!self.rules.errors.is_empty()).then(|| {
+            v_flex()
+                .gap_1()
+                .text_color(warning)
+                .child("Some Cleanup Rules were not read; the others still work:")
+                .children(self.rules.errors.iter().map(|e| div().child(e.clone())))
         });
         div().id("cleaner").size_full().overflow_y_scroll().child(
             v_flex()
                 .gap(px(16.))
                 .p(px(16.))
                 .child(div().text_size(px(24.)).line_height(px(32.)).child("Cleaner"))
-                .child(
-                    div()
-                        .text_color(muted)
-                        .child("Rust target folders, found in the Index: a sibling Cargo.toml or a CACHEDIR.TAG inside confirms them."),
-                )
+                .child(div().text_color(muted).child(format!(
+                    "Temporary files, caches and build artefacts, found in the Index and confirmed by Cleanup Rules (add your own in cleanup.toml). Pre-ticked: temporary files untouched for {} days and build artefacts whose project is untouched for {} days; the limits are in Settings.",
+                    self.temp_days, self.build_days
+                )))
+                .children(problems)
                 .child(
                     panel(cx)
                         .child(v_flex().children(rows))
@@ -334,148 +400,8 @@ impl Render for CleanerPage {
                                 ),
                         )
                         .children(advanced),
-                ),
+                )
+                .children(self.report_panel(cx)),
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    // Not `super::*`: the glob would bring gpui's own `test` attribute into scope.
-    use super::{CACHEDIR_SIGNATURE, Index, Path, PathBuf, VolumeInfo, clean, find_rust_targets, recheck};
-    use ve_core::{EntryMeta, SyncState};
-
-    fn dir() -> EntryMeta {
-        EntryMeta {
-            is_dir: true,
-            ..Default::default()
-        }
-    }
-
-    fn file(size: u64) -> EntryMeta {
-        EntryMeta {
-            on_disk: size,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn finds_only_marked_targets_on_writable_locations() {
-        let mut index = Index::new();
-        let vol = index.add_volume(Path::new("/w"), "ext4", "uuid:w", dir(), SyncState::Walk);
-        let root = index.volume(vol).unwrap().root;
-        // Sibling Cargo.toml.
-        let a = index.insert(root, "a", dir());
-        index.insert(a, "Cargo.toml", file(10));
-        let target = index.insert(a, "target", dir());
-        index.insert(target, "big", file(4096));
-        // A nested target inside it is not listed separately.
-        let inner = index.insert(target, "target", dir());
-        index.insert(inner, "CACHEDIR.TAG", file(1));
-        // Marker inside, no Cargo.toml.
-        let b = index.insert(root, "b", dir());
-        let tagged = index.insert(b, "target", dir());
-        index.insert(tagged, "CACHEDIR.TAG", file(8));
-        // Unmarked `target`, and a Cargo.toml *folder* doesn't count.
-        let c = index.insert(root, "c", dir());
-        index.insert(c, "target", dir());
-        let d = index.insert(root, "d", dir());
-        index.insert(d, "Cargo.toml", dir());
-        index.insert(d, "target", dir());
-
-        let found = find_rust_targets(&index, &[]);
-        let paths: Vec<_> = found.iter().map(|c| c.path.clone()).collect();
-        assert_eq!(paths, vec![PathBuf::from("/w/a/target"), PathBuf::from("/w/b/target")]);
-        assert_eq!(found[0].on_disk, 4096 + 1);
-
-        // Read-only mounts, Offline Volumes and Remotes are never offered.
-        let ro = VolumeInfo {
-            mount: "/w".into(),
-            identity: "uuid:w".into(),
-            fs_type: "ext4".into(),
-            label: String::new(),
-            removable: false,
-            network: false,
-            read_only: true,
-        };
-        assert!(find_rust_targets(&index, &[ro]).is_empty());
-        index.set_mount(vol, None);
-        assert!(find_rust_targets(&index, &[]).is_empty());
-        let remote = index.add_remote(&ve_core::Remote::new("me@box", "/srv").unwrap());
-        let rroot = index.volume(remote).unwrap().root;
-        let r = index.insert(rroot, "p", dir());
-        index.insert(r, "Cargo.toml", file(1));
-        index.insert(r, "target", dir());
-        assert!(find_rust_targets(&index, &[]).is_empty());
-    }
-
-    #[test]
-    fn clean_rechecks_on_disk() {
-        let base = std::env::temp_dir().join(format!("ve-cleaner-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let make = |name: &str, cargo: bool, tag: Option<&str>| {
-            let target = base.join(name).join("target");
-            std::fs::create_dir_all(&target).unwrap();
-            std::fs::write(target.join("artefact"), "x").unwrap();
-            if cargo {
-                std::fs::write(base.join(name).join("Cargo.toml"), "").unwrap();
-            }
-            if let Some(tag) = tag {
-                std::fs::write(target.join("CACHEDIR.TAG"), tag).unwrap();
-            }
-            target
-        };
-        let cargo = make("cargo", true, None);
-        let tagged = make("tagged", false, Some(CACHEDIR_SIGNATURE));
-        let fake_tag = make("faketag", false, Some("nope"));
-        let unmarked = make("unmarked", false, None);
-        let vanished = base.join("vanished").join("target");
-
-        let out = clean(
-            &[cargo.clone(), tagged.clone(), fake_tag.clone(), unmarked.clone(), vanished.clone()],
-            &[],
-        );
-        assert_eq!(out.removed, vec![cargo.clone(), tagged.clone()]);
-        assert!(!cargo.exists() && !tagged.exists());
-        assert!(fake_tag.exists() && unmarked.exists());
-        assert_eq!(out.skipped.len(), 3);
-        assert!(out.skipped.iter().any(|(p, _)| *p == vanished));
-        // A marker that vanished since the Index was built skips the folder too.
-        std::fs::remove_file(fake_tag.join("CACHEDIR.TAG")).unwrap();
-        assert!(recheck(&fake_tag, &[]).is_err());
-        // A symlinked Cargo.toml is no marker, and a symlinked target is never removed.
-        #[cfg(unix)]
-        {
-            let linked = make("linked", false, None);
-            std::os::unix::fs::symlink(base.join("unmarked").join("target"), base.join("linked").join("Cargo.toml")).unwrap();
-            assert!(recheck(&linked, &[]).is_err());
-            let alias = base.join("alias").join("target");
-            std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
-            std::fs::write(alias.parent().unwrap().join("Cargo.toml"), "").unwrap();
-            std::os::unix::fs::symlink(&unmarked, &alias).unwrap();
-            assert!(recheck(&alias, &[]).is_err());
-        }
-        // A Volume mounted inside, a relative path and a symlinked CACHEDIR.TAG are all refused.
-        let mounted = make("mounted", true, None);
-        let inside = VolumeInfo {
-            mount: mounted.join("deep"),
-            identity: "uuid:m".into(),
-            fs_type: "ext4".into(),
-            label: String::new(),
-            removable: true,
-            network: false,
-            read_only: false,
-        };
-        assert!(recheck(&mounted, &[inside]).is_err());
-        assert!(recheck(Path::new("target"), &[]).is_err());
-        #[cfg(unix)]
-        {
-            let tagged_link = make("taglink", false, None);
-            let real = base.join("real.tag");
-            std::fs::write(&real, CACHEDIR_SIGNATURE).unwrap();
-            std::os::unix::fs::symlink(&real, tagged_link.join("CACHEDIR.TAG")).unwrap();
-            assert!(recheck(&tagged_link, &[]).is_err());
-        }
-        std::fs::remove_dir_all(&base).unwrap();
     }
 }

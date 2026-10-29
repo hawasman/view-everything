@@ -13,7 +13,7 @@ never wait on a scan.
   indexed over SSH/SFTP, S3 and FTP. Test a Remote's details before you add it, and edit it later
   from Settings.
 - **Trash**: Move to Trash and Empty Trash with confirmation.
-- **Cleaner**: lists Rust `target/` folders found in the Index (a sibling `Cargo.toml` or a `CACHEDIR.TAG` inside confirms them) with their On-disk Size. Tick them to form a Cleanup Plan, review the exact paths under Advanced, and Clean removes them permanently (not via the Trash) after re-checking each on disk. Remotes, Offline Volumes and read-only mounts are never offered.
+- **Cleaner**: lists what can be regenerated or discarded, grouped as Temporary Files, Caches and Build Artefacts, with each one's On-disk Size. Built-in Cleanup Rules cover the user temp and cache folders, Rust `target/`, Next.js `.next`, `node_modules` and other tool output; you can add [your own](#cleanup-rules). Build artefacts count only when a project marker is found (a sibling `Cargo.toml`, `package.json`, …). Temporary files are pre-ticked when nothing in them changed for 7 days and build artefacts when nothing in the project changed for 30 days (both limits are in Settings); caches and `node_modules` are never pre-ticked. Tick them to form a Cleanup Plan, review the exact paths and commands under Advanced, and Clean removes them permanently (not via the Trash) after re-checking each on disk. Some rules remove by running a tool's own command (such as `npm cache clean --force`): it runs without a shell, its size is only an Estimated one, and its output and exit status are shown after Clean. Remotes, Offline Volumes and read-only mounts are never offered.
 
 The vocabulary used in the app and the code is defined in [CONTEXT.md](CONTEXT.md); design
 decisions are recorded in [docs/adr](docs/adr).
@@ -40,6 +40,40 @@ containing `/` or `\` matches the full path. Text ignores case unless told other
 
 `case:` and `wholeword:` prefix a plain or wildcard term, chain (`case:wholeword:Cat`), and combine
 with `!` and `|` (`!wholeword:tmp`, `case:Foo|case:Bar`).
+
+## Cleanup rules
+
+The Cleaner's rules are written in TOML; the built-in ones (`crates/ve-app/src/cleaner/builtin.toml`) use the same format as your own, which go in `cleanup.toml` next to `settings.toml` (`~/.config/view-everything/` on Linux, `~/Library/Application Support/view-everything/` on macOS, `%APPDATA%\view-everything\` on Windows). The file is read again whenever it changes. A mistake shows in the Cleaner with the file, line and reason; the built-in rules keep working (a syntax error skips the whole file, a bad rule only itself).
+
+```toml
+[[rule]]
+name = "Python virtualenvs"      # shown in the Cleaner
+group = "build"                  # temp, cache or build
+query = 'regex:^\.venv$'         # a Query: what the rule matches
+markers = ["../pyproject.toml", "../requirements.txt"]   # one must be a plain file
+tick = false                     # never pre-ticked
+
+[[rule]]
+name = "cargo clean"
+group = "build"
+query = 'child:Cargo.toml'       # folders holding a Cargo.toml
+markers = ["Cargo.toml"]
+command = ["cargo", "clean"]     # run in the matched folder, without a shell
+estimate = "target"              # what to size for the Estimated figure
+```
+
+| Key | |
+| --- | --- |
+| `name`, `group` | Required. `group` is `temp` (Temporary Files), `cache` (Caches) or `build` (Build Artefacts). |
+| `query` | Required. A [Query](#query-language) over the Index. `{home}`, `{cache}` and `{temp}` stand for those folders of the user, so `parent:"{cache}"` selects what is directly inside the user cache folder. |
+| `markers` | Required unless the Query names a location with `parent:`. Paths relative to a match, such as `../package.json` (a sibling) or `CACHEDIR.TAG` (inside). A match counts only when one is a plain file (never a link).  |
+| `files` | `true` lets files match too, not only folders. |
+| `tick` | `false` never pre-ticks the rule. Caches are never pre-ticked either. |
+| `platforms` | Any of `linux`, `macos`, `windows`; every platform when left out. |
+| `command` | Removes by running this argv, without a shell, in the matched folder, instead of removing the matched paths. The Cleaner shows the exact argv and folder, marks the size Estimated, reports output and a non-zero exit after Clean, and reads the folder's Volume into the Index again. |
+| `estimate` | With `command`: a path inside the matched folder whose size is shown. |
+
+Clean checks every match again on disk (the Query, the markers, no links, no Volume mounted inside) before it removes or runs anything.
 
 ## Install
 
