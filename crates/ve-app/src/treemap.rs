@@ -3,9 +3,10 @@
 use crate::engine::Shared;
 use crate::format;
 use crate::theme::palette;
-use crate::ui::{caption, swatch};
+use crate::ui::{caption, pill, swatch};
 use crate::view::View;
-use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::{WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::Cell;
@@ -437,6 +438,47 @@ impl Treemap {
         hit(&self.tiles, f32::from(local.x), f32::from(local.y)).map(|t| (t.id, local))
     }
 
+    /// Writes the tiles as drawn to a PNG file: the panel's colours, without the text labels.
+    fn export_png(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let size = self.bounds.get().size;
+        let (w, h) = (f32::from(size.width), f32::from(size.height));
+        if self.tiles.is_empty() || w < 1. || h < 1. {
+            window.push_notification(Notification::warning("Nothing to export yet."), cx);
+            return;
+        }
+        let p = palette(cx);
+        let rgb = |c: Hsla| {
+            let c = Rgba::from(c);
+            [c.r, c.g, c.b].map(|v| (v * 255.).round() as u8)
+        };
+        let free = rgb(p.free);
+        // Subdivided folders show only as the gaps between their children: the background.
+        let blocks: Vec<_> = self
+            .tiles
+            .iter()
+            .filter(|t| !t.subdivided)
+            .flat_map(|t| {
+                let r = t.rect;
+                // Same 1px seam in the panel colour as the painted tile.
+                let seam = r.width() > 3.0 && r.height() > 3.0;
+                let inner = if seam { r.shrink(1.) } else { r };
+                [
+                    crate::export::Block {
+                        rect: [r.x0, r.y0, r.x1, r.y1],
+                        rgb: free,
+                    },
+                    crate::export::Block {
+                        rect: [inner.x0, inner.y0, inner.x1, inner.y1],
+                        rgb: rgb(p.category(t.category)),
+                    },
+                ]
+            })
+            .collect();
+        crate::export::save(window, cx, "treemap.png", move |path| {
+            std::fs::write(path, crate::export::encode_png(w, h, free, &blocks)?)
+        });
+    }
+
     /// Panel title, then the path of the folder shown: Index / home / mohammed 109 GB.
     fn header(&self, index: &Index, view: &View, root: EntryId, cx: &mut Context<Self>) -> Div {
         let (muted, text) = (palette(cx).muted, palette(cx).text);
@@ -482,7 +524,12 @@ impl Treemap {
             .items_baseline()
             .mb(px(14.))
             .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child("Treemap"))
-            .child(caption("Filtered Size · double-click a folder to zoom", cx));
+            .child(caption("Filtered Size · double-click a folder to zoom", cx))
+            .child(
+                pill("export-png", "Export PNG")
+                    .small()
+                    .build(cx, cx.listener(|this, _, window, cx| this.export_png(window, cx))),
+            );
         v_flex().child(title).child(
             row.child(
                 div()

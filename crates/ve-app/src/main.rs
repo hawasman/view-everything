@@ -10,6 +10,7 @@ mod dashboard;
 mod dashboard_summary;
 mod engine;
 mod explorer;
+mod export;
 mod filters;
 mod format;
 mod scope;
