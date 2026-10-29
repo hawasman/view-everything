@@ -244,12 +244,13 @@ impl WebdavForm {
     }
 
     /// The WebDAV Remote typed in and the password typed for it, if any. `editing` is the Remote
-    /// the dialog edits: its password stays when none is typed.
+    /// the dialog edits: its password stays when none is typed and the server and user are unchanged.
     fn read(&self, editing: Option<&Remote>, cx: &App) -> Result<(Remote, Option<String>), String> {
         let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_owned();
         let remote = WebdavRemote::new(&text(&self.url), &text(&self.user))?;
         let password = self.password.read(cx).value().to_string();
-        let kept = matches!(editing, Some(Remote::Webdav(old)) if !old.user.is_empty());
+        // The stored password is only for the server and user it was typed for.
+        let kept = matches!(editing, Some(Remote::Webdav(old)) if !old.user.is_empty() && *old == remote);
         if password.is_empty() && !remote.user.is_empty() && !kept {
             return Err("Enter the password for this user".into());
         }
@@ -297,7 +298,7 @@ impl AzureForm {
 
     /// The Azure Blob Remote typed in and the account key or SAS token typed for it, if any.
     /// `editing` is the Remote the dialog edits: its secret stays when none is typed, unless it
-    /// was the other kind of secret.
+    /// was the other kind of secret or is for another endpoint.
     fn read(&self, sas: bool, editing: Option<&Remote>, cx: &App) -> Result<(Remote, Option<String>), String> {
         let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_owned();
         let remote = AzureRemote::new(
@@ -308,7 +309,8 @@ impl AzureForm {
             sas,
         )?;
         let secret = self.secret.read(cx).value().trim().to_owned();
-        let kept = matches!(editing, Some(Remote::Azure(old)) if old.sas == sas);
+        // The stored secret is only for the endpoint and kind it was typed for.
+        let kept = matches!(editing, Some(Remote::Azure(old)) if old.identity() == remote.identity() && old.sas == sas);
         if secret.is_empty() && !kept {
             return Err(if sas { "Enter the SAS token" } else { "Enter the account key" }.into());
         }

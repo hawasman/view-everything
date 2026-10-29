@@ -476,7 +476,7 @@ impl RemoteKind for WebdavRemote {
         "WebDAV"
     }
     fn has_secret(&self) -> bool {
-        true
+        !self.user.is_empty()
     }
     fn needs_secret(&self) -> bool {
         !self.user.is_empty()
