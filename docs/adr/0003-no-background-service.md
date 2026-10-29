@@ -1,5 +1,7 @@
 # No background service; Catch-up at launch when stale
 
+_Partly superseded by ADR-0009 (live change tracking on macOS and Linux)._
+
 Unlike Everything, the app installs no privileged service that starts at boot. It updates the Index only while running, and at launch it shows the saved Index at once with each Location's Last Synced time. A privileged service would bring its own install, update and security problems.
 
 Catch-up at launch runs only for Locations whose Last Synced is older than the refresh interval, so restarting the app does not repeat a full re-walk it just did. NTFS Volumes are the exception: reading the change journal is cheap, so they always catch up. On other filesystems the folder tree is re-walked and the differences applied to the saved Index.

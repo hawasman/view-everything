@@ -42,6 +42,10 @@ _Avoid_: last updated, last scan, last refresh
 Bringing a Location up to date with changes made while the app was not running, done at launch for Locations whose Last Synced is stale.
 _Avoid_: rescan, resync, refresh
 
+**Snapshot**:
+The Folder Size of every folder in the Index at one moment, kept so two moments can be compared.
+_Avoid_: scan history, backup, version
+
 ### Size
 
 **Logical Size**:
@@ -68,6 +72,10 @@ _Avoid_: matched size, partial size
 A coarse file kind (Video, Image, Audio, Archive, Code, Document, Executable, Other) derived from an Entry's extension; it sets treemap colour and the `type:` filter.
 _Avoid_: file type, kind, group
 
+**Duplicate**:
+A file on a Volume whose content is identical to another file's, confirmed by hash. Hard links to one file are not Duplicates.
+_Avoid_: copy, twin, same file
+
 ### Views
 
 **Dashboard**:
@@ -93,5 +101,27 @@ Moving Entries to the operating system's trash, where they can be restored. Tras
 _Avoid_: delete, remove (unqualified)
 
 **Empty Trash**:
-Permanently removing everything in the operating system's trash. The only permanent change the app makes.
+Permanently removing everything in the operating system's trash. One of the app's two permanent changes, with Clean.
 _Avoid_: purge, permanent delete
+
+### Cleaning
+
+**Cleaner**:
+The view for reclaiming space from files that can be regenerated or discarded: temporary files, caches and build artefacts.
+_Avoid_: cleanup window, optimizer
+
+**Cleanup Rule**:
+A Query, the project markers that must be present, and how to remove what matches: either the matched paths themselves or a tool's own command. Built-in and user-written rules are the same kind of thing.
+_Avoid_: action, preset, Category
+
+**Cleanable**:
+One thing a Cleanup Rule found, such as a project's build-artefact folder.
+_Avoid_: junk, candidate, finding
+
+**Cleanup Plan**:
+The reviewed list of Cleanables, with the exact paths and commands that Clean will apply.
+_Avoid_: preview, report
+
+**Clean**:
+Permanently removing the Cleanables in a Cleanup Plan, bypassing the Trash so the space is actually freed.
+_Avoid_: delete, purge, wipe

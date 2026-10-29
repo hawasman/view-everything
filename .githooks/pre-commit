@@ -1,7 +1,14 @@
 #!/bin/sh
 # Enabled per clone with: git config core.hooksPath .githooks
 # Mirrors CI: formatting, lints, then the test suite. Skip once with `git commit --no-verify`.
+# Builds are heavy: every cargo run on this machine shares one lock, so parallel worktrees
+# take turns instead of exhausting RAM. A caller already holding it sets VE_BUILD_LOCK_HELD=1.
 set -e
+
+if [ -z "$VE_BUILD_LOCK_HELD" ] && command -v flock >/dev/null 2>&1; then
+    VE_BUILD_LOCK_HELD=1 exec flock /tmp/view-everything-build.lock "$0" "$@"
+fi
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
