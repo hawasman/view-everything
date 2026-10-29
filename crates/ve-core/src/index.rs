@@ -725,13 +725,22 @@ impl Index {
         self.children(dir).iter().copied().find(|&c| self.name(c) == name)
     }
 
-    /// Full path of an Entry.
+    /// Full path of an Entry. A Remote's paths are the server's, joined with `/` on every OS.
     pub fn path(&self, id: EntryId) -> PathBuf {
         let mut chain = vec![id];
         let mut current = id;
         while let Some(parent) = self.parent(current) {
             chain.push(parent);
             current = parent;
+        }
+        let remote = self
+            .volume_with_root(current)
+            .and_then(|v| self.volume(v))
+            .is_some_and(Volume::is_remote);
+        if remote {
+            let mut path = String::new();
+            self.write_match_path(id, &mut path, &mut chain);
+            return PathBuf::from(path);
         }
         let mut path = PathBuf::from(self.name(current));
         for &component in chain.iter().rev().skip(1) {

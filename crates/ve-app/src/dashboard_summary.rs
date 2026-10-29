@@ -411,7 +411,7 @@ mod tests {
         let names: Vec<_> = s.largest.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names[..3], ["film.mp4", "photo.JPG", "song.mp3"]);
         assert_eq!(s.largest[0].volume, "a");
-        assert_eq!(s.largest[0].folder, "/a/docs");
+        assert_eq!(s.largest[0].folder, std::path::Path::new("/a").join("docs").display().to_string());
     }
 
     #[test]

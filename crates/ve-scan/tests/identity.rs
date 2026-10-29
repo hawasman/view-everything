@@ -30,7 +30,8 @@ fn indexed_then_restarted(root: &Path, identity: &str) -> SharedIndex {
     assert!(failed.is_empty());
     sync(&index, added[0]);
     index.write().mark_synced(added[0], 1_700_000_000, None);
-    let file = root.parent().unwrap().join(format!("{identity}.bin"));
+    // Identities hold `:`, which Windows file names cannot.
+    let file = root.parent().unwrap().join(format!("{}.bin", identity.replace(':', "-")));
     index.read().save(&file).unwrap();
     SharedIndex::new(Index::load(&file).unwrap())
 }

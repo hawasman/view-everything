@@ -6,12 +6,13 @@ use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::{Mutex, OnceLock};
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, GetLastError, HANDLE, NO_ERROR};
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, NO_ERROR};
 use windows_sys::Win32::NetworkManagement::WNet::WNetGetConnectionW;
 use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows_sys::Win32::Storage::FileSystem::{
-    GetCompressedFileSizeW, GetDiskFreeSpaceW, GetDriveTypeW, GetLogicalDriveStringsW, GetVolumeInformationW,
-    GetVolumeNameForVolumeMountPointW,
+    BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, GetCompressedFileSizeW, GetDiskFreeSpaceW, GetDriveTypeW, GetFileInformationByHandle, GetLogicalDriveStringsW,
+    GetVolumeInformationW, GetVolumeNameForVolumeMountPointW, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
@@ -195,6 +196,37 @@ fn quote_arg(arg: &str) -> String {
     out.extend(std::iter::repeat_n('\\', backslashes * 2));
     out.push('"');
     out
+}
+
+/// The file's NTFS file index (unique on its Volume) and its hard-link count; `None` if it
+/// cannot be opened. Opening asks for no access rights, so files in use still answer.
+pub fn link_info(path: &Path) -> Option<(u64, u32)> {
+    let (extended, _) = extended_path(path)?;
+    // SAFETY: `extended` is NUL terminated; no security attributes or template handle.
+    let handle: HANDLE = unsafe {
+        CreateFileW(
+            extended.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    // SAFETY: an all-zero BY_HANDLE_FILE_INFORMATION is valid; `handle` is open until closed below.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(handle, &mut info) } != 0;
+    unsafe { CloseHandle(handle) };
+    ok.then(|| {
+        (
+            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+            info.nNumberOfLinks,
+        )
+    })
 }
 
 /// Storage the file occupies on disk: its compressed/sparse-aware size from the filesystem,

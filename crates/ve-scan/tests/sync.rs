@@ -14,7 +14,10 @@ fn snapshot(index: &Index, volume: VolumeId) -> BTreeMap<String, (bool, u64, u64
         for &child in index.children(dir) {
             let path = format!("{prefix}/{}", index.name(child));
             let m = index.meta(child);
-            out.insert(path.clone(), (m.is_dir, m.logical, m.on_disk, m.modified));
+            // NTFS updates a folder's time in its parent's listing lazily, so a scan moments
+            // apart can read an older one; folder times are compared only where that cannot happen.
+            let modified = if m.is_dir && cfg!(windows) { 0 } else { m.modified };
+            out.insert(path.clone(), (m.is_dir, m.logical, m.on_disk, modified));
             if m.is_dir {
                 stack.push((child, path));
             }

@@ -183,11 +183,17 @@ fn fill_platform_meta(meta: &mut EntryMeta, metadata: &Metadata, _path: impl FnO
 
 #[cfg(windows)]
 fn fill_platform_meta(meta: &mut EntryMeta, metadata: &Metadata, path: impl FnOnce() -> PathBuf) {
-    meta.on_disk = if metadata.file_type().is_symlink() {
-        0
-    } else {
-        crate::platform::windows::on_disk_size(&path()).unwrap_or(metadata.len())
-    };
+    if metadata.file_type().is_symlink() {
+        meta.on_disk = 0;
+        return;
+    }
+    let path = path();
+    meta.on_disk = crate::platform::windows::on_disk_size(&path).unwrap_or(metadata.len());
+    // Without these, every hard link (WinSxS is full of them) would count in full.
+    if let Some((file_index, links)) = crate::platform::windows::link_info(&path) {
+        meta.key = file_index;
+        meta.hardlinked = links > 1;
+    }
 }
 
 #[cfg(unix)]

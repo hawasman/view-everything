@@ -460,7 +460,8 @@ mod tests {
         let default = Settings::default();
         let context = QueryContext::new(CategoryMap::builtin(), chrono::Local::now());
         let query = Query::parse(&default.recent_query_text(), &context).unwrap();
-        let home = dirs::home_dir().expect("a home folder").display().to_string();
+        // Candidates carry match paths, which use `/` on every OS (see Index::write_match_path).
+        let home = dirs::home_dir().expect("a home folder").display().to_string().replace('\\', "/");
         let holds = |path: &str| {
             let name = path.rsplit('/').next().unwrap();
             query.matches(&Candidate {
