@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use ve_core::EntryId;
 
@@ -97,8 +96,8 @@ impl HashCache {
 
 struct Candidate {
     id: EntryId,
-    path: PathBuf,
-    volume: String,
+    /// Position in the scanned Volumes' identities.
+    volume: usize,
     key: u64,
     size: u64,
     modified: i64,
@@ -116,18 +115,22 @@ pub fn find(
     cancel: &AtomicBool,
 ) -> (Vec<Group>, Stats) {
     let mut stats = Stats::default();
-    let index_guard = index.read();
-    let index = &*index_guard;
-    let mut scanned = Vec::new();
-    // Stage 1: equal Logical Size, hard links collapsed.
+    let mut scanned: Vec<String> = Vec::new();
+    // Stage 1: equal Logical Size, hard links collapsed. The Index is read one Volume at a
+    // time, so a sync is never held off for the whole walk.
     let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
-    for (_, volume) in index.volumes() {
-        if !volume.online || volume.is_remote() {
-            continue;
-        }
-        scanned.push(volume.identity.clone());
+    let volumes: Vec<_> = index
+        .read()
+        .volumes()
+        .filter(|(_, v)| v.online && !v.is_remote())
+        .map(|(_, v)| (v.identity.clone(), v.root))
+        .collect();
+    for (identity, root) in volumes {
+        let volume = scanned.len();
+        scanned.push(identity);
+        let index = index.read();
         let mut links = std::collections::HashSet::new();
-        let mut stack = vec![volume.root];
+        let mut stack = vec![root];
         while let Some(dir) = stack.pop() {
             for &child in index.children(dir) {
                 if index.is_dir(child) {
@@ -135,34 +138,31 @@ pub fn find(
                     continue;
                 }
                 let (size, key) = (index.logical(child), index.key(child));
-                if size < min_size.max(1) || (index.is_hardlinked(child) && !links.insert((volume.identity.clone(), key))) {
+                if size < min_size.max(1) || (index.is_hardlinked(child) && !links.insert(key)) {
                     continue;
                 }
                 by_size.entry(size).or_default().push(Candidate {
                     id: child,
-                    path: PathBuf::new(),
-                    volume: volume.identity.clone(),
+                    volume,
                     key,
                     size,
                     modified: index.modified(child),
-                    cached: cache.entries.get(&(volume.identity.clone(), key)).cloned(),
+                    cached: None,
                 });
             }
         }
     }
     by_size.retain(|_, files| files.len() > 1);
-    // Paths are resolved now so the Index is not held while files are read.
-    for file in by_size.values_mut().flatten() {
-        file.path = index.path(file.id);
+    let mut files: Vec<Candidate> = by_size.into_values().flatten().collect();
+    for file in &mut files {
+        file.cached = cache.entries.get(&(scanned[file.volume].clone(), file.key)).cloned();
     }
-    drop(index_guard);
 
     // Stage 2: equal first and last PARTIAL bytes.
-    let mut files: Vec<Candidate> = by_size.into_values().flatten().collect();
     progress.stage.store(1, Ordering::Relaxed);
     progress.done.store(0, Ordering::Relaxed);
     progress.total.store(files.len() as u64, Ordering::Relaxed);
-    let partial = hash_stage(&mut files, progress, cancel, &mut stats, Stage::Partial);
+    let partial = hash_stage(index, &mut files, progress, cancel, &mut stats, Stage::Partial);
     let mut groups: HashMap<(u64, Hash), Vec<usize>> = HashMap::new();
     for (i, hash) in partial.iter().enumerate() {
         if let Some(hash) = hash {
@@ -179,7 +179,7 @@ pub fn find(
     progress.stage.store(2, Ordering::Relaxed);
     progress.done.store(0, Ordering::Relaxed);
     progress.total.store(survivors.len() as u64, Ordering::Relaxed);
-    let full = hash_stage(&mut survivors, progress, cancel, &mut stats, Stage::Full);
+    let full = hash_stage(index, &mut survivors, progress, cancel, &mut stats, Stage::Full);
     let mut identical: HashMap<(u64, Hash), Vec<EntryId>> = HashMap::new();
     for (file, hash) in survivors.iter().zip(&full) {
         if let Some(hash) = hash {
@@ -194,7 +194,7 @@ pub fn find(
     }
     for file in files.iter().chain(&survivors) {
         if let Some(cached) = &file.cached {
-            cache.entries.insert((file.volume.clone(), file.key), cached.clone());
+            cache.entries.insert((scanned[file.volume].clone(), file.key), cached.clone());
         }
     }
 
@@ -214,8 +214,7 @@ pub fn find(
 fn placeholder() -> Candidate {
     Candidate {
         id: EntryId(0),
-        path: PathBuf::new(),
-        volume: String::new(),
+        volume: 0,
         key: 0,
         size: 0,
         modified: 0,
@@ -230,13 +229,20 @@ enum Stage {
 }
 
 /// Hashes every file for `stage` (or takes the cached hash), one thread per Volume.
-fn hash_stage(files: &mut [Candidate], progress: &HashProgress, cancel: &AtomicBool, stats: &mut Stats, stage: Stage) -> Vec<Option<Hash>> {
+fn hash_stage(
+    index: &SharedIndex,
+    files: &mut [Candidate],
+    progress: &HashProgress,
+    cancel: &AtomicBool,
+    stats: &mut Stats,
+    stage: Stage,
+) -> Vec<Option<Hash>> {
     let mut results: Vec<Option<Hash>> = vec![None; files.len()];
     let hashed = AtomicU64::new(0);
     let hits = AtomicU64::new(0);
-    let mut by_volume: HashMap<String, Vec<(&mut Candidate, &mut Option<Hash>)>> = HashMap::new();
+    let mut by_volume: HashMap<usize, Vec<(&mut Candidate, &mut Option<Hash>)>> = HashMap::new();
     for (file, slot) in files.iter_mut().zip(results.iter_mut()) {
-        by_volume.entry(file.volume.clone()).or_default().push((file, slot));
+        by_volume.entry(file.volume).or_default().push((file, slot));
     }
     std::thread::scope(|scope| {
         for (_, batch) in by_volume {
@@ -263,7 +269,12 @@ fn hash_stage(files: &mut [Candidate], progress: &HashProgress, cancel: &AtomicB
                             Some(hash)
                         }
                         None => {
-                            let hash = hash_file(&file.path, file.size, file.modified, stage == Stage::Partial).ok();
+                            // Paths are resolved one at a time so the Index is not held while files are read.
+                            let path = {
+                                let index = index.read();
+                                index.is_live(file.id).then(|| index.path(file.id))
+                            };
+                            let hash = path.and_then(|p| hash_file(&p, file.size, file.modified, stage == Stage::Partial, cancel).ok());
                             hashed.fetch_add(1, Ordering::Relaxed);
                             if let Some(hash) = hash {
                                 let cached = file.cached.get_or_insert(Cached {
@@ -294,26 +305,86 @@ fn hash_stage(files: &mut [Candidate], progress: &HashProgress, cancel: &AtomicB
     results
 }
 
-/// BLAKE3 of a whole file, or of its first and last [`PARTIAL`] bytes when `partial` and the
-/// file is longer than both together. A file whose length or modified time differs from the
-/// Index's is stale and reported as an error. (A second of slack: filesystems keep time at
-/// different precisions.)
-fn hash_file(path: &Path, size: u64, modified: i64, partial: bool) -> io::Result<Hash> {
-    let mut file = File::open(path)?;
+/// Opens `path` only if it is a regular file: a symlink is never followed (a path whose last
+/// component is one is refused) and a FIFO, socket or device is never opened, so nothing blocks
+/// or has side effects. The type is checked again on the open handle, so a file swapped for
+/// something else since the Index was read is refused too.
+fn open_regular(path: &Path) -> io::Result<(File, std::fs::Metadata)> {
+    let not_regular = || io::Error::other("not a regular file");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NONBLOCK keeps open() from waiting on a FIFO swapped in meanwhile.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        if !std::fs::symlink_metadata(path)?.file_type().is_file() {
+            return Err(not_regular());
+        }
+        // FILE_FLAG_OPEN_REPARSE_POINT: a link swapped in meanwhile is opened as itself.
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path)?;
     let meta = file.metadata()?;
-    let on_disk = meta
-        .modified()
+    if !meta.file_type().is_file() {
+        return Err(not_regular());
+    }
+    Ok((file, meta))
+}
+
+fn modified_ns(meta: &std::fs::Metadata, fallback: i64) -> i64 {
+    meta.modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(modified, |d| d.as_nanos() as i64);
-    if meta.len() != size || (on_disk - modified).abs() > 1_000_000_000 {
-        return Err(io::Error::other("file changed since it was indexed"));
+        .map_or(fallback, |d| d.as_nanos() as i64)
+}
+
+/// Feeds `len` bytes of `file` to `hasher` in 1 MiB steps, so a huge file needs no more memory
+/// than a small one and a cancel lands within a step. Fewer bytes (the file shrank) is an error.
+fn feed(file: &mut File, len: u64, hasher: &mut blake3::Hasher, cancel: &AtomicBool) -> io::Result<()> {
+    let mut buf = vec![0u8; 1 << 20];
+    let mut left = len;
+    while left > 0 {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::other("cancelled"));
+        }
+        let want = buf.len().min(left as usize);
+        let n = file.read(&mut buf[..want])?;
+        if n == 0 {
+            return Err(io::Error::other("file shrank while it was hashed"));
+        }
+        hasher.update(&buf[..n]);
+        left -= n as u64;
+    }
+    Ok(())
+}
+
+/// BLAKE3 of a whole file, or of its first and last [`PARTIAL`] bytes when `partial` and the
+/// file is longer than both together. Only the length the Index recorded is read, so a file
+/// that grows cannot make a read unbounded. A file whose length or modified time differs from
+/// the Index's, before or after the read, is stale and reported as an error. (A second of
+/// slack: filesystems keep time at different precisions.)
+fn hash_file(path: &Path, size: u64, modified: i64, partial: bool, cancel: &AtomicBool) -> io::Result<Hash> {
+    let stale = || io::Error::other("file changed since it was indexed");
+    let (mut file, meta) = open_regular(path)?;
+    if meta.len() != size || (modified_ns(&meta, modified) - modified).abs() > 1_000_000_000 {
+        return Err(stale());
     }
     let mut hasher = blake3::Hasher::new();
     if partial && size > 2 * PARTIAL {
-        io::copy(&mut (&mut file).take(PARTIAL), &mut hasher)?;
+        feed(&mut file, PARTIAL, &mut hasher, cancel)?;
         file.seek(SeekFrom::End(-(PARTIAL as i64)))?;
+        feed(&mut file, PARTIAL, &mut hasher, cancel)?;
+    } else {
+        feed(&mut file, size, &mut hasher, cancel)?;
     }
-    io::copy(&mut file, &mut hasher)?;
+    let after = file.metadata()?;
+    if after.len() != size || (modified_ns(&after, modified) - modified_ns(&meta, modified)).abs() > 1_000_000_000 {
+        return Err(stale());
+    }
     Ok(*hasher.finalize().as_bytes())
 }

@@ -136,3 +136,43 @@ fn remotes_and_offline_volumes_are_never_hashed() {
     assert!(groups.is_empty());
     assert_eq!(stats.partial_hashed, 0);
 }
+
+/// A file swapped for a symlink or a FIFO after it was indexed is never opened through: the
+/// symlink is not followed (its target would pass for a copy) and the FIFO would block the
+/// open for ever.
+#[cfg(unix)]
+#[test]
+fn symlinks_and_fifos_are_never_opened() {
+    use std::os::unix::ffi::OsStrExt;
+    let tmp = tempfile::tempdir().unwrap();
+    for name in ["a.bin", "link.bin", "fifo.bin"] {
+        fs::write(tmp.path().join(name), body(1, 200 * 1024)).unwrap();
+    }
+    let index = scanned(tmp.path());
+    fs::remove_file(tmp.path().join("link.bin")).unwrap();
+    std::os::unix::fs::symlink(tmp.path().join("a.bin"), tmp.path().join("link.bin")).unwrap();
+    fs::remove_file(tmp.path().join("fifo.bin")).unwrap();
+    let fifo = std::ffi::CString::new(tmp.path().join("fifo.bin").as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+    let (done, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (groups, _) = run(&index, &mut HashCache::default());
+        done.send(groups).ok();
+    });
+    let groups = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("hashing blocked on a FIFO");
+    assert!(groups.is_empty(), "a symlink or FIFO was read as a copy: {groups:?}");
+}
+
+#[test]
+fn a_file_that_grew_after_it_was_indexed_is_not_a_duplicate() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("a.bin"), body(1, 200 * 1024)).unwrap();
+    fs::write(tmp.path().join("b.bin"), body(1, 200 * 1024)).unwrap();
+    let index = scanned(tmp.path());
+    fs::write(tmp.path().join("b.bin"), body(1, 300 * 1024)).unwrap();
+    let (groups, _) = run(&index, &mut HashCache::default());
+    assert!(groups.is_empty());
+}
