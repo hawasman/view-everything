@@ -13,6 +13,7 @@ never wait on a scan.
   indexed over SSH/SFTP, S3 and FTP. Test a Remote's details before you add it, and edit it later
   from Settings.
 - **Trash**: Move to Trash and Empty Trash with confirmation.
+- **Cleaner**: lists Rust `target/` folders found in the Index (a sibling `Cargo.toml` or a `CACHEDIR.TAG` inside confirms them) with their On-disk Size. Tick them to form a Cleanup Plan, review the exact paths under Advanced, and Clean removes them permanently (not via the Trash) after re-checking each on disk. Remotes, Offline Volumes and read-only mounts are never offered.
 
 The vocabulary used in the app and the code is defined in [CONTEXT.md](CONTEXT.md); design
 decisions are recorded in [docs/adr](docs/adr).

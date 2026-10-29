@@ -5,6 +5,7 @@ mod app;
 #[cfg(feature = "bench")]
 mod bench;
 mod categories;
+mod cleaner;
 mod dashboard;
 mod dashboard_summary;
 mod engine;
