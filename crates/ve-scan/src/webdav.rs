@@ -164,7 +164,7 @@ fn walk(
     let (mut seen, mut unreadable) = (HashSet::new(), 0);
     while let Some((request, rel)) = stack.pop() {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            return Err(crate::cancelled_error());
         }
         let (_, folder) = href_path(&request, "/");
         if !seen.insert(folder.clone()) {

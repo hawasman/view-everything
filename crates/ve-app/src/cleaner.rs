@@ -70,6 +70,8 @@ pub struct CleanerPage {
     paused: bool,
     /// The running look is measuring what it found, not yet checking Entries.
     sizing: Arc<AtomicBool>,
+    /// Cancel flag of the running look, so Cancel works for a look with no Task too.
+    look_cancel: Arc<AtomicBool>,
     /// The Clean running (or last run) is the admin step, so its button is the one that spins.
     cleaning_admin: bool,
     /// Counts the changes (rules, Volumes, age limits) that make a running look's answer stale.
@@ -168,6 +170,7 @@ impl CleanerPage {
             looking: false,
             paused: false,
             sizing: Arc::new(AtomicBool::new(false)),
+            look_cancel: Arc::new(AtomicBool::new(false)),
             cleaning_admin: false,
             epoch: 0,
             cleanables: Vec::new(),
@@ -285,6 +288,7 @@ impl CleanerPage {
             .is_none()
             .then(|| shared.tasks.begin(TaskKind::CleanerSearch, "Look for Cleanables".into(), true));
         let cancel = task.as_ref().map_or_else(|| Arc::new(AtomicBool::new(false)), |t| t.cancel_flag());
+        self.look_cancel = cancel.clone();
         cx.spawn(async move |this, cx| {
             let found = cx
                 .background_spawn(async move {
@@ -318,14 +322,16 @@ impl CleanerPage {
                 .await;
             this.update(cx, |this, cx| {
                 this.looking = false;
-                if found.3 {
+                match look_verdict(this.epoch, epoch, found.3) {
+                    LookVerdict::Apply => {
+                        this.apply(found.0, found.1, found.2);
+                        this.rebuild_breakdown(cx);
+                    }
                     // Cancelled: no new look until the user asks again or the rules change.
-                    this.paused = true;
-                } else if this.epoch == epoch {
+                    LookVerdict::Pause => this.paused = true,
                     // Rules or Volumes changed meanwhile: this answer is for something else, so the
                     // render that follows looks again.
-                    this.apply(found.0, found.1, found.2);
-                    this.rebuild_breakdown(cx);
+                    LookVerdict::Stale => {}
                 }
                 cx.notify();
             })
@@ -438,7 +444,13 @@ impl CleanerPage {
                     let outcome = cx
                         .background_executor()
                         .spawn(async move {
-                            let outcome = admin_clean(&plan, &volumes, &|k| task.set_progress(k as u64, Some(total)));
+                            let outcome = admin_clean(&plan, &volumes, &|k| task.set_progress(k as u64, Some(total)), &|| {
+                                // No countable progress while pkexec asks and removes: spin.
+                                task.set_label("Removing as administrator…".into());
+                                task.set_progress(0, None);
+                            });
+                            // No set_retry on purpose: a failed Clean is not offered as Retry, since
+                            // re-running a destructive Clean unseen is not what the user asked for.
                             task.finish(if outcome.skipped.is_empty() {
                                 Outcome::Done(format!("Removed {} item(s)", crate::format::count(outcome.removed.len() as u64)))
                             } else {
@@ -926,6 +938,7 @@ impl Render for CleanerPage {
                 row.child(pill("cancel-search", "Cancel").small().build(
                     cx,
                     cx.listener(|this, _, _, cx| {
+                        this.look_cancel.store(true, Ordering::Relaxed);
                         this.shared.tasks.cancel_kind(TaskKind::CleanerSearch);
                         cx.notify();
                     }),
@@ -1096,6 +1109,25 @@ impl Render for CleanerPage {
     }
 }
 
+/// What a finished look does to the page.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LookVerdict {
+    /// Its answer is current: show it.
+    Apply,
+    /// The user cancelled it and nothing changed since: no new look until asked.
+    Pause,
+    /// Rules or Volumes changed meanwhile: its answer is for something else.
+    Stale,
+}
+
+fn look_verdict(page_epoch: u64, look_epoch: u64, cancelled: bool) -> LookVerdict {
+    match (page_epoch == look_epoch, cancelled) {
+        (false, _) => LookVerdict::Stale,
+        (true, true) => LookVerdict::Pause,
+        (true, false) => LookVerdict::Apply,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the glob would bring gpui's own `test` attribute into scope.
@@ -1123,5 +1155,15 @@ mod tests {
         assert_eq!(rows[0].category, Category::Video);
         let code = rows.iter().find(|r| r.category == Category::Code).unwrap();
         assert_eq!((code.totals.on_disk, code.totals.files), (15, 3));
+    }
+
+    #[test]
+    fn a_cancelled_look_pauses_only_while_its_epoch_is_current() {
+        use super::{LookVerdict, look_verdict};
+        assert!(look_verdict(3, 3, false) == LookVerdict::Apply);
+        assert!(look_verdict(3, 3, true) == LookVerdict::Pause);
+        // Rules or Volumes changed meanwhile: neither applied nor latched.
+        assert!(look_verdict(4, 3, true) == LookVerdict::Stale);
+        assert!(look_verdict(4, 3, false) == LookVerdict::Stale);
     }
 }

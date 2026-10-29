@@ -367,9 +367,17 @@ fn sync_find(program: &str, index: &SharedIndex, root: EntryId, remote: &SshRemo
             }
         }
     }
+    let cancelled = progress.cancelled();
+    if cancelled {
+        let _ = child.kill();
+    }
     applier.apply(&mut batch);
     drop(input);
     let status = child.wait()?;
+    if cancelled {
+        let _ = stderr.join();
+        return Err(crate::cancelled_error());
+    }
     let stderr = stderr.join().unwrap_or_default();
     if let Some(e) = read_error {
         return Err(e);
@@ -408,6 +416,7 @@ fn sync_sftp(program: &str, index: &SharedIndex, root: EntryId, remote: &SshRemo
     let status = child.wait()?;
     let stderr = stderr.join().unwrap_or_default();
     let walked = walked.map_err(|e| match status.code() {
+        _ if e.kind() == io::ErrorKind::Interrupted => e,
         Some(255) => failure(remote, Some(255), 0, &stderr).unwrap_or(e),
         _ => io::Error::new(
             e.kind(),

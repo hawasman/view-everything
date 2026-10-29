@@ -140,12 +140,13 @@ impl Snapshot {
 
     /// Compares the Index's current Folder Sizes with this Snapshot, matching folders by path.
     pub fn compare(&self, index: &Index) -> Comparison {
-        self.compare_with(|| index)
+        self.compare_with(|| index, || false).expect("never cancelled")
     }
 
     /// Like [`Snapshot::compare`], taking the Index from `read` only once the work that does not
-    /// need it is done, so a read lock is held for as short a time as possible.
-    pub fn compare_with<I: Deref<Target = Index>>(&self, read: impl FnOnce() -> I) -> Comparison {
+    /// need it is done, so a read lock is held for as short a time as possible. `cancelled` is
+    /// polled every few hundred folders; when it says yes the comparison stops with `None`.
+    pub fn compare_with<I: Deref<Target = Index>>(&self, read: impl FnOnce() -> I, cancelled: impl Fn() -> bool) -> Option<Comparison> {
         let by_parent: HashMap<(u32, &str), u32> = (0..self.folders()).map(|i| ((self.parent[i], self.name(i)), i as u32)).collect();
         let index = &*read();
         let filter = Filter::compute(index, None);
@@ -160,7 +161,12 @@ impl Snapshot {
         for (_, volume) in index.volumes() {
             let root_twin = by_parent.get(&(NO_PARENT, index.name(volume.root))).copied();
             let mut stack = vec![(volume.root, root_twin)];
+            let mut visited = 0u32;
             while let Some((dir, twin)) = stack.pop() {
+                visited += 1;
+                if visited.is_multiple_of(256) && cancelled() {
+                    return None;
+                }
                 let totals = filter.totals(index, dir);
                 let slot = index.folder_slot(dir).expect("only folders are stacked");
                 out.changes[slot] = match twin {
@@ -206,7 +212,7 @@ impl Snapshot {
                 }
             }
         }
-        out
+        Some(out)
     }
 }
 

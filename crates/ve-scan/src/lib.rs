@@ -59,12 +59,15 @@ impl Progress {
     pub fn unreadable(&self) -> u64 {
         self.unreadable.load(Ordering::Relaxed)
     }
-}
 
-impl Progress {
     pub fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
+}
+
+/// The error every cancelled walk returns.
+pub(crate) fn cancelled_error() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, "cancelled")
 }
 
 /// Adds the Volume mounted at `mount` to the Index with only its root, ready for [`sync`].

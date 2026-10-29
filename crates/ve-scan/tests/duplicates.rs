@@ -58,6 +58,36 @@ fn excluded_copies_are_dropped_and_counted() {
 }
 
 #[test]
+fn an_excluded_hard_link_does_not_hide_its_other_link() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir(tmp.path().join("node_modules")).unwrap();
+    fs::write(tmp.path().join("node_modules/a.bin"), body(1, 5000)).unwrap();
+    fs::hard_link(tmp.path().join("node_modules/a.bin"), tmp.path().join("z.bin")).unwrap();
+    fs::write(tmp.path().join("b.bin"), body(1, 5000)).unwrap();
+    let index = scanned(tmp.path());
+    let (groups, stats) = run_excluding(&index, &mut HashCache::default(), "node_modules");
+    assert_eq!(groups.len(), 1, "z.bin still pairs with b.bin");
+    assert_eq!(groups[0].files.len(), 2);
+    assert_eq!(stats.excluded, 1);
+}
+
+#[test]
+fn a_cancelled_search_leaves_the_cache_as_it_was() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("a.bin"), body(1, 5000)).unwrap();
+    fs::write(tmp.path().join("b.bin"), body(1, 5000)).unwrap();
+    let index = scanned(tmp.path());
+    let mut cache = HashCache::default();
+    run(&index, &mut cache);
+    let before = cache.len();
+    assert!(before > 0);
+    let none = BitSet::new(index.read().capacity());
+    let (groups, _) = find(&index, &mut cache, 1, &none, &HashProgress::default(), &AtomicBool::new(true));
+    assert!(groups.is_empty());
+    assert_eq!(cache.len(), before);
+}
+
+#[test]
 fn a_group_left_with_one_copy_disappears() {
     let tmp = tempfile::tempdir().unwrap();
     fs::create_dir(tmp.path().join("node_modules")).unwrap();

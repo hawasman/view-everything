@@ -47,11 +47,11 @@ Bringing a Location up to date with changes made while the app was not running, 
 _Avoid_: rescan, resync, refresh
 
 **Sync**:
-One full re-walk that brings a Location, or one folder in it, up to date. A Sync of a whole Location resets its Last Synced. The user starts one with Sync now; Catch-up and the periodic refresh run them on their own.
+One full re-walk that brings a Location, or one folder in it, up to date. A Sync of a whole Location resets its Last Synced. The user starts one with Sync now; Catch-up and the periodic Sync run on their own.
 _Avoid_: rescan, reindex, refresh, resync
 
 **Task**:
-One piece of work the app does in the background: a Sync, a Duplicate search, a Cleaner search, a Clean, a Trash, an Empty Trash or a Compare.
+One piece of work the app does in the background: a Sync, a Catch-up, a Duplicate search, a Cleaner search, a Clean, a Trash, an Empty Trash or a Compare.
 _Avoid_: job, operation, process, activity
 
 **Live updates**:

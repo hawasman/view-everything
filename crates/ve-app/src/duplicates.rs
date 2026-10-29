@@ -202,7 +202,11 @@ impl Render for DuplicatesPanel {
                 format::size(wasted)
             );
             if skipped > 0 {
-                line += &format!(" · {} files skipped by Duplicate Exclusions", format::count(skipped));
+                line += &format!(
+                    " · {} file{} skipped by Duplicate Exclusions",
+                    format::count(skipped),
+                    if skipped == 1 { "" } else { "s" }
+                );
             }
             line.into_any_element()
         };

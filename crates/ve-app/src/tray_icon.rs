@@ -14,10 +14,16 @@ fn render(size: u32) -> Option<tiny_skia::Pixmap> {
     Some(pixmap)
 }
 
-/// `size` x `size` RGBA pixels (alpha premultiplied).
+/// `size` x `size` RGBA pixels (alpha not premultiplied).
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn rgba(size: u32) -> Option<Vec<u8>> {
-    render(size).map(|p| p.take())
+    let pixmap = render(size)?;
+    let mut out = Vec::with_capacity(pixmap.data().len());
+    for p in pixmap.pixels() {
+        let c = p.demultiply();
+        out.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+    }
+    Some(out)
 }
 
 /// The same as a PNG file.

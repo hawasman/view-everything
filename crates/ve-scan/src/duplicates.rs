@@ -144,12 +144,18 @@ pub fn find(
                     continue;
                 }
                 let (size, key) = (index.logical(child), index.key(child));
-                if size < min_size.max(1) || (index.is_hardlinked(child) && !links.insert(key)) {
+                if size < min_size.max(1) {
                     continue;
                 }
+                // Excluded files count as absent: a hard link to one must not consume the key.
                 if excluded.contains(child.index()) {
-                    stats.excluded += 1;
+                    if !index.is_hardlinked(child) || kept.insert((volume, key)) {
+                        stats.excluded += 1;
+                    }
                     kept.insert((volume, key));
+                    continue;
+                }
+                if index.is_hardlinked(child) && !links.insert(key) {
                     continue;
                 }
                 by_size.entry(size).or_default().push(Candidate {
@@ -201,9 +207,10 @@ pub fn find(
     // Refresh the cache: drop what this run did not see on the scanned Volumes.
     // A cancelled run saw only part of them: keep the cache as it was.
     if !cancel.load(Ordering::Relaxed) {
+        let position: HashMap<&str, usize> = scanned.iter().enumerate().map(|(i, s)| (s.as_str(), i)).collect();
         cache
             .entries
-            .retain(|(volume, key), _| scanned.iter().position(|s| s == volume).is_none_or(|v| kept.contains(&(v, *key))));
+            .retain(|(volume, key), _| position.get(volume.as_str()).is_none_or(|&v| kept.contains(&(v, *key))));
     }
     for file in files.iter().chain(&survivors) {
         if let Some(cached) = &file.cached {
@@ -363,7 +370,7 @@ fn feed(file: &mut File, len: u64, hasher: &mut blake3::Hasher, cancel: &AtomicB
     let mut left = len;
     while left > 0 {
         if cancel.load(Ordering::Relaxed) {
-            return Err(io::Error::other("cancelled"));
+            return Err(crate::cancelled_error());
         }
         let want = buf.len().min(left as usize);
         let n = file.read(&mut buf[..want])?;

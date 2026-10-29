@@ -499,7 +499,7 @@ pub fn read_all<R: Read + Seek>(reader: &mut R, cancel: &std::sync::atomic::Atom
     let mut first = 0;
     while first < total {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            return Err(crate::cancelled_error());
         }
         let count = per_chunk.min(total - first);
         let mut chunk = read_runs(reader, &geometry, &runs, first * record_size, (count * record_size) as usize)?;

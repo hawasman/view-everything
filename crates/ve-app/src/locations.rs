@@ -23,7 +23,7 @@ pub struct Facts {
     pub syncing: bool,
     /// Last Synced, in seconds since the Unix epoch.
     pub last_synced: Option<i64>,
-    /// How often it is re-read, in minutes; 0 is Manual.
+    /// How often it is synced, in minutes; 0 is Manual.
     pub interval_minutes: u64,
 }
 
@@ -73,7 +73,10 @@ pub fn state(f: &Facts, now: i64) -> State {
         return State::Live;
     }
     match f.last_synced {
-        Some(at) if f.interval_minutes == 0 || (at <= now && now - at < i64::try_from(f.interval_minutes * 60).unwrap_or(i64::MAX)) => {
+        Some(at)
+            if f.interval_minutes == 0
+                || (at <= now && now - at < i64::try_from(f.interval_minutes.saturating_mul(60)).unwrap_or(i64::MAX)) =>
+        {
             State::Synced(at)
         }
         _ => State::Stale,
@@ -100,6 +103,8 @@ pub struct Row {
     pub identity: String,
     pub name: String,
     pub state: State,
+    /// A Sync is running, whatever `state` says (a failure outranks it in the wording).
+    pub syncing: bool,
     pub online: bool,
 }
 
@@ -138,6 +143,7 @@ pub fn rows(shared: &Shared, mounted: &[VolumeInfo], settings: &Settings, now: i
                 identity: v.identity.clone(),
                 name,
                 state: state(&facts, now),
+                syncing: facts.syncing,
                 online: v.online,
             }
         })
@@ -148,9 +154,10 @@ pub fn rows(shared: &Shared, mounted: &[VolumeInfo], settings: &Settings, now: i
 pub fn summary(rows: &[Row], now: i64) -> (Health, String) {
     let bad: Vec<&Row> = rows.iter().filter(|r| !r.state.healthy()).collect();
     let text = match bad.len() {
+        0 if rows.is_empty() => "No Locations are indexed yet".to_owned(),
         0 => "Every Location is up to date".to_owned(),
         n => {
-            let list: Vec<String> = bad.iter().take(3).map(|r| format!("{} is {}", r.name, r.state.text(now))).collect();
+            let list: Vec<String> = bad.iter().take(3).map(|r| format!("{}: {}", r.name, r.state.text(now))).collect();
             let more = if n > 3 { format!(", and {} more", n - 3) } else { String::new() };
             format!(
                 "{n} Location{} need{} attention: {}{more}",
@@ -206,7 +213,7 @@ pub fn panel<T: 'static>(rows: Vec<Row>, now: i64, engine: &Arc<Engine>, cx: &mu
             State::Offline => p.muted,
             State::Stale | State::Failed(_) => p.warning,
         };
-        let busy = row.state == State::Syncing;
+        let busy = row.syncing;
         let reason = if loading {
             Some("Loading the saved Index")
         } else if !row.online {
@@ -232,7 +239,7 @@ pub fn panel<T: 'static>(rows: Vec<Row>, now: i64, engine: &Arc<Engine>, cx: &mu
                         .small()
                         .busy(busy)
                         .disabled(reason)
-                        .build(cx, cx.listener(move |_, _, _, _| engine.refresh_location(identity.clone()))),
+                        .build(cx, cx.listener(move |_, _, _, _| engine.sync_location(identity.clone()))),
                 ),
         );
     }
@@ -339,6 +346,7 @@ mod tests {
         Row {
             identity: name.into(),
             name: name.into(),
+            syncing: state == State::Syncing,
             state,
             online: true,
         }
@@ -352,9 +360,40 @@ mod tests {
         assert_eq!(t, "Every Location is up to date");
         let (h, t) = summary(&[ok(), row("/mnt/usb", State::Offline)], 0);
         assert_eq!(h, Health::Yellow);
-        assert_eq!(t, "1 Location needs attention: /mnt/usb is Offline");
+        assert_eq!(t, "1 Location needs attention: /mnt/usb: Offline");
         let (h, t) = summary(&[row("/a", State::Stale), row("/b", State::Offline)], 0);
         assert_eq!(h, Health::Red);
-        assert_eq!(t, "2 Locations need attention: /a is Stale, /b is Offline");
+        assert_eq!(t, "2 Locations need attention: /a: Stale, /b: Offline");
+    }
+
+    #[::core::prelude::v1::test]
+    fn summary_without_locations_and_with_many() {
+        let (h, t) = summary(&[], 0);
+        assert_eq!(h, Health::Green);
+        assert_eq!(t, "No Locations are indexed yet");
+        let many: Vec<Row> = ["/a", "/b", "/c", "/d", "/e"].into_iter().map(|n| row(n, State::Stale)).collect();
+        let (h, t) = summary(&many, 0);
+        assert_eq!(h, Health::Red);
+        assert_eq!(t, "5 Locations need attention: /a: Stale, /b: Stale, /c: Stale, and 2 more");
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_failing_location_that_is_syncing_shows_failed_but_busy() {
+        let f = Facts {
+            failure: Some("timed out".into()),
+            syncing: true,
+            ..facts()
+        };
+        assert_eq!(state(&f, 1000), State::Failed("timed out".into()));
+        assert!(f.syncing);
+    }
+
+    #[::core::prelude::v1::test]
+    fn huge_interval_does_not_overflow() {
+        let f = Facts {
+            interval_minutes: u64::MAX,
+            ..facts()
+        };
+        assert_eq!(state(&f, 2000), State::Synced(1000));
     }
 }

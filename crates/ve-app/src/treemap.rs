@@ -189,16 +189,22 @@ impl Layouter {
                 while let Ok(first) = inbox.recv() {
                     let request = inbox.try_iter().last().unwrap_or(first);
                     let key = key_of(&request.view, request.root, request.size, request.depth);
-                    let tiles = {
-                        let index = shared.index.read();
-                        let area = Rect {
-                            x0: 0.0,
-                            y0: 0.0,
-                            x1: request.size.0,
-                            y1: request.size.1,
-                        };
-                        layout(&index, &request.view.filter, &categories, request.root, area, request.depth)
+                    let area = Rect {
+                        x0: 0.0,
+                        y0: 0.0,
+                        x1: request.size.0,
+                        y1: request.size.1,
                     };
+                    let mut tiles = {
+                        let index = shared.index.read();
+                        layout_tiles(&index, &request.view.filter, &categories, request.root, area, request.depth)
+                    };
+                    // Folder colours walk many Entries: take the lock a slice of tiles at a time,
+                    // so a sync writing to the Index waits for one slice, not the whole layout.
+                    for slice in tiles.chunks_mut(64) {
+                        let index = shared.index.read();
+                        colour_folders(slice, &index, &request.view.filter, &categories);
+                    }
                     if outbox.send((key, tiles)).is_err() {
                         return;
                     }
@@ -273,16 +279,31 @@ fn snap(r: Rect, area: Rect) -> Rect {
 }
 
 /// Tiles for `root` laid out in `rect`, level by level so every folder is subdivided down to
-/// the Depth when it has room, and the tile cap (a safety net) cuts the deepest level evenly.
+/// the Depth when it has room. The tile cap (a safety net) stops the layout mid-level: folders
+/// reached earlier in the queue keep all their children, later ones get none.
+#[cfg(test)]
 fn layout(index: &Index, filter: &Filter, categories: &CategoryMap, root: EntryId, rect: Rect, depth: u8) -> Vec<Tile> {
+    let mut tiles = layout_tiles(index, filter, categories, root, rect, depth);
+    colour_folders(&mut tiles, index, filter, categories);
+    tiles
+}
+
+/// Folders take the colour of what is inside them: shown as a block, or as the tint behind
+/// their children.
+fn colour_folders(tiles: &mut [Tile], index: &Index, filter: &Filter, categories: &CategoryMap) {
+    for tile in tiles.iter_mut().filter(|t| t.is_dir) {
+        tile.category = dominant_category(index, filter, categories, tile.id);
+    }
+}
+
+/// [`layout`] without the folder colours (they cost the most, and need no consistent Index).
+fn layout_tiles(index: &Index, filter: &Filter, categories: &CategoryMap, root: EntryId, rect: Rect, depth: u8) -> Vec<Tile> {
     let mut tiles: Vec<Tile> = Vec::new();
     // A folder to subdivide: the folder, the area for its children, the tile that stands for it
     // and the level of its children.
     let mut queue = VecDeque::from([(root, rect, None::<usize>, 1u8)]);
     'layout: while let Some((dir, area, parent, level)) = queue.pop_front() {
-        if let Some(parent) = parent {
-            tiles[parent].subdivided = true;
-        }
+        // `parent` is marked subdivided when its first child tile is pushed, below.
         let mut items: Vec<(f64, Option<EntryId>)> = index
             .children(dir)
             .iter()
@@ -307,6 +328,9 @@ fn layout(index: &Index, filter: &Filter, categories: &CategoryMap, root: EntryI
                 break 'layout;
             }
             let cell = snap(cell, area);
+            if let Some(parent) = parent {
+                tiles[parent].subdivided = true;
+            }
             let Some(id) = slot else {
                 tiles.push(Tile {
                     rect: cell,
@@ -340,11 +364,6 @@ fn layout(index: &Index, filter: &Filter, categories: &CategoryMap, root: EntryI
                 queue.push_back((id, inner, Some(tiles.len() - 1), level + 1));
             }
         }
-    }
-    // Folders take the colour of what is inside them: shown as a block, or as the tint behind
-    // their children.
-    for tile in tiles.iter_mut().filter(|t| t.is_dir) {
-        tile.category = dominant_category(index, filter, categories, tile.id);
     }
     tiles
 }
@@ -659,7 +678,7 @@ impl Treemap {
         self.motion = crate::motion::duration(cx);
         let visible = self.last_paint.elapsed() <= HIDDEN_AFTER;
         let changed = self.sync();
-        if changed || (visible && self.hovered.is_some()) {
+        if changed {
             cx.notify();
         }
         if visible || self.tiles_key != self.layouter.requested {
@@ -708,6 +727,9 @@ impl Treemap {
             self.tiles = Rc::new(tiles);
             self.tiles_key = Some(key);
             self.hovered = None;
+            // The outlines of the old tiles mean nothing on the new ones: no fade-out ghost.
+            self.last_outlines.clear();
+            self.ghost = None;
             // Screenshots (VE_DEMO): rest the pointer on the second tile.
             #[cfg(feature = "bench")]
             if std::env::var_os("VE_DEMO").is_some() {
@@ -1018,7 +1040,9 @@ impl Render for Treemap {
                 .map(|(_, tile)| tile)
         });
         // Tiles of the rest of the selection: each Entry's own tile, else its nearest drawn folder.
-        let also: Vec<usize> = {
+        let also: Vec<usize> = if self.also.is_empty() {
+            Vec::new()
+        } else {
             let by_id: HashMap<EntryId, usize> = self
                 .tiles
                 .iter()
@@ -1155,7 +1179,7 @@ impl Render for Treemap {
         )
         .size_full();
 
-        // Names and sizes on the tiles that have room for them, largest first.
+        // Names and sizes on the tiles that have room for them, shallowest level first.
         let mut labels = Vec::new();
         for tile in self
             .tiles
@@ -1509,6 +1533,95 @@ mod tests {
         assert!(lay(&index, root, 300.0, 300.0, 3).is_empty());
         for t in lay(&index, root, f32::NAN, 10.0, 3) {
             assert!([t.rect.x0, t.rect.y0, t.rect.x1, t.rect.y1].iter().all(|v| v.is_finite()));
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_huge_tile_is_clamped_into_the_edge_cells() {
+        let tile = Tile {
+            rect: Rect {
+                x0: -1e30,
+                y0: 0.0,
+                x1: f32::INFINITY,
+                y1: 1e30,
+            },
+            id: EntryId(1),
+            is_dir: false,
+            category: Category::Other,
+            subdivided: false,
+            level: 1,
+            more: None,
+            parent: None,
+        };
+        let grid = HitGrid::build(&[tile], 200.0, 100.0);
+        assert_eq!((grid.cols, grid.rows), (7, 4));
+        assert!(grid.cells.iter().all(|c| c == &[0]), "every cell holds the one tile");
+    }
+
+    #[::core::prelude::v1::test]
+    fn laid_out_edges_are_whole_pixels() {
+        let (index, root) = world(|index, root| {
+            for i in 0..40u64 {
+                index.insert(root, &format!("f{i}.bin"), file((i + 1) * 777));
+            }
+        });
+        for t in lay(&index, root, 1003.0, 701.0, 3) {
+            for v in [t.rect.x0, t.rect.y0, t.rect.x1, t.rect.y1] {
+                assert_eq!(v, v.round(), "{v}");
+            }
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn zoom_starts_tiles_from_where_they_were_or_the_folder_they_grow_out_of() {
+        let tile = |id: u32, rect: Rect, more: Option<(usize, u64)>| Tile {
+            rect,
+            id: EntryId(id),
+            is_dir: false,
+            category: Category::Other,
+            subdivided: false,
+            level: 1,
+            more,
+            parent: None,
+        };
+        let (a, b) = (rect(100.0, 100.0), rect(50.0, 50.0));
+        let old = vec![tile(1, a, None), tile(2, b, None)];
+        // Zooming into 1: 1 itself and 2 start where they were; 9 is new and grows out of 1.
+        let new = vec![
+            tile(2, rect(10.0, 10.0), None),
+            tile(9, rect(20.0, 20.0), None),
+            tile(7, rect(30.0, 30.0), Some((3, 5))),
+        ];
+        let from = zoom_from(&old, &new, EntryId(1));
+        assert_eq!(from, vec![(b, 1.0), (a, 1.0), (a, 1.0)]);
+        // Zooming out to a root that was not drawn: unknown tiles fade in where they are.
+        let from = zoom_from(&old, &new, EntryId(5));
+        assert_eq!(from, vec![(b, 1.0), (rect(20.0, 20.0), 0.0), (rect(30.0, 30.0), 0.0)]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_tile_cap_stops_the_layout_and_keeps_tiles_consistent() {
+        let dir = ve_core::EntryMeta {
+            is_dir: true,
+            ..Default::default()
+        };
+        let (index, root) = world(|index, root| {
+            for d in 0..96 {
+                let folder = index.insert(root, &format!("d{d}"), dir);
+                for e in 0..96 {
+                    let inner = index.insert(folder, &format!("e{e}"), dir);
+                    for f in 0..2u64 {
+                        index.insert(inner, &format!("f{f}.bin"), file(10_000 + f));
+                    }
+                }
+            }
+        });
+        let tiles = lay(&index, root, 8000.0, 8000.0, 3);
+        assert_eq!(tiles.len(), MAX_TILES);
+        for (i, t) in tiles.iter().enumerate() {
+            if let Some(p) = t.parent {
+                assert!(p < i && tiles[p].subdivided);
+            }
         }
     }
 }

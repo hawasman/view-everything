@@ -52,9 +52,10 @@ impl Compare {
         self.active
     }
 
-    /// A comparison is being computed (the answer on screen, if any, is the previous one).
+    /// A comparison the user asked for is running as a Task (quiet recomputes as the Index
+    /// changes do not count, or the control would spin every few seconds).
     pub fn working(&self) -> bool {
-        self.working
+        user_compare_running(&self.shared.tasks)
     }
 
     /// Compares with the Snapshot of `date`, or stops comparing.
@@ -107,7 +108,9 @@ impl Compare {
                 if stop() {
                     return Err("cancelled".to_owned());
                 }
-                let comparison = snap.compare_with(|| shared.index.read());
+                let comparison = snap
+                    .compare_with(|| shared.index.read(), stop)
+                    .ok_or_else(|| "cancelled".to_owned())?;
                 Ok::<_, String>((snap, Arc::new(comparison)))
             });
             let done = work.await;
@@ -252,5 +255,28 @@ impl Compare {
                         .child(pill("snapshot-close", "Close").build(cx, |_, window, cx| window.close_dialog(cx))),
                 )
         });
+    }
+}
+
+/// Whether a comparison the user asked for (a Task, not a quiet recompute) is running.
+fn user_compare_running(tasks: &crate::tasks::Tasks) -> bool {
+    tasks.is_running(TaskKind::Compare)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tasks::{Outcome, TaskKind, Tasks};
+
+    #[test]
+    fn only_a_compare_task_makes_the_control_busy() {
+        let tasks = Tasks::new();
+        assert!(!super::user_compare_running(&tasks));
+        let other = tasks.begin(TaskKind::Trash, "x".into(), false);
+        assert!(!super::user_compare_running(&tasks));
+        let task = tasks.begin(TaskKind::Compare, "Compare with 2026-01-01".into(), true);
+        assert!(super::user_compare_running(&tasks));
+        task.finish(Outcome::Cancelled);
+        other.finish(Outcome::Cancelled);
+        assert!(!super::user_compare_running(&tasks));
     }
 }

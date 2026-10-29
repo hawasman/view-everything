@@ -223,7 +223,7 @@ fn match_all(index: &Index, query: &Query, cancelled: &(dyn Fn() -> bool + Sync)
             if stopped.load(Ordering::Relaxed) {
                 return;
             }
-            if task % 16 == 0 && cancelled() {
+            if task.is_multiple_of(16) && cancelled() {
                 stopped.store(true, Ordering::Relaxed);
                 return;
             }

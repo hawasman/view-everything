@@ -27,6 +27,13 @@ pub fn open_terminal(dir: &Path) -> io::Result<()> {
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
+        if !dir.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("the folder {} does not exist (any more)", dir.display()),
+            ));
+        }
+        // $TERMINAL may carry arguments ("kitty -e fish").
         let preferred = std::env::var("TERMINAL").ok().filter(|t| !t.trim().is_empty());
         let candidates = preferred.iter().map(String::as_str).chain([
             "x-terminal-emulator",
@@ -37,20 +44,29 @@ pub fn open_terminal(dir: &Path) -> io::Result<()> {
             "kitty",
             "xterm",
         ]);
-        for terminal in candidates {
-            match Command::new(terminal).current_dir(dir).spawn() {
-                Ok(_) => return Ok(()),
+        let mut last_error = None;
+        for candidate in candidates {
+            let mut words = candidate.split_whitespace();
+            let Some(program) = words.next() else { continue };
+            match Command::new(program).args(words).current_dir(dir).spawn() {
+                Ok(mut child) => {
+                    // Reaps the terminal when it exits, so it does not stay a zombie.
+                    std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                    return Ok(());
+                }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
+                Err(e) => last_error = Some(e),
             }
         }
-        Err(io::Error::new(io::ErrorKind::NotFound, "no terminal emulator found; set $TERMINAL"))
+        Err(last_error.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no terminal emulator found; set $TERMINAL")))
     }
 }
 
 /// The folder a terminal opens in for `id`: the folder itself, or a file's parent.
 pub fn terminal_folder(index: &Index, id: EntryId) -> Option<std::path::PathBuf> {
-    index.is_live(id).then(|| index.path(crate::engine::sync_target(index, id)))
+    index.is_live(id).then(|| index.path(crate::engine::folder_of(index, id)))
 }
 
 /// One line per Entry: its path.

@@ -34,13 +34,15 @@ mod platform {
     }
 
     /// A program path as the Exec key of a desktop entry reads it: quoted, with the characters
-    /// the Desktop Entry specification reserves escaped.
+    /// the Desktop Entry specification reserves escaped. Its string-value rule unescapes `\\`
+    /// before the quoting rule applies, so each of those escapes carries a doubled backslash.
     pub(super) fn exec_quote(path: &str) -> String {
         let mut out = String::from("\"");
         for c in path.chars() {
             match c {
-                '"' | '`' | '$' | '\\' => {
-                    out.push('\\');
+                '\\' => out.push_str("\\\\\\\\"),
+                '"' | '`' | '$' => {
+                    out.push_str("\\\\");
                     out.push(c);
                 }
                 '%' => out.push_str("%%"),
@@ -70,6 +72,9 @@ mod platform {
             };
         }
         let program = super::program()?;
+        if program.to_string_lossy().chars().any(char::is_control) {
+            return Err(format!("The program path has a control character: {}", program.display()));
+        }
         let dir = path.parent().ok_or_else(|| "No autostart folder".to_owned())?;
         std::fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
         std::fs::write(&path, entry(&program.to_string_lossy())).map_err(|e| format!("Could not write {}: {e}", path.display()))
@@ -87,7 +92,7 @@ mod platform {
 
         #[test]
         fn reserved_characters_in_the_path_are_escaped() {
-            assert_eq!(exec_quote("/a\"b$c"), "\"/a\\\"b\\$c\"");
+            assert_eq!(exec_quote("/a\"b$c\\d"), "\"/a\\\\\"b\\\\$c\\\\\\\\d\"");
         }
     }
 }
@@ -96,25 +101,57 @@ mod platform {
 mod platform {
     const TASK: &str = "ViewEverything";
 
+    fn xml_escape(text: &str) -> String {
+        text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+
+    /// The task: at logon, highest privileges, and none of the defaults that would stop a tray
+    /// app (not starting on battery, stopping when unplugged, the 72-hour time limit).
+    pub(super) fn task_xml(program: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
+<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
+<Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>\n\
+<Principals><Principal id=\"Author\"><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>\n\
+<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\
+<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Enabled>true</Enabled></Settings>\n\
+<Actions Context=\"Author\"><Exec><Command>{}</Command><Arguments>{}</Arguments></Exec></Actions>\n\
+</Task>\n",
+            xml_escape(program),
+            super::LOGIN_FLAG
+        )
+    }
+
     /// One elevated `schtasks` call, so the user answers one prompt per toggle.
     pub fn set(on: bool) -> Result<(), String> {
+        let tag = std::process::id();
+        let dir = std::env::temp_dir();
+        let log = dir.join(format!("view-everything-task-{tag}.log"));
+        let xml = dir.join(format!("view-everything-task-{tag}.xml"));
         let args = if on {
             let program = super::program()?;
-            // The task's action: the quoted program and the login flag.
-            let action = format!("\"\\\"{}\\\" {}\"", program.display(), super::LOGIN_FLAG);
-            format!("/Create /TN {TASK} /TR {action} /SC ONLOGON /RL HIGHEST /F")
+            // UTF-16 with a byte order mark, as `schtasks /XML` reads it.
+            let mut bytes = vec![0xFF, 0xFE];
+            bytes.extend(task_xml(&program.to_string_lossy()).encode_utf16().flat_map(u16::to_le_bytes));
+            std::fs::write(&xml, bytes).map_err(|e| format!("Could not write {}: {e}", xml.display()))?;
+            format!("/Create /TN {TASK} /XML \"{}\" /F", xml.display())
         } else {
             format!("/Delete /TN {TASK} /F")
         };
+        // `cmd` carries schtasks' own message to a file: an elevated process cannot be piped.
+        let command = format!("/c schtasks {args} > \"{}\" 2>&1", log.display());
         // PowerShell's single-quoted strings take a quote by doubling it.
         let script = format!(
-            "$p = Start-Process schtasks -ArgumentList '{}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
-            args.replace('\'', "''")
+            "$p = Start-Process cmd -ArgumentList '{}' -Verb RunAs -Wait -PassThru -WindowStyle Hidden; exit $p.ExitCode",
+            command.replace('\'', "''")
         );
         let status = std::process::Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
-            .status()
-            .map_err(|e| format!("Could not run PowerShell: {e}"))?;
+            .status();
+        let message = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_file(&log);
+        let _ = std::fs::remove_file(&xml);
+        let status = status.map_err(|e| format!("Could not run PowerShell: {e}"))?;
         if status.success() {
             return Ok(());
         }
@@ -129,7 +166,27 @@ mod platform {
                 return Ok(());
             }
         }
-        Err("The scheduled task was not changed (administrator approval is needed)".to_owned())
+        let message = message.trim();
+        if message.is_empty() {
+            Err("The scheduled task was not changed (administrator approval is needed)".to_owned())
+        } else {
+            Err(format!("The scheduled task was not changed: {message}"))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_task_runs_on_battery_without_a_time_limit() {
+            let xml = task_xml("C:\\Apps\\R&D\\view-everything.exe");
+            assert!(xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"));
+            assert!(xml.contains("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"));
+            assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
+            assert!(xml.contains("<Command>C:\\Apps\\R&amp;D\\view-everything.exe</Command>"));
+            assert!(xml.contains("<Arguments>--login</Arguments>"));
+        }
     }
 }
 

@@ -170,9 +170,13 @@ pub fn task_progress(id: impl Into<ElementId>, done: u64, total: Option<u64>, wh
                     .color(p.primary)
                     .w(px(160.)),
             )
-            .child(format!("{}/{} {what}", crate::format::count(done), crate::format::count(total))),
+            .child(if what.is_empty() {
+                format!("{}/{}", crate::format::count(done), crate::format::count(total))
+            } else {
+                format!("{}/{} {what}", crate::format::count(done), crate::format::count(total))
+            }),
         _ => row
             .child(Spinner::new().with_size(Size::XSmall).color(p.muted))
-            .child(format!("{} {what}", crate::format::count(done))),
+            .child(format!("{} {what}", crate::format::count(done)).trim_end().to_owned()),
     }
 }

@@ -467,14 +467,19 @@ impl Trash {
                         // Check the disk first: anything already gone just leaves the Index.
                         let (present, missing): (Vec<_>, Vec<_>) = items.into_iter().partition(|p| std::fs::symlink_metadata(p).is_ok());
                         // One by one, so progress is real and a failure leaves the rest moved.
-                        let mut result = Ok(());
+                        let mut errors: Vec<String> = Vec::new();
                         task.set_progress(missing.len() as u64, Some(total));
                         for (k, path) in present.iter().enumerate() {
                             if let Err(e) = move_to_trash(std::slice::from_ref(path)) {
-                                result = result.and(Err(e));
+                                errors.push(e);
                             }
                             task.set_progress((missing.len() + k + 1) as u64, Some(total));
                         }
+                        let result = match errors.as_slice() {
+                            [] => Ok(()),
+                            [only] => Err(only.clone()),
+                            [first, ..] => Err(format!("{} items could not be moved; the first: {first}", errors.len())),
+                        };
                         task.finish(match &result {
                             Ok(()) => Outcome::Done(format!("Moved {} item(s)", crate::format::count(present.len() as u64))),
                             Err(e) => Outcome::Failed(e.clone()),
@@ -518,9 +523,17 @@ impl Trash {
                         let result = empty_trash(&|k, n| task.set_progress(k, Some(n)));
                         task.finish(match &result {
                             Ok(o) if o.failed.is_empty() => {
-                                Outcome::Done(format!("Deleted {} item(s)", crate::format::count(o.purged as u64)))
+                                Outcome::Done(format!("Emptied the Trash ({} item(s))", crate::format::count(o.purged as u64)))
                             }
-                            Ok(o) => Outcome::Failed(format!("{} item(s) could not be deleted", o.failed.len())),
+                            Ok(o) => {
+                                let admin = o.failed.iter().filter(|f| f.admin_paths.is_some()).count();
+                                let other = o.failed.len() - admin;
+                                if other == 0 {
+                                    Outcome::Done(format!("{admin} item(s) need an administrator"))
+                                } else {
+                                    Outcome::Failed(format!("{other} item(s) could not be removed"))
+                                }
+                            }
                             Err(e) => Outcome::Failed(e.clone()),
                         });
                         result
@@ -533,11 +546,11 @@ impl Trash {
                         let (needs_admin, other): (Vec<_>, Vec<_>) = outcome.failed.into_iter().partition(|f| f.admin_paths.is_some());
                         let mut text = match outcome.purged {
                             0 => String::new(),
-                            n => format!("Permanently deleted {n} item(s) from the Trash."),
+                            n => format!("Emptied the Trash: {n} item(s) gone."),
                         };
                         if let Some(first) = other.first() {
                             text.push_str(&format!(
-                                " {} item(s) could not be deleted: {} ({})",
+                                " {} item(s) could not be removed: {} ({})",
                                 other.len(),
                                 first.original.display(),
                                 first.error
@@ -564,7 +577,7 @@ impl Trash {
                 this.measure();
                 cx.update(|window, cx| {
                     let note = match result {
-                        Ok(()) => Notification::info("Deleted the remaining Trash items as administrator."),
+                        Ok(()) => Notification::info("Emptied the remaining Trash items as administrator."),
                         Err(e) => Notification::warning(format!("Left in the Trash: {e}")),
                     };
                     window.push_notification(note, cx);

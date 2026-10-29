@@ -211,7 +211,8 @@ impl Palette {
         colors.table_even = s(self.surface);
         colors.table_head = s(self.surface);
         colors.table_head_foreground = s(self.muted);
-        colors.table_hover = s(self.active);
+        // Fainter than a selected row's highlight (`active`), so hover and selection differ.
+        colors.table_hover = s(self.raised);
         // Transparent: the Explorer lists paint their own highlight for every selected row.
         colors.table_active = Some("#00000000".into());
         colors.table_active_border = s(self.active);

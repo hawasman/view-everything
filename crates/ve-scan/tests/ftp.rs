@@ -431,6 +431,18 @@ fn an_mlsd_server_is_walked_with_mlsd_and_a_refresh_applies_differences() {
 }
 
 #[test]
+fn a_cancelled_ftp_walk_is_interrupted_and_indexes_nothing() {
+    let server = start(Style::Mlsd);
+    let (index, id, remote) = add(&server, FtpTls::Plain);
+    let progress = Progress::default();
+    progress.cancel.store(true, Ordering::Relaxed);
+    let err = sync(&index, id, &remote, &progress).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    let index = index.read();
+    assert!(names(&index, index.volume(id).unwrap().root).is_empty());
+}
+
+#[test]
 fn a_server_without_mlsd_is_walked_by_parsing_unix_list_output() {
     let server = start(Style::Unix);
     let (index, id, remote) = add(&server, FtpTls::Plain);

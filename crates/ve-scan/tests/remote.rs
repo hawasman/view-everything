@@ -302,6 +302,26 @@ fn busybox_ssh(dir: &Path, server: &str) -> PathBuf {
 }
 
 #[test]
+fn a_cancelled_sftp_walk_is_interrupted() {
+    let _serial = serial();
+    let Some(server) = sftp_server() else {
+        eprintln!("skipped: no sftp-server installed");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    fs::create_dir_all(&tree).unwrap();
+    fs::write(tree.join("keep.txt"), "k").unwrap();
+    let ssh = busybox_ssh(dir.path(), server);
+    let index = SharedIndex::new(Index::new());
+    let id = index.write().add_remote(&Remote::new("sftp@box", tree.to_str().unwrap()).unwrap());
+    let progress = Progress::default();
+    progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let err = remote::sync_with(ssh.to_str().unwrap(), &index, id, &progress).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+}
+
+#[test]
 fn a_server_without_gnu_find_is_indexed_over_sftp_and_remembered() {
     let _serial = serial();
     let Some(server) = sftp_server() else {
@@ -461,4 +481,47 @@ fn one_folder_of_an_ssh_remote_is_synced_alone() {
     // c was outside the folder: its change is not seen yet.
     assert_eq!(names(&index, index.child_named(root, "c").unwrap()), ["stale.txt"]);
     assert_eq!(progress.entries(), 3, "a, b, new.txt and nothing else");
+}
+
+#[test]
+fn a_cancelled_remote_sync_is_interrupted_and_prunes_nothing() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    fs::create_dir_all(&tree).unwrap();
+    fs::write(tree.join("keep.txt"), "k").unwrap();
+    let ssh = script(dir.path(), "ssh", LOCAL);
+    let ssh = ssh.to_str().unwrap();
+    let index = SharedIndex::new(Index::new());
+    let id = add(&index, tree.to_str().unwrap());
+    remote::sync_with(ssh, &index, id, &Progress::default()).unwrap();
+    fs::remove_file(tree.join("keep.txt")).unwrap();
+
+    let progress = Progress::default();
+    progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let err = remote::sync_with(ssh, &index, id, &progress).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    let index = index.read();
+    assert_eq!(names(&index, index.volume(id).unwrap().root), ["keep.txt"]);
+}
+
+#[test]
+fn a_folder_name_with_quotes_and_spaces_is_synced_alone() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    fs::create_dir_all(tree.join("it's here")).unwrap();
+    fs::write(tree.join("it's here/one.txt"), "1").unwrap();
+    let ssh = script(dir.path(), "ssh", LOCAL);
+    let ssh = ssh.to_str().unwrap();
+    let index = SharedIndex::new(Index::new());
+    let id = add(&index, tree.to_str().unwrap());
+    remote::sync_with(ssh, &index, id, &Progress::default()).unwrap();
+    fs::write(tree.join("it's here/two.txt"), "2").unwrap();
+    let folder = {
+        let index = index.read();
+        index.child_named(index.volume(id).unwrap().root, "it's here").unwrap()
+    };
+    remote::sync_folder_with(ssh, &index, folder, &Progress::default()).unwrap();
+    assert_eq!(names(&index.read(), folder), ["one.txt", "two.txt"]);
 }

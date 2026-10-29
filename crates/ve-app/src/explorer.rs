@@ -58,6 +58,15 @@ impl FlatList {
         self.view.as_ref()?.flat.get(row).copied()
     }
 
+    /// The selected Entries in the order the rows show them.
+    pub fn selected(&self) -> Vec<EntryId> {
+        self.selection.in_row_order(self.rows_len(), |r| self.entry_at(r))
+    }
+
+    fn rows_len(&self) -> usize {
+        self.view.as_ref().map_or(0, |v| v.flat.len())
+    }
+
     /// Width the columns need as designed.
     pub fn natural_width() -> f32 {
         COLUMNS[0].1 + COLUMNS[1].1 + FIXED_WIDTH
@@ -196,7 +205,7 @@ impl TableDelegate for FlatList {
 
     fn context_menu(&mut self, _: usize, menu: PopupMenu, window: &mut Window, cx: &mut Context<TableState<Self>>) -> PopupMenu {
         match self.menu.clone() {
-            Some(build) => build(menu, self.selection.ids(), self.selection.last(), window, cx),
+            Some(build) => build(menu, self.selected(), self.selection.last(), window, cx),
             None => menu,
         }
     }

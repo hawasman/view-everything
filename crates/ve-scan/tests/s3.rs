@@ -191,6 +191,25 @@ const OBJECTS: [(&str, u64, &str); 7] = [
 ];
 
 #[test]
+fn a_cancelled_s3_listing_is_interrupted_and_a_folder_sync_is_unsupported() {
+    let server = start(&OBJECTS);
+    let index = SharedIndex::new(Index::new());
+    let id = index.write().add_remote(&Remote::S3(remote(&server, "photos")));
+    let progress = Progress::default();
+    progress.cancel.store(true, Ordering::Relaxed);
+    let err = s3::sync_with(&index, id, &progress, &keys).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    let root = index.read().volume(id).unwrap().root;
+    assert!(names(&index.read(), root).is_empty());
+
+    s3::sync_with(&index, id, &Progress::default(), &keys).unwrap();
+    assert!(!ve_scan::remote::can_sync_folder(&index.read(), id));
+    let dir = index.read().child_named(root, "2024").unwrap();
+    let err = ve_scan::remote::sync_folder(&index, dir, &Progress::default()).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+}
+
+#[test]
 fn a_bucket_prefix_is_indexed_page_by_page_and_a_refresh_applies_differences() {
     let server = start(&OBJECTS);
     let remote = Remote::S3(remote(&server, "photos"));

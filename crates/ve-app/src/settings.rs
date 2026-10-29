@@ -442,6 +442,20 @@ mod tests {
     }
 
     #[test]
+    fn the_default_exclusions_parse_as_a_query() {
+        let context = ve_core::QueryContext::new(ve_core::CategoryMap::builtin(), chrono::Local::now());
+        assert!(ve_core::Query::parse(&default_duplicate_exclusions(), &context).is_ok());
+    }
+
+    #[test]
+    fn a_v0_1_0_file_loads_with_the_new_defaults() {
+        let s: Settings = toml::from_str("refresh_minutes = 30\n").unwrap();
+        assert_eq!(s.duplicate_exclusions, default_duplicate_exclusions());
+        assert_eq!(s.treemap_depth, default_treemap_depth());
+        assert!(!s.keep_in_tray && !s.start_at_login);
+    }
+
+    #[test]
     fn a_network_share_is_opt_in_and_refreshes_every_two_hours() {
         let (nas, fixed) = (share(), volume("/", false));
         let mut s = Settings::default();

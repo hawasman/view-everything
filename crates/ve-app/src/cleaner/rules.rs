@@ -356,6 +356,7 @@ pub fn find(
             }
         }
     }
+    progress(Phase::Scanning, total, total);
     found.retain(|&(_, id)| {
         index
             .volume_of(id)
@@ -379,35 +380,38 @@ pub fn find(
         .filter(|(rule, id)| seen.insert((rule.is_command(), rule.name.clone(), *id)))
         .collect();
     let to_size = unique.len() as u64;
-    let mut out: Vec<Cleanable> = unique
-        .into_iter()
-        .enumerate()
-        .map(|(n, (rule, id))| {
+    let mut out: Vec<Cleanable> = Vec::with_capacity(unique.len());
+    for (n, (rule, id)) in unique.into_iter().enumerate() {
+        if n % 16 == 0 {
             progress(Phase::Sizing, n as u64, to_size);
-            let sized = rule
-                .estimate
-                .as_deref()
-                .and_then(|e| {
-                    Path::new(e)
-                        .components()
-                        .try_fold(id, |at, c| index.child_named(at, c.as_os_str().to_str()?))
-                })
-                .unwrap_or(id);
-            let project = if rule.markers.iter().any(|m| m.starts_with("..")) {
-                index.parent(id).unwrap_or(id)
-            } else {
-                id
-            };
-            let (on_disk, exts) = subtree_sizes(index, sized);
-            Cleanable {
-                path: index.path(id),
-                on_disk,
-                exts,
-                newest: newest_file(index, project),
-                rule,
-            }
-        })
-        .collect();
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        let sized = rule
+            .estimate
+            .as_deref()
+            .and_then(|e| {
+                Path::new(e)
+                    .components()
+                    .try_fold(id, |at, c| index.child_named(at, c.as_os_str().to_str()?))
+            })
+            .unwrap_or(id);
+        let project = if rule.markers.iter().any(|m| m.starts_with("..")) {
+            index.parent(id).unwrap_or(id)
+        } else {
+            id
+        };
+        let (on_disk, exts) = subtree_sizes(index, sized);
+        out.push(Cleanable {
+            path: index.path(id),
+            on_disk,
+            exts,
+            newest: newest_file(index, project),
+            rule,
+        });
+    }
+    progress(Phase::Sizing, to_size, to_size);
     // The same path found by two path rules is one Cleanable; the earlier rule has it.
     let mut paths = HashSet::new();
     out.retain(|c| c.rule.is_command() || paths.insert(c.path.clone()));
@@ -649,8 +653,14 @@ pub fn admin_command(paths: &[PathBuf]) -> String {
 
 /// The admin step: rechecks each Cleanable as Clean does, then removes the ones that still match
 /// with one `pkexec rm` (a single password prompt) and reports per Cleanable whether it is gone.
-/// Command rules are never run elevated. `on_done` is told how many are rechecked.
-pub fn admin_clean(plan: &[(Arc<Rule>, PathBuf, Option<u64>)], volumes: &[VolumeInfo], on_done: &dyn Fn(usize)) -> Outcome {
+/// Command rules are never run elevated. `on_done` is told how many are rechecked; `removing` is
+/// called once the rechecks are over and `pkexec rm` is about to run (no countable progress).
+pub fn admin_clean(
+    plan: &[(Arc<Rule>, PathBuf, Option<u64>)],
+    volumes: &[VolumeInfo],
+    on_done: &dyn Fn(usize),
+    removing: &dyn Fn(),
+) -> Outcome {
     let mut out = Outcome::default();
     let mut go: Vec<PathBuf> = Vec::new();
     for (k, (rule, path, min_age_days)) in plan.iter().enumerate() {
@@ -670,6 +680,7 @@ pub fn admin_clean(plan: &[(Arc<Rule>, PathBuf, Option<u64>)], volumes: &[Volume
     let why = if !CAN_ELEVATE {
         "this system cannot run it elevated from here; run the command shown".to_owned()
     } else {
+        removing();
         match Command::new("pkexec").arg(RM).args(["-rf", "--"]).args(&go).status() {
             Err(e) => format!("could not start pkexec ({e})"),
             // pkexec: 126 = the password prompt was dismissed, 127 = not authorized.
@@ -1200,8 +1211,62 @@ mod tests {
             "{text}"
         );
         let rust = rule("Rust build artefacts");
-        let out = admin_clean(&[(rust, base.join("target"), None)], &[], &|_| {});
+        let out = admin_clean(&[(rust, base.join("target"), None)], &[], &|_| {}, &|| {});
         assert!(out.removed.is_empty() && out.skipped.len() == 1, "{out:?}");
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_raised_cancel_ends_the_look_with_nothing() {
+        let mut index = Index::new();
+        let vol = index.add_volume(Path::new("/w"), "ext4", "uuid:w", dir(), SyncState::Walk);
+        let root = index.volume(vol).unwrap().root;
+        let a = index.insert(root, "a", dir());
+        index.insert(a, "Cargo.toml", file(10));
+        index.insert(a, "target", dir());
+        let rules = builtin(OS).rules;
+        assert!(!find(&index, &[], &rules, &AtomicBool::new(false), &|_, _, _| {}).is_empty());
+        assert!(find(&index, &[], &rules, &AtomicBool::new(true), &|_, _, _| {}).is_empty());
+        // Raised once measuring has begun: nothing comes back either.
+        let cancel = AtomicBool::new(false);
+        let found = find(&index, &[], &rules, &cancel, &|phase, _, _| {
+            if phase == Phase::Sizing {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn the_look_reports_scanning_before_sizing() {
+        let mut index = Index::new();
+        let vol = index.add_volume(Path::new("/w"), "ext4", "uuid:w", dir(), SyncState::Walk);
+        let root = index.volume(vol).unwrap().root;
+        let a = index.insert(root, "a", dir());
+        index.insert(a, "Cargo.toml", file(10));
+        index.insert(a, "target", dir());
+        let phases = std::cell::RefCell::new(Vec::new());
+        find(&index, &[], &builtin(OS).rules, &AtomicBool::new(false), &|phase, _, _| {
+            phases.borrow_mut().push(phase);
+        });
+        let phases = phases.into_inner();
+        let first_sizing = phases.iter().position(|&p| p == Phase::Sizing).unwrap();
+        assert!(phases[..first_sizing].iter().all(|&p| p == Phase::Scanning));
+        assert!(phases[first_sizing..].iter().all(|&p| p == Phase::Sizing));
+    }
+
+    #[test]
+    fn clean_and_admin_clean_tell_how_many_are_done() {
+        let base = std::env::temp_dir().join(format!("ve-cleaner-progress-{}", std::process::id()));
+        let rust = rule("Rust build artefacts");
+        let plan: Vec<_> = (0..3).map(|i| (rust.clone(), base.join(format!("t{i}")), None)).collect();
+        let seen = std::cell::RefCell::new(Vec::new());
+        clean(&plan, &[], &|k| seen.borrow_mut().push(k));
+        assert_eq!(seen.take(), vec![1, 2, 3]);
+        let removing = std::cell::Cell::new(false);
+        admin_clean(&plan, &[], &|k| seen.borrow_mut().push(k), &|| removing.set(true));
+        // Nothing survived the recheck, so no elevated removal phase began.
+        assert!(!removing.get());
+        assert_eq!(seen.take(), vec![1, 2, 3]);
     }
 }

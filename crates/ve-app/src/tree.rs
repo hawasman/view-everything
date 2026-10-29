@@ -138,8 +138,14 @@ impl TreeList {
 
     /// Arrow-key move of the selection; the row now focused.
     pub fn step(&mut self, down: bool, extend: bool) -> Option<usize> {
-        let ids: Vec<Option<EntryId>> = (0..self.rows.len()).map(|r| self.entry_at(r)).collect();
-        self.selection.step(down, extend, ids.len(), |r| ids[r])
+        let rows = &self.rows;
+        self.selection
+            .step(down, extend, rows.len(), |r| rows.get(r).filter(|r| r.gone.is_none()).map(|r| r.id))
+    }
+
+    /// The selected Entries in the order the rows show them.
+    pub fn selected(&self) -> Vec<EntryId> {
+        self.selection.in_row_order(self.rows.len(), |r| self.entry_at(r))
     }
 
     /// Selects every visible row.
@@ -364,7 +370,7 @@ impl TableDelegate for TreeList {
 
     fn context_menu(&mut self, _: usize, menu: PopupMenu, window: &mut Window, cx: &mut Context<TableState<Self>>) -> PopupMenu {
         match self.menu.clone() {
-            Some(build) => build(menu, self.selection.ids(), self.selection.last(), window, cx),
+            Some(build) => build(menu, self.selected(), self.selection.last(), window, cx),
             None => menu,
         }
     }

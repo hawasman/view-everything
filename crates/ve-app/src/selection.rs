@@ -28,6 +28,7 @@ pub struct Selection {
     last: Option<EntryId>,
     /// The Entry last right-clicked, which the context menu acts on.
     pub context: Option<EntryId>,
+    version: u64,
 }
 
 impl Selection {
@@ -35,8 +36,24 @@ impl Selection {
         self.ids.contains(&id)
     }
 
-    pub fn ids(&self) -> Vec<EntryId> {
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Changes whenever the selected set does, so derived values can be cached.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// The selected Entries in no particular order, for sums that do not depend on it.
+    pub fn unordered(&self) -> Vec<EntryId> {
         self.ids.iter().copied().collect()
+    }
+
+    /// The selected Entries in row order (rows without an Entry are skipped), the order the
+    /// list shows them in.
+    pub fn in_row_order(&self, rows: usize, entry_at: impl Fn(usize) -> Option<EntryId>) -> Vec<EntryId> {
+        (0..rows).filter_map(entry_at).filter(|id| self.ids.contains(id)).collect()
     }
 
     pub fn last(&self) -> Option<EntryId> {
@@ -44,6 +61,7 @@ impl Selection {
     }
 
     pub fn clear(&mut self) {
+        self.version += 1;
         self.ids.clear();
         self.anchor = None;
         self.last = None;
@@ -51,15 +69,24 @@ impl Selection {
 
     /// Selects every row `0..rows`; the anchor and last-clicked Entry stay where they were.
     pub fn select_all(&mut self, rows: usize, entry_at: impl Fn(usize) -> Option<EntryId>) {
+        self.version += 1;
         self.ids = (0..rows).filter_map(entry_at).collect();
     }
 
     /// Keeps only the Entries `keep` accepts, e.g. those a new View still shows.
     pub fn retain(&mut self, keep: impl Fn(EntryId) -> bool) {
+        self.version += 1;
         self.ids.retain(|&id| keep(id));
+        if self.anchor.is_some_and(|a| !keep(a)) {
+            self.anchor = None;
+        }
+        if self.last.is_some_and(|l| !keep(l)) {
+            self.last = None;
+        }
     }
 
     pub fn only(&mut self, id: EntryId) {
+        self.version += 1;
         self.ids.clear();
         self.ids.insert(id);
         self.anchor = Some(id);
@@ -95,6 +122,7 @@ impl Selection {
     /// selection, or joins it with Ctrl/Cmd held too.
     pub fn click(&mut self, row: usize, modifiers: Modifiers, rows: usize, entry_at: impl Fn(usize) -> Option<EntryId>) {
         let Some(id) = entry_at(row) else { return };
+        self.version += 1;
         let additive = modifiers.control || modifiers.platform;
         if modifiers.shift {
             let from = self.anchor.and_then(|a| (0..rows).find(|&r| entry_at(r) == Some(a))).unwrap_or(row);
@@ -133,7 +161,7 @@ mod tests {
     }
 
     fn sorted(s: &Selection) -> Vec<u32> {
-        let mut v: Vec<u32> = s.ids().into_iter().map(|e| e.0).collect();
+        let mut v: Vec<u32> = s.in_row_order(ROWS, entry).into_iter().map(|e| e.0).collect();
         v.sort();
         v
     }
@@ -256,7 +284,7 @@ mod tests {
         click(&mut s, 3, Modifiers::default());
         assert_eq!(s.last(), Some(EntryId(103)));
         s.select_all(5, entry);
-        assert_eq!(s.ids().len(), 5);
+        assert_eq!(s.len(), 5);
         assert_eq!(s.last(), Some(EntryId(103)));
         // Shift from the anchor kept by select_all.
         click(&mut s, 1, Modifiers::shift());
@@ -265,8 +293,22 @@ mod tests {
         // Ctrl-click off the last-clicked row leaves no last Entry.
         click(&mut s, 1, Modifiers::control());
         assert_eq!(s.last(), None);
-        assert_eq!(s.ids().len(), 2);
+        assert_eq!(s.len(), 2);
         s.clear();
-        assert!(s.ids().is_empty());
+        assert_eq!(s.len(), 0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn in_row_order_follows_rows_and_retain_drops_gone_focus() {
+        let mut s = Selection::default();
+        click(&mut s, 7, Modifiers::default());
+        click(&mut s, 2, Modifiers::control());
+        click(&mut s, 5, Modifiers::control());
+        let ids: Vec<u32> = s.in_row_order(ROWS, entry).into_iter().map(|e| e.0).collect();
+        assert_eq!(ids, vec![102, 105, 107]);
+        s.retain(|id| id != EntryId(105));
+        assert_eq!(s.last(), None);
+        // With the focus gone, Down starts at the first row.
+        assert_eq!(s.step(true, false, ROWS, entry), Some(0));
     }
 }

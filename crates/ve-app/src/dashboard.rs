@@ -39,7 +39,7 @@ pub enum Act {
     /// Forget the Offline Volume with this identity (and its last mount path).
     Forget(String, PathBuf),
     /// Sync the Location with these Volume identities (one filesystem's) now, in full.
-    Refresh(Vec<String>),
+    Sync(Vec<String>),
     /// Sync every online Volume now.
     SyncAll,
     MoveToTrash(EntryId),
@@ -115,7 +115,7 @@ pub struct DashboardPage {
     shown: Option<Arc<Summary>>,
     queries: Sender<String>,
     volumes: Vec<VolumeInfo>,
-    /// Refresh interval in minutes by Volume identity.
+    /// Sync interval in minutes by Volume identity.
     minutes: HashMap<String, u64>,
     /// The Recently modified Query in force.
     recent_query: String,
@@ -796,7 +796,8 @@ impl DashboardPage {
         let sync_pill = pill(("sync-now", ix), "Sync now")
             .small()
             .busy(l.syncing.is_some())
-            .build(cx, cx.listener(move |_, _, _, cx| cx.emit(Act::Refresh(identities.clone()))));
+            .disabled(self.shared.is_loading().then_some("Loading the saved Index"))
+            .build(cx, cx.listener(move |_, _, _, cx| cx.emit(Act::Sync(identities.clone()))));
         let mut sync = v_flex().items_end().child(div().text_color(p.text).child(main));
         sync = if let Some(read) = l.syncing {
             sync.child(

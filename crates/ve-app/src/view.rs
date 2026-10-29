@@ -53,24 +53,72 @@ pub struct CategoryRow {
 #[derive(Default)]
 pub struct FileOrder {
     generation: Option<u64>,
-    sorted: Vec<(u64, u32)>,
+    /// On-disk Sizes, largest first; `ids[i]` is the file of `sizes[i]`. Two Vecs, 12 bytes a file.
+    sizes: Vec<u64>,
+    ids: Vec<u32>,
 }
 
+/// Entries looked at between two checks for cancellation.
+const COLLECT_CHUNK: usize = 1 << 18;
+
 impl FileOrder {
-    /// Sorts the files of `index` unless this is already their generation.
-    pub fn ensure(&mut self, index: &Index) {
+    /// Sorts the files of `index` unless this is already their generation. `false` when
+    /// `cancelled` stopped it; the order is then unchanged.
+    pub fn ensure(&mut self, index: &Index, cancelled: &(dyn Fn() -> bool + Sync)) -> bool {
         if self.generation == Some(index.generation()) {
-            return;
+            return true;
         }
-        self.sorted = (0..index.capacity())
-            .into_par_iter()
-            .map(|i| EntryId(i as u32))
-            .filter(|&id| index.is_live(id) && !index.is_dir(id) && index.parent(id).is_some())
-            .map(|id| (index.on_disk(id), id.0))
-            .collect();
+        let generation = index.generation();
+        match Self::collect(index, cancelled) {
+            Some(files) => self.install(generation, files, cancelled),
+            None => false,
+        }
+    }
+
+    /// Like [`FileOrder::ensure`], but holds the read lock only while the files are collected, not
+    /// while they are sorted, so writers and Queries are not kept waiting for the sort.
+    pub fn ensure_shared(&mut self, index: &ve_scan::SharedIndex, cancelled: &(dyn Fn() -> bool + Sync)) -> bool {
+        let (generation, files) = {
+            let index = index.read();
+            if self.generation == Some(index.generation()) {
+                return true;
+            }
+            let Some(files) = Self::collect(&index, cancelled) else {
+                return false;
+            };
+            (index.generation(), files)
+        };
+        self.install(generation, files, cancelled)
+    }
+
+    fn collect(index: &Index, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Vec<(u64, u32)>> {
+        let capacity = index.capacity();
+        let mut files = Vec::new();
+        for from in (0..capacity).step_by(COLLECT_CHUNK) {
+            if cancelled() {
+                return None;
+            }
+            let chunk: Vec<(u64, u32)> = (from..(from + COLLECT_CHUNK).min(capacity))
+                .into_par_iter()
+                .map(|i| EntryId(i as u32))
+                .filter(|&id| index.is_live(id) && !index.is_dir(id) && index.parent(id).is_some())
+                .map(|id| (index.on_disk(id), id.0))
+                .collect();
+            files.extend(chunk);
+        }
+        Some(files)
+    }
+
+    fn install(&mut self, generation: u64, mut files: Vec<(u64, u32)>, cancelled: &(dyn Fn() -> bool + Sync)) -> bool {
         // Stable, and collected in id order: equal sizes list in id order.
-        self.sorted.par_sort_by_key(|&(size, _)| std::cmp::Reverse(size));
-        self.generation = Some(index.generation());
+        files.par_sort_by_key(|&(size, _)| std::cmp::Reverse(size));
+        if cancelled() {
+            return false;
+        }
+        self.sizes = files.iter().map(|&(size, _)| size).collect();
+        self.ids = files.iter().map(|&(_, id)| id).collect();
+        self.generation = Some(generation);
+        true
     }
 }
 
@@ -92,7 +140,9 @@ impl View {
     ) -> Option<View> {
         let started = Instant::now();
         let filter = Filter::compute_until(index, query, cancelled)?;
-        order.ensure(index);
+        if !order.ensure(index, cancelled) {
+            return None;
+        }
         if cancelled() {
             return None;
         }
@@ -105,10 +155,10 @@ impl View {
             .collect();
         dirs.par_sort_by_key(|&(size, _)| std::cmp::Reverse(size));
         // Where each folder slots into the file order: after the files of equal size.
-        let files = &order.sorted;
+        let files = &order.sizes;
         let slots: Vec<(usize, u32)> = dirs
             .iter()
-            .map(|&(size, dir)| (files.partition_point(|&(s, _)| s >= size), dir))
+            .map(|&(size, dir)| (files.partition_point(|&s| s >= size), dir))
             .collect();
         // Each worker turns one stretch of the file order into the matching files and the folders
         // that fall in it; the stretches join in order.
@@ -121,7 +171,7 @@ impl View {
                 let last = n + 1 == stretches;
                 let mut next = slots.partition_point(|&(at, _)| at < from);
                 let mut out = Vec::with_capacity(to - from);
-                for (at, &(_, id)) in (from..to).zip(&files[from..to]) {
+                for (at, &id) in (from..to).zip(&order.ids[from..to]) {
                     while next < slots.len() && slots[next].0 == at {
                         out.push(EntryId(slots[next].1));
                         next += 1;
@@ -282,5 +332,65 @@ mod tests {
         let query = Query::parse("ext:rs !b", &ctx).unwrap();
         let view = View::compute(&index, "ext:rs !b", Some(&query), &categories, &mut order);
         assert_eq!(view.flat, vec![big, small, tie]);
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+    use std::path::Path;
+    use ve_core::{EntryMeta, SyncState};
+
+    fn big_index(files: usize) -> (Index, EntryId) {
+        let mut index = Index::new();
+        let dir = EntryMeta {
+            is_dir: true,
+            ..Default::default()
+        };
+        let volume = index.add_volume(Path::new("/v"), "ext4", "v", dir, SyncState::Walk);
+        let root = index.volume(volume).unwrap().root;
+        for i in 0..files {
+            let size = (i % 1000) as u64 + 1;
+            index.insert(
+                root,
+                &format!("f{i}.rs"),
+                EntryMeta {
+                    logical: size,
+                    on_disk: size,
+                    ..Default::default()
+                },
+            );
+        }
+        (index, root)
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_cancelled_compute_gives_nothing_and_leaves_the_order_unset() {
+        let (index, _) = big_index(10);
+        let mut order = FileOrder::default();
+        let categories = CategoryMap::builtin();
+        assert!(View::compute_until(&index, "", None, &categories, &mut order, &|| true).is_none());
+        assert!(order.generation.is_none());
+        assert!(!order.ensure(&index, &|| true));
+        assert!(order.ensure(&index, &|| false));
+        assert_eq!(order.sizes.len(), 10);
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_list_is_sorted_across_stretch_boundaries() {
+        // More files than one stretch (65,536) so the parallel merge joins several.
+        let (index, root) = big_index(140_000);
+        let mut order = FileOrder::default();
+        let view = View::compute(&index, "", None, &CategoryMap::builtin(), &mut order);
+        // 140,000 files plus the root folder, which is not listed.
+        assert_eq!(view.flat.len(), 140_000);
+        assert!(view.flat.iter().all(|&id| id != root));
+        let sizes: Vec<u64> = view.flat.iter().map(|&id| index.on_disk(id)).collect();
+        assert!(sizes.windows(2).all(|w| w[0] >= w[1]));
+        // Rebuilt from the shared lock: same generation, nothing to do.
+        let shared = ve_scan::SharedIndex::new(index);
+        let mut fresh = FileOrder::default();
+        assert!(fresh.ensure_shared(&shared, &|| false));
+        assert_eq!(fresh.ids.len(), 140_000);
     }
 }

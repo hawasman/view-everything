@@ -74,6 +74,10 @@ pub struct Shared {
     /// The Volumes a running Live updates source keeps current, as of the last time the
     /// indexer looked (see `Live::covered`). The sidebar shows these as Live.
     pub followed: Mutex<HashSet<VolumeId>>,
+    /// A Sync now is queued for the indexer and not yet started.
+    pub sync_queued: AtomicBool,
+    /// The folders being Synced alone now, so the same one is not started twice.
+    folders_syncing: Mutex<Vec<EntryId>>,
     /// Background work the sidebar lists (Sync, Duplicate search, Cleaner, ...).
     pub tasks: Tasks,
     /// Called from the background threads whenever something the GUI shows has changed.
@@ -99,6 +103,9 @@ pub struct DuplicateState {
     pub skipped: u64,
     /// Why the Duplicate Exclusions could not be used (they were ignored), if so.
     pub exclusion_error: Option<String>,
+    /// The Duplicate Exclusions a cancelled search ran under: a search under them is not
+    /// started again on its own.
+    pub cancelled_under: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -126,7 +133,7 @@ enum Command {
     /// Every Volume mounted, the ones of them to index, and the Remotes to hold.
     SetVolumes(Vec<VolumeInfo>, Vec<VolumeInfo>, Vec<Remote>),
     /// Syncs the Location with this identity now (Sync now), in full.
-    RefreshLocation(String),
+    SyncLocation(String),
     /// Drops an Offline Volume, by identity, from the Index.
     Forget(String),
     /// Live updates lost changes or came back: every online Volume is caught up.
@@ -186,6 +193,8 @@ impl Engine {
             live_lost: AtomicU32::new(0),
             live_held: AtomicU64::new(0),
             followed: Mutex::new(HashSet::new()),
+            sync_queued: AtomicBool::new(false),
+            folders_syncing: Mutex::new(Vec::new()),
             tasks,
             repaint,
         });
@@ -227,8 +236,12 @@ impl Engine {
     /// Sets the names the user gave Remotes (by identity), shown wherever a Remote is named.
     pub fn set_remote_names(&self, names: &std::collections::BTreeMap<String, String>) {
         *self.shared.remote_names.lock() = names.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        self.shared.apply_remote_names();
-        (self.shared.repaint)();
+        // Off the UI thread: the Index's write lock can be held for a whole save or sync.
+        let shared = self.shared.clone();
+        let _ = thread::Builder::new().name("ve-remote-names".into()).spawn(move || {
+            shared.apply_remote_names();
+            (shared.repaint)();
+        });
     }
 
     pub fn set_volumes(&self, mounted: Vec<VolumeInfo>, volumes: Vec<VolumeInfo>, remotes: Vec<Remote>) {
@@ -237,8 +250,8 @@ impl Engine {
 
     /// Brings one Location (by identity) up to date now, whatever its refresh interval, and
     /// leaves the others alone.
-    pub fn refresh_location(&self, identity: String) {
-        let _ = self.commands.send(Command::RefreshLocation(identity));
+    pub fn sync_location(&self, identity: String) {
+        let _ = self.commands.send(Command::SyncLocation(identity));
     }
 
     pub fn forget(&self, identity: String) {
@@ -267,6 +280,10 @@ impl Engine {
     /// Sync now: every online Volume (not the Remotes) is read again in full, even one Live
     /// updates cover; an NTFS Volume's whole Master File Table is read.
     pub fn sync_now(&self) {
+        // A Sync cannot be started twice: one running or already queued covers this request.
+        if self.shared.is_syncing() || self.shared.sync_queued.swap(true, Ordering::Relaxed) {
+            return;
+        }
         let _ = self.commands.send(Command::SyncNow);
     }
 
@@ -302,13 +319,20 @@ impl Shared {
     /// Copies the Remote names onto the Index's Remote Locations.
     fn apply_remote_names(&self) {
         let names = self.remote_names.lock().clone();
+        let changed: Vec<_> = {
+            let index = self.index.read();
+            index
+                .volumes()
+                .filter(|(_, v)| v.is_remote())
+                .filter(|(_, v)| v.name.as_deref() != names.get(&v.identity).map(|n| n.trim()).filter(|n| !n.is_empty()))
+                .map(|(id, v)| (id, v.identity.clone()))
+                .collect()
+        };
+        if changed.is_empty() {
+            return;
+        }
         let mut index = self.index.write();
-        let remotes: Vec<_> = index
-            .volumes()
-            .filter(|(_, v)| v.is_remote())
-            .map(|(id, v)| (id, v.identity.clone()))
-            .collect();
-        for (id, identity) in remotes {
+        for (id, identity) in changed {
             index.set_remote_name(id, names.get(&identity).map(String::as_str));
         }
     }
@@ -423,17 +447,24 @@ fn run_indexer(
     let mut answers: Option<u32> = None;
     // Volumes the user asked to Sync now: read in full, not caught up.
     let mut forced: HashSet<VolumeId> = HashSet::new();
+    // Volumes whose Sync was cancelled, and when: not retried on their own until their next interval.
+    let mut cancelled_at: HashMap<VolumeId, Instant> = HashMap::new();
     // The first sync after launch is the Catch-up of the saved Index.
     let mut launch = true;
     loop {
         if !pending.is_empty() {
-            sync_volumes(shared, &pending, &forced, launch, quiet, &retry_tx);
+            let cancelled = sync_volumes(shared, &pending, &forced, launch, quiet, &retry_tx);
             launch = false;
             forced.clear();
-            if let Some(count) = answers.take() {
+            // A cancelled re-walk did not cover the lost changes: the position stays held.
+            if !cancelled && let Some(count) = answers.take() {
                 release_position(shared, count);
             }
+            let _ = live.covered();
             let now = Instant::now();
+            if cancelled {
+                cancelled_at.extend(pending.iter().map(|&id| (id, now)));
+            }
             last_attempt.extend(pending.drain(..).map(|id| (id, now)));
             if !quiet || last_save.elapsed() >= POLL_SAVE_INTERVAL {
                 // Last Synced moved even when no Entry did, and a restart relies on it.
@@ -463,16 +494,20 @@ fn run_indexer(
                 wanted = volumes;
                 remotes = now_remotes;
                 pending = reconcile_volumes(shared, &mounted, &wanted, &remotes);
+                forced.clear();
                 live.set_mounts(local_mounts(&wanted));
             }
             Ok(Command::SetLiveHelper(on)) => live.set_helper(on),
-            Ok(Command::RefreshLocation(identity)) => {
+            Ok(Command::SyncLocation(identity)) => {
                 let target = refresh_target(&shared.index.read(), &identity);
                 // Several requests in a row (a filesystem's Volumes) are all kept.
                 if let Some(id) = target
                     && !pending.contains(&id)
                 {
                     pending.push(id);
+                }
+                if let Some(id) = target {
+                    cancelled_at.remove(&id);
                 }
                 forced.extend(target);
             }
@@ -492,17 +527,25 @@ fn run_indexer(
                 pending.retain(|&id| index.volume(id).is_some());
             }
             Ok(Command::SyncNow) => {
+                shared.sync_queued.store(false, Ordering::Relaxed);
                 // Every online Volume, not the Remotes, read again in full whatever Live updates cover.
-                pending = shared
+                let all: Vec<VolumeId> = shared
                     .index
                     .read()
                     .volumes()
                     .filter(|(_, v)| v.online && !v.is_remote())
                     .map(|(id, _)| id)
                     .collect();
-                forced.extend(pending.iter().copied());
+                // Merged into what is queued (a Remote's refresh), not replacing it.
+                for &id in &all {
+                    if !pending.contains(&id) {
+                        pending.push(id);
+                    }
+                    cancelled_at.remove(&id);
+                }
+                forced.extend(all.iter().copied());
                 let count = shared.live_lost.load(Ordering::Relaxed);
-                if pending.is_empty() {
+                if all.is_empty() {
                     release_position(shared, count);
                 } else {
                     answers = Some(count);
@@ -520,6 +563,7 @@ fn run_indexer(
             Ok(Command::SetIntervals(new)) => {
                 intervals = new;
                 pending = Vec::new();
+                forced.clear();
             }
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
                 save_if_changed(shared, index_path.as_deref(), &mut saved_generation, true);
@@ -527,6 +571,11 @@ fn run_indexer(
             }
             Err(RecvTimeoutError::Timeout) => {
                 pending = stale_volumes(&shared.index.read(), &intervals, now_secs());
+                {
+                    let index = shared.index.read();
+                    cancelled_at.retain(|id, at| index.volume(*id).is_some_and(|v| at.elapsed() < interval_of(&intervals, &v.mount)));
+                }
+                pending.retain(|id| !cancelled_at.contains_key(id));
                 // Volumes followed live are current: no re-walk, and Last Synced keeps up.
                 let covered = live.covered();
                 pending.retain(|id| !covered.contains(id));
@@ -545,6 +594,8 @@ fn run_indexer(
                 }
             }
         }
+        // The sidebar's Live state follows the helper and the Volumes at once.
+        let _ = live.covered();
         if !pending.is_empty() && !quiet {
             shared.busy.store(true, Ordering::Relaxed);
         }
@@ -653,24 +704,23 @@ fn reconcile_volumes(shared: &Shared, mounted: &[VolumeInfo], wanted: &[VolumeIn
     added
 }
 
-/// The folders being Synced alone now, so the same one is not started twice.
-static FOLDER_SYNCING: Mutex<Vec<EntryId>> = Mutex::new(Vec::new());
-
-struct FolderGuard(EntryId);
+struct FolderGuard(Arc<Shared>, EntryId);
 
 impl Drop for FolderGuard {
     fn drop(&mut self) {
-        FOLDER_SYNCING.lock().retain(|&f| f != self.0);
+        self.0.folders_syncing.lock().retain(|&f| f != self.1);
     }
 }
 
-/// Whether a Sync of this folder alone is running.
-pub fn folder_syncing(folder: EntryId) -> bool {
-    FOLDER_SYNCING.lock().contains(&folder)
+impl Shared {
+    /// Whether a Sync of this folder alone is running.
+    pub fn folder_syncing(&self, folder: EntryId) -> bool {
+        self.folders_syncing.lock().contains(&folder)
+    }
 }
 
-/// The folder a Sync this folder acts on: `entry` for a folder, its parent for a file.
-pub fn sync_target(index: &Index, entry: EntryId) -> EntryId {
+/// The folder `entry` stands for: itself for a folder, its parent for a file (what a Sync, a scope or a terminal acts on).
+pub fn folder_of(index: &Index, entry: EntryId) -> EntryId {
     if index.is_dir(entry) {
         entry
     } else {
@@ -680,7 +730,7 @@ pub fn sync_target(index: &Index, entry: EntryId) -> EntryId {
 
 /// Syncs the folder of `entry` (its parent, for a file) alone, as a cancellable Task.
 pub fn sync_folder(shared: &Arc<Shared>, entry: EntryId) {
-    let folder = sync_target(&shared.index.read(), entry);
+    let folder = folder_of(&shared.index.read(), entry);
     spawn_folder_sync(shared, folder);
 }
 
@@ -721,13 +771,13 @@ fn spawn_folder_sync(shared: &Arc<Shared>, folder: EntryId) {
         (format!("Sync {name}"), path, remote)
     };
     {
-        let mut syncing = FOLDER_SYNCING.lock();
+        let mut syncing = shared.folders_syncing.lock();
         if syncing.contains(&folder) {
             return;
         }
         syncing.push(folder);
     }
-    let guard = FolderGuard(folder);
+    let guard = FolderGuard(shared.clone(), folder);
     let task = shared.tasks.begin(TaskKind::Sync, label, true);
     let shared = shared.clone();
     let spawned = thread::Builder::new().name("ve-sync-folder".into()).spawn({
@@ -771,11 +821,18 @@ fn spawn_folder_sync(shared: &Arc<Shared>, folder: EntryId) {
     let _ = spawned;
 }
 
-fn sync_volumes(shared: &Shared, volumes: &[VolumeId], forced: &HashSet<VolumeId>, launch: bool, quiet: bool, retry: &Sender<Command>) {
+fn sync_volumes(
+    shared: &Shared,
+    volumes: &[VolumeId],
+    forced: &HashSet<VolumeId>,
+    launch: bool,
+    quiet: bool,
+    retry: &Sender<Command>,
+) -> bool {
     // Measuring (examples/gen_index.rs): the synthetic Index's Volume does not exist on disk.
     #[cfg(feature = "bench")]
     if std::env::var_os("VE_BENCH_MOUNT").is_some() {
-        return;
+        return false;
     }
     let (mounts, catching_up) = {
         let index = shared.index.read();
@@ -861,9 +918,9 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], forced: &HashSet<VolumeId
                             let identity = shared.index.read().volume(*id).map(|v| v.identity.clone());
                             failed.lock().extend(identity);
                             if remote {
-                                let shown = shared.index.read().volume(*id).and_then(|v| v.name.clone());
+                                let shown = shared.index.read().volume(*id).and_then(Volume::remote_display_name);
                                 let shown = shown.unwrap_or_else(|| mount.display().to_string());
-                                shared.report(cause, format!("Could not refresh {shown}: {e}"));
+                                shared.report(cause, format!("Could not sync {shown}: {e}"));
                             } else {
                                 shared.report(cause, format!("Could not read {}: {e}", mount.display()));
                             }
@@ -883,7 +940,7 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], forced: &HashSet<VolumeId
             let retry = retry.clone();
             task.set_retry(Arc::new(move |_| {
                 for identity in &failed {
-                    let _ = retry.send(Command::RefreshLocation(identity.clone()));
+                    let _ = retry.send(Command::SyncLocation(identity.clone()));
                 }
             }));
             Outcome::Failed("A Location could not be read".into())
@@ -892,7 +949,9 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], forced: &HashSet<VolumeId
         };
         task.finish(outcome);
     }
+    let cancelled = shared.progress.cancelled();
     shared.progress.cancel.store(false, Ordering::Relaxed);
+    cancelled
 }
 
 /// Saves the Index if an Entry changed since the last save, or always when `force`.
@@ -972,8 +1031,9 @@ pub fn refresh_duplicates(shared: &Arc<Shared>) {
     // The Index moves on with every live change: a finished search is redone only once it is
     // a while old, so painting the panel does not keep every Volume being walked and hashed.
     // New Duplicate Exclusions make a finished search stale at once.
-    let current = state.exclusions == exclusions
-        && (state.generation == Some(generation) || state.finished.is_some_and(|at| at.elapsed() < DUPLICATES_MAX_AGE));
+    let fresh = state.finished.is_some_and(|at| at.elapsed() < DUPLICATES_MAX_AGE);
+    let current = (state.exclusions == exclusions && (state.generation == Some(generation) || fresh))
+        || (state.cancelled_under.as_ref() == Some(&exclusions) && fresh);
     drop(state);
     if !current && matches!(shared.status.lock().phase, Phase::Idle) {
         start_hashing(shared);
@@ -1009,6 +1069,9 @@ struct HashingDone(Arc<Shared>);
 
 impl Drop for HashingDone {
     fn drop(&mut self) {
+        // Zeroed so the next search starts at "grouping" rather than showing this one's bar.
+        self.0.hash_progress.done.store(0, Ordering::Relaxed);
+        self.0.hash_progress.total.store(0, Ordering::Relaxed);
         self.0.hash_progress.stage.store(0, Ordering::Relaxed);
         self.0.hashing.store(false, Ordering::Relaxed);
     }
@@ -1066,9 +1129,9 @@ pub fn start_hashing(shared: &Arc<Shared>) {
             let cancelled = cancel.load(Ordering::Relaxed);
             let mut state = shared.duplicates.lock();
             if cancelled {
-                // What was found is partial: keep the earlier result, and do not start again
-                // until asked or the Index is old.
-                state.exclusions = exclusions;
+                // What was found is partial: keep the earlier result (and the exclusions it
+                // ran under), and do not start again until asked or the Index is old.
+                state.cancelled_under = Some(exclusions);
             } else {
                 let mut set = BitSet::new(shared.index.read().capacity());
                 for id in groups.iter().flat_map(|g| &g.files) {
@@ -1079,6 +1142,7 @@ pub fn start_hashing(shared: &Arc<Shared>) {
                 state.version += 1;
                 state.generation = Some(generation);
                 state.exclusions = exclusions;
+                state.cancelled_under = None;
                 state.skipped = stats.excluded;
                 state.exclusion_error = exclusion_error;
             }
@@ -1124,7 +1188,7 @@ fn run_viewer(shared: &Arc<Shared>, queries: &Receiver<String>, newest: &AtomicU
                 // Idle: sort the files of the newest generation now, so the next keystroke does
                 // not, at most as often as a changing Index gets a new View.
                 if last_compute.elapsed() >= VIEW_THROTTLE {
-                    order.ensure(&shared.index.read());
+                    order.ensure_shared(&shared.index, &|| newest.load(Ordering::Relaxed) != seen_query);
                 }
                 false
             }
@@ -1169,9 +1233,13 @@ fn run_viewer(shared: &Arc<Shared>, queries: &Receiver<String>, newest: &AtomicU
         if up_to_date || (only_index_moved && last_compute.elapsed() < VIEW_THROTTLE) {
             continue;
         }
+        let stale = || newest.load(Ordering::Relaxed) != seen_query;
+        // Sorted without the Index lock held, so writers and a keystroke are not kept waiting.
+        if !order.ensure_shared(&shared.index, &stale) {
+            continue;
+        }
         let view = {
             let index = shared.index.read();
-            let stale = || newest.load(Ordering::Relaxed) != seen_query;
             View::compute_until(&index, &text, query.as_ref(), categories, &mut order, &stale)
         };
         // Superseded mid-compute: the newer Query is in the channel; take it now.
@@ -1203,6 +1271,8 @@ mod tests {
             duplicate_exclusions: Mutex::new(String::new()),
             remote_names: Mutex::new(HashMap::new()),
             categories: CategoryMap::builtin(),
+            sync_queued: AtomicBool::new(false),
+            folders_syncing: Mutex::new(Vec::new()),
             hashing: AtomicBool::new(false),
             saving: Mutex::new(()),
             snapshotting: AtomicBool::new(false),

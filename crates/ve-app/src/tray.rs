@@ -178,14 +178,15 @@ mod platform {
     use async_channel::Sender;
     use parking_lot::Mutex;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Shell::{NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
-        GetCursorPos, GetMessageW, HWND_MESSAGE, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, RegisterClassW,
-        SetForegroundWindow, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONUP,
-        WM_RBUTTONUP, WNDCLASSW,
+        AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
+        DispatchMessageW, GetCursorPos, GetMessageW, HICON, HWND_MESSAGE, KillTimer, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, PostMessageW,
+        RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP,
+        WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
     };
 
     const CALLBACK: u32 = WM_APP + 1;
@@ -201,6 +202,10 @@ mod platform {
     }
 
     static SHARED: Mutex<Option<Arc<Shared>>> = Mutex::new(None);
+    /// The icon handle, owned by the tray thread (0 when none).
+    static ICON: AtomicIsize = AtomicIsize::new(0);
+    static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+    const RETRY_TIMER: usize = 1;
 
     fn wide(text: &str) -> Vec<u16> {
         text.encode_utf16().chain(Some(0)).collect()
@@ -209,6 +214,7 @@ mod platform {
     pub struct Tray {
         shared: Arc<Shared>,
         window: isize,
+        thread: Option<std::thread::JoinHandle<()>>,
     }
 
     impl Tray {
@@ -219,9 +225,13 @@ mod platform {
             });
             *SHARED.lock() = Some(shared.clone());
             let (ready, started) = std::sync::mpsc::channel::<Option<isize>>();
-            std::thread::Builder::new().name("ve-tray".into()).spawn(move || run(ready)).ok()?;
+            let thread = std::thread::Builder::new().name("ve-tray".into()).spawn(move || run(ready)).ok()?;
             let window = started.recv().ok()??;
-            Some(Tray { shared, window })
+            Some(Tray {
+                shared,
+                window,
+                thread: Some(thread),
+            })
         }
 
         pub fn update(&self, state: TrayState) {
@@ -234,6 +244,10 @@ mod platform {
             // SAFETY: posts a message to the window the tray thread owns; it removes the icon
             // and ends its loop on WM_CLOSE.
             unsafe { PostMessageW(self.window as HWND, WM_CLOSE, 0, 0) };
+            // Wait for the icon to be gone before the process can exit.
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
         }
     }
 
@@ -266,12 +280,11 @@ mod platform {
                 let _ = ready.send(None);
                 return;
             }
-            let mut data = icon_data(window);
-            data.hIcon = app_icon();
-            if Shell_NotifyIconW(NIM_ADD, &data) == 0 {
-                DestroyWindow(window);
-                let _ = ready.send(None);
-                return;
+            ICON.store(app_icon() as isize, Ordering::SeqCst);
+            TASKBAR_CREATED.store(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()), Ordering::SeqCst);
+            // At login Explorer may not have a taskbar yet: keep the window and retry.
+            if !add_icon(window) {
+                SetTimer(window, RETRY_TIMER, 2000, None);
             }
             let _ = ready.send(Some(window as isize));
             let mut msg: MSG = std::mem::zeroed();
@@ -296,8 +309,8 @@ mod platform {
         data
     }
 
-    /// The app icon rasterized to the small-icon size.
-    unsafe fn app_icon() -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
+    /// The app icon rasterized to the small-icon size; the caller owns the handle.
+    unsafe fn app_icon() -> HICON {
         const SIZE: u32 = 32;
         let Some(rgba) = crate::tray_icon::rgba(SIZE) else {
             return std::ptr::null_mut();
@@ -307,6 +320,16 @@ mod platform {
         let mask = vec![0u8; (SIZE * SIZE / 8) as usize];
         // SAFETY: both buffers hold the SIZE x SIZE pixels the call reads.
         unsafe { CreateIcon(std::ptr::null_mut(), SIZE as i32, SIZE as i32, 1, 32, mask.as_ptr(), bgra.as_ptr()) }
+    }
+
+    /// Adds the icon to the taskbar; false when the shell is not ready.
+    unsafe fn add_icon(window: HWND) -> bool {
+        // SAFETY: plain Shell call with data built here.
+        unsafe {
+            let mut data = icon_data(window);
+            data.hIcon = ICON.load(Ordering::SeqCst) as HICON;
+            Shell_NotifyIconW(NIM_ADD, &data) != 0
+        }
     }
 
     unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -332,12 +355,33 @@ mod platform {
                 0
             }
             WM_CLOSE => {
-                // SAFETY: removes this window's own icon, then the window (which ends the loop).
+                // SAFETY: removes this window's own icon, timer and icon handle, then the window
+                // (which ends the loop).
                 unsafe {
                     let data = icon_data(window);
                     Shell_NotifyIconW(NIM_DELETE, &data);
+                    KillTimer(window, RETRY_TIMER);
+                    let icon = ICON.swap(0, Ordering::SeqCst);
+                    if icon != 0 {
+                        DestroyIcon(icon as HICON);
+                    }
                     DestroyWindow(window);
                 }
+                0
+            }
+            WM_TIMER if wparam == RETRY_TIMER => {
+                // SAFETY: re-adds the icon from this window's own thread; stops retrying on success.
+                unsafe {
+                    if add_icon(window) {
+                        KillTimer(window, RETRY_TIMER);
+                    }
+                }
+                0
+            }
+            m if m != 0 && m == TASKBAR_CREATED.load(Ordering::SeqCst) => {
+                // Explorer restarted (or finished starting): its taskbar lost our icon.
+                // SAFETY: as above.
+                unsafe { add_icon(window) };
                 0
             }
             WM_DESTROY => {
@@ -367,7 +411,7 @@ mod platform {
             if !state.tasks.is_empty() {
                 AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
                 for task in &state.tasks {
-                    add(MF_STRING | MF_GRAYED, 0, &task_text(task));
+                    add(MF_STRING | MF_GRAYED, 0, &task_text(task).replace('&', "&&"));
                 }
             }
             AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
@@ -386,6 +430,8 @@ mod platform {
                 std::ptr::null(),
             );
             DestroyMenu(menu);
+            // Documented pattern: lets the menu close reliably after a pick.
+            PostMessageW(window, WM_NULL, 0, 0);
             let action = match chosen as usize {
                 ID_OPEN => TrayAction::Open,
                 ID_SYNC => TrayAction::SyncNow,
@@ -461,7 +507,7 @@ mod platform {
             let target: Retained<Target> = unsafe { msg_send![super(target), init] };
             let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
             if let Some(button) = item.button(mtm) {
-                if let Some(png) = crate::tray_icon::png(22) {
+                if let Some(png) = crate::tray_icon::png(44) {
                     let data = NSData::with_bytes(&png);
                     if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
                         image.setSize(objc2_foundation::NSSize::new(18.0, 18.0));

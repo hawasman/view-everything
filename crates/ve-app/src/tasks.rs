@@ -207,6 +207,17 @@ impl TaskHandle {
         self.tasks.notify();
     }
 
+    /// Replaces the Task's label, e.g. when it moves to a phase with no countable progress.
+    pub fn set_label(&self, label: String) {
+        {
+            let mut g = self.tasks.0.lock().unwrap();
+            if let Some(e) = g.running.iter_mut().find(|e| e.info.id == self.id) {
+                e.info.label = label;
+            }
+        }
+        self.tasks.notify();
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
@@ -252,7 +263,12 @@ impl TaskHandle {
 
 impl Drop for TaskHandle {
     fn drop(&mut self) {
-        self.finish_inner(Outcome::Failed("stopped".into()));
+        let outcome = if self.is_cancelled() {
+            Outcome::Cancelled
+        } else {
+            Outcome::Failed("stopped".into())
+        };
+        self.finish_inner(outcome);
     }
 }
 
@@ -396,4 +412,26 @@ pub fn list_panel<T: 'static>(tasks: &Tasks, cx: &mut Context<T>) -> Stateful<Di
         .occlude()
         .child(div().font_weight(FontWeight::SEMIBOLD).child("Tasks"))
         .child(v_flex().id("tasks-scroll").flex_1().min_h_0().overflow_y_scroll().child(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn a_dropped_cancelled_task_is_cancelled_not_failed() {
+        let tasks = Tasks::new();
+        let handle = tasks.begin(TaskKind::Sync, "x".into(), true);
+        handle.cancel_flag().store(true, Ordering::Relaxed);
+        drop(handle);
+        assert_eq!(tasks.finished()[0].outcome, Some(Outcome::Cancelled));
+        assert!(tasks.finished()[0].retry.is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_dropped_task_that_was_not_cancelled_failed() {
+        let tasks = Tasks::new();
+        drop(tasks.begin(TaskKind::Sync, "x".into(), true));
+        assert_eq!(tasks.finished()[0].outcome, Some(Outcome::Failed("stopped".into())));
+    }
 }

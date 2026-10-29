@@ -21,6 +21,9 @@ use ve_core::paths::load_categories;
 use ve_core::{AzureRemote, CategoryMap, FtpRemote, FtpTls, Query, QueryContext, Remote, S3Remote, WebdavRemote};
 use ve_scan::VolumeInfo;
 
+/// How long typing in the Duplicate Exclusions pauses before they are saved.
+const EXCLUSIONS_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// The protocol tabs of the Add Remote dialog.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RemoteTab {
@@ -385,6 +388,12 @@ pub struct SettingsPage {
     /// The Duplicate Exclusions field, and why its text is not a usable Query.
     exclusions: Entity<InputState>,
     exclusions_error: Option<String>,
+    /// The pending save of typed exclusions; dropping it cancels the save.
+    exclusions_pending: Option<gpui::Task<()>>,
+    /// The category names a Query may use, read once.
+    categories: CategoryMap,
+    /// A start-at-login change is in flight.
+    login_busy: bool,
     /// Set when the settings file could not be written.
     problem: Option<String>,
     /// Fields of the Remote dialog.
@@ -475,10 +484,14 @@ impl SettingsPage {
         cx.subscribe(&exclusions, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 let text = input.read(cx).value().to_string();
-                this.set_exclusions(text, cx);
+                this.exclusions_pending = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(EXCLUSIONS_DEBOUNCE).await;
+                    let _ = this.update(cx, |this, cx| this.set_exclusions(text, cx));
+                }));
             }
         })
         .detach();
+        let categories = load_categories().unwrap_or_else(|_| CategoryMap::builtin());
         Self {
             settings,
             offline: Vec::new(),
@@ -489,6 +502,9 @@ impl SettingsPage {
             build_days,
             exclusions,
             exclusions_error: None,
+            exclusions_pending: None,
+            categories,
+            login_busy: false,
             problem: None,
             remote_host,
             remote_path,
@@ -728,6 +744,10 @@ impl SettingsPage {
         v_flex()
             .gap(px(8.))
             .child(div().font_weight(FontWeight::MEDIUM).child("Duplicate Exclusions"))
+            .child(caption(
+                "A Query for files a Duplicate search leaves out. A folder name such as \"target\" or \"vendor\" matches at any depth, anywhere in your files.",
+                cx,
+            ))
             .child(Input::new(&self.exclusions))
             .when_some(error, |d, e| d.child(div().text_xs().text_color(palette(cx).negative).child(e)))
             .child(
@@ -753,7 +773,8 @@ impl SettingsPage {
     /// Keeps the typed Duplicate Exclusions when they parse as a Query; otherwise shows why not
     /// and keeps the saved text, which the Engine goes on using.
     fn set_exclusions(&mut self, text: String, cx: &mut Context<Self>) {
-        let context = QueryContext::new(load_categories().unwrap_or_else(|_| CategoryMap::builtin()), Local::now());
+        self.exclusions_pending = None;
+        let context = QueryContext::new(self.categories.clone(), Local::now());
         match Query::parse(&text, &context) {
             Ok(_) => {
                 self.exclusions_error = None;
@@ -885,7 +906,18 @@ impl SettingsPage {
                             .child(
                                 div()
                                     .id(("refresh-remote", ix))
-                                    .when(self.syncing.contains(&identity), |d| d.text_color(p.muted).child("Syncing…"))
+                                    .when(self.syncing.contains(&identity), |d| {
+                                        d.flex()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .text_color(p.muted)
+                                            .child(
+                                                gpui_kit::component::spinner::Spinner::new()
+                                                    .with_size(gpui_kit::component::Size::XSmall)
+                                                    .color(p.muted),
+                                            )
+                                            .child("Syncing…")
+                                    })
                                     .when(!self.syncing.contains(&identity), |d| {
                                         d.cursor_pointer()
                                             .text_color(p.accent)
@@ -997,10 +1029,21 @@ impl SettingsPage {
                 let busy = self.syncing.contains(&identity);
                 div()
                     .id(("sync-volume", ix))
-                    .w(px(64.))
+                    .w(px(84.))
                     .flex_none()
                     .text_xs()
-                    .when(busy, |d| d.text_color(muted).child("Syncing…"))
+                    .when(busy, |d| {
+                        d.flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .text_color(muted)
+                            .child(
+                                gpui_kit::component::spinner::Spinner::new()
+                                    .with_size(gpui_kit::component::Size::XSmall)
+                                    .color(muted),
+                            )
+                            .child("Syncing…")
+                    })
                     .when(!busy, |d| {
                         d.cursor_pointer()
                             .text_color(p.accent)
@@ -1094,6 +1137,7 @@ impl SettingsPage {
             .child(
                 Switch::new("start-at-login")
                     .checked(self.settings.start_at_login)
+                    .disabled(self.login_busy)
                     .on_click(cx.listener(|this, on: &bool, _, cx| this.set_start_at_login(*on, cx))),
             )
             .child("Start at login");
@@ -1103,19 +1147,25 @@ impl SettingsPage {
     /// Saves the setting, then makes (or removes) the login entry off the UI thread: on Windows
     /// that waits for the elevation prompt. A failure puts the switch back and says why.
     fn set_start_at_login(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.login_busy {
+            return;
+        }
+        let before = self.settings.start_at_login;
+        self.login_busy = true;
         self.settings.start_at_login = on;
         self.commit(cx);
         cx.spawn(async move |this, cx| {
             let done = cx.background_executor().spawn(async move { crate::autostart::set(on) }).await;
-            if let Err(why) = done {
-                this.update(cx, |this, cx| {
-                    this.settings.start_at_login = !on;
+            this.update(cx, |this, cx| {
+                this.login_busy = false;
+                if let Err(why) = done {
+                    this.settings.start_at_login = before;
                     this.commit(cx);
                     this.problem = Some(why);
-                    cx.notify();
-                })
-                .ok();
-            }
+                }
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }

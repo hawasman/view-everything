@@ -86,7 +86,7 @@ fn read_changes(handle: &File, journal: &Journal, start: i64, progress: &Progres
     let mut buf = vec![0u8; JOURNAL_BUFFER];
     while next < journal.next_usn {
         if progress.cancelled() {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            return Err(crate::cancelled_error());
         }
         let mut input = [0u8; 40];
         input[0..8].copy_from_slice(&next.to_le_bytes());

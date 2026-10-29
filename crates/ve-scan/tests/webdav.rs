@@ -174,6 +174,19 @@ fn names(index: &Index, dir: EntryId) -> Vec<String> {
 }
 
 #[test]
+fn a_cancelled_webdav_walk_is_interrupted_and_indexes_nothing() {
+    let server = start();
+    let index = SharedIndex::new(Index::new());
+    let id = index.write().add_remote(&Remote::Webdav(remote(&server, "")));
+    let progress = Progress::default();
+    progress.cancel.store(true, Ordering::Relaxed);
+    let err = webdav::sync_with(&index, id, &progress, &|_| Ok(String::new())).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    let index = index.read();
+    assert!(names(&index, index.volume(id).unwrap().root).is_empty());
+}
+
+#[test]
 fn folders_are_walked_with_depth_one_and_a_refresh_applies_differences() {
     let server = start();
     *server.state.require.lock().unwrap() = Some(basic("me", "pw"));

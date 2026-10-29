@@ -27,12 +27,13 @@ BASE=${XDG_RUNTIME_DIR:-/tmp}/ve-ui-sandbox
 
 die() { echo "ui-sandbox: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null || die "missing $1"; }
-dir_of() { local d=$BASE/${1:?NAME required}; [[ -f $d/display ]] || die "no running sandbox '$1' (scripts/ui-sandbox.sh start $1)"; echo "$d"; }
+valid_name() { [[ ${1:-} =~ ^[A-Za-z0-9_-]+$ ]] || die "NAME may hold only letters, digits, - and _"; }
+dir_of() { valid_name "${1:-}"; local d=$BASE/$1; [[ -f $d/display ]] || die "no running sandbox '$1' (scripts/ui-sandbox.sh start $1)"; echo "$d"; }
 xdo() { local d; d=$(dir_of "$1"); shift; DISPLAY=$(<"$d/display") xdotool "$@"; }
 
 start() {
     local name=${1:-default} geom=${2:-1600x1000}
-    [[ $name =~ ^[A-Za-z0-9_-]+$ ]] || die "NAME may hold only letters, digits, - and _"
+    valid_name "$name"
     [[ $geom =~ ^([0-9]+)x([0-9]+)$ ]] || die "size must look like 1600x1000"
     local w=${BASH_REMATCH[1]} h=${BASH_REMATCH[2]}
     for t in kwin_wayland dbus-run-session xdotool spectacle setsid systemd-run systemctl choom; do need "$t"; done
@@ -45,17 +46,19 @@ start() {
 
     local d=$BASE/$name
     if [[ -f $d/pid ]] && kill -0 "$(<"$d/pid")" 2>/dev/null; then die "sandbox '$name' is already running"; fi
-    rm -rf "$d"
+    # A leftover scope from a crashed run would keep running; stop it before wiping the folder.
+    systemctl --user stop "ve-ui-sandbox-$name.scope" 2>/dev/null || true
+    rm -rf "${d:?}"
     mkdir -p "$d"/xdg/{config,data,cache,state}
     chmod 700 "$BASE" "$d"
     # Without this, XTEST input from xdotool waits on a permission dialog inside the sandbox.
     printf '[Xwayland]\nXwaylandEisNoPromptApps=xdotool\n' >"$d/xdg/config/kwinrc"
     cat >"$d/app.sh" <<EOF
 #!/bin/sh
-echo "\$DBUS_SESSION_BUS_ADDRESS" > '$d/bus'
-echo "\$DISPLAY" > '$d/display.tmp' && mv '$d/display.tmp' '$d/display'
+echo "\$DBUS_SESSION_BUS_ADDRESS" > $(printf %q "$d/bus")
+echo "\$DISPLAY" > $(printf %q "$d/display.tmp") && mv $(printf %q "$d/display.tmp") $(printf %q "$d/display")
 unset WAYLAND_DISPLAY
-exec '$bin' > '$d/app.log' 2>&1
+exec $(printf %q "$bin") > $(printf %q "$d/app.log") 2>&1
 EOF
     chmod +x "$d/app.sh"
     echo "wayland-ve-$name" >"$d/socket"
@@ -87,13 +90,14 @@ EOF
 }
 
 stop() {
-    local d=$BASE/${1:?NAME required}
-    [[ -d $d ]] || die "no sandbox '$1'"
+    local name=${1:-}; valid_name "$name"
+    local d=$BASE/$name
+    [[ -d $d ]] || die "no sandbox '$name'"
     # The scope holds everything the sandbox started: KWin, Xwayland, the app, the bus and any
     # services the bus activated. Stopping it sends SIGTERM, then SIGKILL after 5 s.
-    systemctl --user stop "ve-ui-sandbox-$1.scope" 2>/dev/null || true
-    rm -rf "$d"
-    echo "sandbox '$1' stopped"
+    systemctl --user stop "ve-ui-sandbox-$name.scope" 2>/dev/null || true
+    rm -rf "${d:?}"
+    echo "sandbox '$name' stopped"
 }
 
 shot() {

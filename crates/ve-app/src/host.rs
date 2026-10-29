@@ -38,6 +38,8 @@ pub struct Host {
     /// Live updates were not started because this is a login start (Linux: the helper asks
     /// for a password).
     live_paused: bool,
+    /// `quit` has run: its window removal re-enters it through the window-closed hook.
+    quitting: bool,
     /// Settings problems found at startup, shown by the first window.
     problems: Vec<String>,
 }
@@ -98,6 +100,7 @@ impl Host {
             tray,
             keep_in_tray: settings.keep_in_tray,
             live_paused: paused,
+            quitting: false,
             problems,
         });
 
@@ -152,10 +155,10 @@ impl Host {
         match (login, has_tray) {
             // A login start waits in the tray until the user opens the window.
             (true, true) => {}
+            // No tray to wait in: the window opens normally but the app is not brought to the
+            // front. It is never minimized, as nothing could be sure to restore it.
             (true, false) => {
-                if let Some(window) = Self::open_window(cx) {
-                    let _ = window.update(cx, |_, window, _| window.minimize_window());
-                }
+                Self::open_window(cx);
             }
             (false, _) => {
                 Self::open_window(cx);
@@ -167,6 +170,9 @@ impl Host {
     /// Quits with the window and tray icon gone first: saving the Index can take seconds, and
     /// an app that looks frozen meanwhile is worse than one that has already vanished.
     pub fn quit(cx: &mut App) {
+        if std::mem::replace(&mut cx.global_mut::<Host>().quitting, true) {
+            return;
+        }
         for window in cx.windows() {
             let _ = window.update(cx, |_, window, _| window.remove_window());
         }
@@ -201,8 +207,10 @@ impl Host {
     /// The user turned Live updates off (or on) in Settings: nothing is paused any more, and
     /// the setting decides.
     pub fn live_setting_changed(&mut self, on: bool) {
-        if !on {
-            self.live_paused = false;
+        // A paused login start is over either way. Turning Live updates on then starts them
+        // (the window skipped the helper call while paused); off leaves nothing to stop.
+        if std::mem::replace(&mut self.live_paused, false) && on {
+            self.engine.set_live_helper(true);
         }
     }
 

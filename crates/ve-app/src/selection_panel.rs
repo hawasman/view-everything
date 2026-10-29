@@ -10,7 +10,7 @@ use gpui_kit::component::{WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::sync::Arc;
-use ve_core::{EntryId, Index};
+use ve_core::EntryId;
 
 /// What a button in the panel asks of the window.
 pub enum SelectionEvent {
@@ -40,11 +40,13 @@ pub struct SelectionPanel {
     pending: Option<(EntryId, u64)>,
 }
 
-/// Folders shown under `dir` by `view`, at any depth.
-fn count_folders(index: &Index, view: &View, dir: EntryId) -> u64 {
+/// Folders shown under `dir` by `view`, at any depth. The Index is locked per folder, not for
+/// the whole walk, so a writer never waits behind a large count.
+fn count_folders(index: &ve_scan::SharedIndex, view: &View, dir: EntryId) -> u64 {
     let mut stack = vec![dir];
     let mut folders = 0;
     while let Some(id) = stack.pop() {
+        let index = index.read();
         for &child in index.children(id) {
             if index.is_dir(child) && view.filter.is_shown(child) {
                 folders += 1;
@@ -89,7 +91,7 @@ impl SelectionPanel {
         cx.spawn(async move |this, cx| {
             let folders = cx
                 .background_executor()
-                .spawn(async move { count_folders(&shared.index.read(), &view, id) })
+                .spawn(async move { count_folders(&shared.index, &view, id) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.pending == Some(key) {
@@ -241,16 +243,16 @@ impl Render for SelectionPanel {
                     .build(cx, cx.listener(|this, _, _, cx| this.scope_selected(cx))),
             )
             .child(
-                pill("selection-trash", "Trash")
+                pill("selection-trash", "Trash this")
                     .small()
                     .build(cx, cx.listener(move |_, _, _, cx| cx.emit(SelectionEvent::Trash(id)))),
             )
             .child({
-                let target = crate::engine::sync_target(&index, id);
+                let target = crate::engine::folder_of(&index, id);
                 let why = (!crate::engine::can_sync_folder(&index, target)).then_some(crate::engine::WHOLE_ONLY);
                 pill("selection-sync", "Sync this folder")
                     .small()
-                    .busy(crate::engine::folder_syncing(target))
+                    .busy(shared.folder_syncing(target))
                     .disabled(why)
                     .build(cx, cx.listener(move |_, _, _, cx| cx.emit(SelectionEvent::Sync(target))))
             });

@@ -380,7 +380,7 @@ fn walk(
     let (mut unreadable, mut stack) = (0, vec![(String::new(), root.to_owned())]);
     while let Some((rel, abs)) = stack.pop() {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            return Err(crate::cancelled_error());
         }
         let lines = match ftp.cwd(abs.as_str()).and_then(|_| list_folder(ftp, &mut mlsd, now)) {
             Ok(lines) => lines,

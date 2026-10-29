@@ -247,7 +247,7 @@ pub fn walk(
     let mut pending: HashMap<u32, Pending> = HashMap::new();
     while !queue.is_empty() || !pending.is_empty() {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            return Err(crate::cancelled_error());
         }
         while pending.len() < WINDOW {
             let Some((path, rel)) = queue.pop_front() else { break };
