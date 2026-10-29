@@ -535,7 +535,7 @@ pub fn snapshots_dir() -> Option<PathBuf> {
 /// After the first Index save of a day, stores that day's Snapshot on a thread of its own, so
 /// neither the save nor the GUI waits for it, then drops the Snapshots retention no longer keeps.
 fn snapshot_first_save_of_day(shared: &Arc<Shared>, index_path: &Path) {
-    let dir = index_path.with_file_name("snapshots");
+    let dir = index_path.with_file_name("snapshots"); // same folder as `snapshots_dir`
     let today = Local::now().date_naive();
     let file = snapshot::path_for(&dir, today);
     if file.exists() || shared.snapshotting.swap(true, Ordering::AcqRel) {

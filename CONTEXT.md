@@ -46,6 +46,9 @@ _Avoid_: rescan, resync, refresh
 The Folder Size of every folder in the Index at one moment, kept so two moments can be compared.
 _Avoid_: scan history, backup, version
 
+**Compare with**:
+The Explorer choice of a Snapshot date. The tree then gains a **Change** column: each folder's On-disk Size now minus its Size in the Snapshot, `new` for a folder the Snapshot lacked, and a muted `(removed)` row under the parent of a folder it had that is gone.
+
 ### Size
 
 **Logical Size**:
