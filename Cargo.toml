@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ve-core", "crates/ve-scan", "crates/ve-app"]
+members = ["crates/ve-core", "crates/ve-scan", "crates/ve-app", "crates/ve-cli"]
 
 [workspace.package]
 version = "0.1.0"

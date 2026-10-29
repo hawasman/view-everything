@@ -7423,11 +7423,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ve-cli"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde_json",
+ "tempfile",
+ "ve-core",
+]
+
+[[package]]
 name = "ve-core"
 version = "0.1.0"
 dependencies = [
  "bincode",
  "chrono",
+ "dirs 7.0.0",
  "rayon",
  "regex",
  "serde",
