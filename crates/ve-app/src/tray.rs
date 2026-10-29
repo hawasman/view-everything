@@ -404,7 +404,7 @@ mod platform {
     use async_channel::Sender;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject};
-    use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+    use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength};
     use objc2_foundation::{NSData, NSString};
     use std::cell::RefCell;
