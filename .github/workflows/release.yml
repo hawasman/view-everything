@@ -128,7 +128,7 @@ jobs:
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
-          test -n "$MINISIGN_SECRET_KEY" || { echo "::error::Secret MINISIGN_SECRET_KEY is not set (see README)"; exit 1; }
+          test -n "$MINISIGN_SECRET_KEY" || { echo "::error::Secret MINISIGN_SECRET_KEY is not set (see docs/releasing.md)"; exit 1; }
           test -f dist/view-everything-x86_64.AppImage.zsync || { echo "::error::No .zsync file was built"; exit 1; }
           sudo apt-get update && sudo apt-get install -y minisign
           key="$(mktemp)"
