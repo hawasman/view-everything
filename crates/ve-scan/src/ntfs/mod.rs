@@ -26,6 +26,7 @@ impl From<&Record> for EntryMeta {
             logical: record.logical,
             on_disk: record.on_disk,
             modified: record.modified,
+            created: record.created,
             key: record.number,
             hardlinked: record.names.len() > 1,
         }

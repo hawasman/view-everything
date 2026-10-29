@@ -34,13 +34,19 @@ struct Page {
 }
 
 fn parse_page(body: &str, prefix: &str) -> Result<Page, String> {
-    let (mut page, mut key, mut size, mut modified, mut in_blob) = (Page::default(), String::new(), 0, 0, false);
+    let (mut page, mut key, mut size, mut modified, mut created, mut in_blob) = (Page::default(), String::new(), 0, 0, 0, false);
     xml::walk(body, |event| match event {
-        Ev::Start("Blob") => (in_blob, key, size, modified) = (true, String::new(), 0, 0),
+        Ev::Start("Blob") => (in_blob, key, size, modified, created) = (true, String::new(), 0, 0, 0),
         Ev::End("Name", t) if in_blob => key = t.into(),
         Ev::End("Content-Length", t) if in_blob => size = t.parse().unwrap_or(0),
         Ev::End("Last-Modified", t) if in_blob => {
             modified = chrono::DateTime::parse_from_rfc2822(t)
+                .ok()
+                .and_then(|t| t.timestamp_nanos_opt())
+                .unwrap_or(0)
+        }
+        Ev::End("Creation-Time", t) if in_blob => {
+            created = chrono::DateTime::parse_from_rfc2822(t)
                 .ok()
                 .and_then(|t| t.timestamp_nanos_opt())
                 .unwrap_or(0)
@@ -52,6 +58,7 @@ fn parse_page(body: &str, prefix: &str) -> Result<Page, String> {
                     key: key.into(),
                     size,
                     modified,
+                    created,
                 });
             }
         }
@@ -235,7 +242,7 @@ mod tests {
     fn a_listing_is_read_with_its_prefix_stripped_and_its_marker() {
         let page = parse_page(
             r#"<?xml version="1.0"?><EnumerationResults ServiceEndpoint="x" ContainerName="c"><Prefix>p/</Prefix><Blobs>
-<Blob><Name>p/a &amp; b.txt</Name><Properties><Last-Modified>Sun, 06 Nov 1994 08:49:37 GMT</Last-Modified><Content-Length>12</Content-Length></Properties></Blob>
+<Blob><Name>p/a &amp; b.txt</Name><Properties><Creation-Time>Sat, 05 Nov 1994 08:49:37 GMT</Creation-Time><Last-Modified>Sun, 06 Nov 1994 08:49:37 GMT</Last-Modified><Content-Length>12</Content-Length></Properties></Blob>
 <Blob><Name>other</Name><Properties><Content-Length>1</Content-Length></Properties></Blob>
 </Blobs><NextMarker>m1</NextMarker></EnumerationResults>"#,
             "p/",
@@ -247,7 +254,8 @@ mod tests {
                 objects: vec![Object {
                     key: "a & b.txt".into(),
                     size: 12,
-                    modified: 784_111_777_000_000_000
+                    modified: 784_111_777_000_000_000,
+                    created: 784_025_377_000_000_000,
                 }],
                 next: Some("m1".into()),
             }

@@ -172,17 +172,19 @@ fn apply(index: &mut Index, dir: EntryId, listing: Vec<Listed>) -> Vec<(EntryId,
 /// `path` is only built where the platform needs it (Windows On-disk Size).
 fn entry_meta(metadata: &Metadata, path: impl FnOnce() -> PathBuf) -> EntryMeta {
     let is_dir = metadata.is_dir();
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|t| match t.duration_since(UNIX_EPOCH) {
-            Ok(after) => i64::try_from(after.as_nanos()).ok(),
-            Err(before) => i64::try_from(before.duration().as_nanos()).ok().map(|n| -n),
-        })
-        .unwrap_or(0);
+    let nanos = |t: std::io::Result<std::time::SystemTime>| {
+        t.ok()
+            .and_then(|t| match t.duration_since(UNIX_EPOCH) {
+                Ok(after) => i64::try_from(after.as_nanos()).ok(),
+                Err(before) => i64::try_from(before.duration().as_nanos()).ok().map(|n| -n),
+            })
+            .unwrap_or(0)
+    };
     let mut meta = EntryMeta {
         is_dir,
-        modified,
+        modified: nanos(metadata.modified()),
+        // Err where the filesystem does not report a birth time: stays 0, unknown.
+        created: nanos(metadata.created()),
         ..EntryMeta::default()
     };
     if !is_dir {

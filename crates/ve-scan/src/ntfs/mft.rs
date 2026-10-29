@@ -244,6 +244,8 @@ pub struct Parsed {
     pub names: Vec<(u64, String)>,
     /// Modification time, ns since the Unix epoch.
     pub modified: Option<i64>,
+    /// Creation time, ns since the Unix epoch.
+    pub created: Option<i64>,
     /// Unnamed `$DATA` (logical, on-disk) from the segment that carries sizes.
     pub data: Option<(u64, u64)>,
     pub attr_list: Option<AttrList>,
@@ -254,6 +256,7 @@ impl Parsed {
     fn merge(&mut self, other: Parsed) {
         self.names.extend(other.names);
         self.modified = self.modified.or(other.modified);
+        self.created = self.created.or(other.created);
         self.data = self.data.or(other.data);
         self.segments.extend(other.segments);
     }
@@ -269,6 +272,7 @@ impl Parsed {
             is_dir: self.is_dir,
             names: self.names.into_iter().map(|(parent, name)| FileName { parent, name }).collect(),
             modified: self.modified.unwrap_or(0),
+            created: self.created.unwrap_or(0),
             logical,
             on_disk,
         })
@@ -290,6 +294,8 @@ pub struct Record {
     pub names: Vec<FileName>,
     /// ns since the Unix epoch.
     pub modified: i64,
+    /// ns since the Unix epoch.
+    pub created: i64,
     pub logical: u64,
     pub on_disk: u64,
 }
@@ -357,6 +363,7 @@ pub fn parse_record(number: u64, buf: &mut [u8], strict: bool, keep_runs: bool) 
             };
             match kind {
                 ATTR_STANDARD_INFORMATION if value.len() >= 16 => {
+                    parsed.created = Some(filetime_to_unix_ns(u64_at(value, 0)));
                     parsed.modified = Some(filetime_to_unix_ns(u64_at(value, 8)));
                 }
                 ATTR_FILE_NAME if value.len() >= 0x42 => {

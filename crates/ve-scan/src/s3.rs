@@ -190,6 +190,8 @@ pub struct Object {
     pub size: u64,
     /// Nanoseconds since the Unix epoch.
     pub modified: i64,
+    /// Nanoseconds since the Unix epoch; 0 where the API reports none (S3 does not).
+    pub created: i64,
 }
 
 fn bucket(remote: &S3Remote) -> Result<Bucket, io::Error> {
@@ -336,6 +338,7 @@ pub fn list(remote: &S3Remote, credentials: Option<&Credentials>, mut page: impl
                     key,
                     size: c.size.unwrap_or(0),
                     modified: modified.and_then(|t| t.timestamp_nanos_opt()).unwrap_or(0),
+                    created: 0,
                 })
             })
             .collect();
@@ -424,6 +427,7 @@ pub(crate) fn entries(objects: Vec<Object>, seen: &mut HashMap<String, bool>) ->
                 logical: object.size,
                 on_disk: object.size,
                 modified: object.modified,
+                created: object.created,
                 ..EntryMeta::default()
             };
             out.push((folders.to_owned(), meta));
@@ -498,6 +502,7 @@ mod tests {
             key: key.into(),
             size,
             modified: 5,
+            created: 0,
         };
         let mut seen = HashMap::new();
         let (items, skipped) = entries(

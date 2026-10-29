@@ -33,6 +33,7 @@ containing `/` or `\` matches the full path. Text ignores case unless told other
 | `type:video` | files of a Category |
 | `size:>1gb`, `size:1mb..5mb` | files by Logical Size |
 | `dm:2025-01`, `dm:>=yesterday` | files by modification date |
+| `dc:2025-01`, `dc:<2020` | files by creation date, written like `dm:`. Never matches a file whose creation time is unknown: S3 and FTP Remotes, SFTP, filesystems without a birth time |
 | `regex:^IMG_\d+` | names matching a regular expression |
 | `case:Report` | the term, matching letters in exactly that case |
 | `wholeword:cat` | the term only as a whole word: `cat` in `a-cat.txt`, not in `category`. Only letters and digits join a word, so `_`, `-`, `.` and spaces separate words. With wildcards (`wholeword:re*t`) the pattern must cover a whole run of words |

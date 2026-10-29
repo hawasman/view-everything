@@ -15,7 +15,7 @@ use ve_core::{EntryId, EntryMeta, SyncState, VolumeId, WebdavRemote};
 /// Entries applied to the Index per write lock.
 const BATCH: usize = 4096;
 
-const PROPFIND: &str = r#"<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype/><getcontentlength/><getlastmodified/></prop></propfind>"#;
+const PROPFIND: &str = r#"<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype/><getcontentlength/><getlastmodified/><creationdate/></prop></propfind>"#;
 
 /// One `response` of a multistatus: a resource the server lists.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -25,6 +25,8 @@ struct Item {
     size: u64,
     /// Nanoseconds since the Unix epoch.
     modified: i64,
+    /// Nanoseconds since the Unix epoch; 0 when the server sends no `creationdate`.
+    created: i64,
 }
 
 fn parse_multistatus(body: &str) -> Result<Vec<Item>, String> {
@@ -36,6 +38,12 @@ fn parse_multistatus(body: &str) -> Result<Vec<Item>, String> {
         (Ev::End("getcontentlength", t), Some(item)) => item.size = t.parse().unwrap_or(0),
         (Ev::End("getlastmodified", t), Some(item)) => {
             item.modified = chrono::DateTime::parse_from_rfc2822(t)
+                .ok()
+                .and_then(|t| t.timestamp_nanos_opt())
+                .unwrap_or(0)
+        }
+        (Ev::End("creationdate", t), Some(item)) => {
+            item.created = chrono::DateTime::parse_from_rfc3339(t)
                 .ok()
                 .and_then(|t| t.timestamp_nanos_opt())
                 .unwrap_or(0)
@@ -180,6 +188,7 @@ fn walk(agent: &ureq::Agent, remote: &WebdavRemote, password: &str, mut emit: im
                 logical: if is_dir { 0 } else { item.size },
                 on_disk: if is_dir { 0 } else { item.size },
                 modified: item.modified,
+                created: item.created,
                 ..EntryMeta::default()
             };
             if is_dir {
@@ -258,15 +267,21 @@ mod tests {
             r#"<?xml version="1.0"?>
 <d:multistatus xmlns:d="DAV:">
  <d:response><d:href>/dav/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
- <d:response><d:href>/dav/a%20&amp;b.txt</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>12</d:getcontentlength><d:getlastmodified>Sun, 06 Nov 1994 08:49:37 GMT</d:getlastmodified></d:prop></d:propstat></d:response>
+ <d:response><d:href>/dav/a%20&amp;b.txt</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>12</d:getcontentlength><d:getlastmodified>Sun, 06 Nov 1994 08:49:37 GMT</d:getlastmodified><d:creationdate>1994-11-05T08:49:37Z</d:creationdate></d:prop></d:propstat></d:response>
 </d:multistatus>"#,
         )
         .unwrap();
         assert_eq!(items.len(), 2);
         assert!(items[0].is_dir && items[0].size == 0);
         assert_eq!(
-            (items[1].href.as_str(), items[1].is_dir, items[1].size, items[1].modified),
-            ("/dav/a%20&b.txt", false, 12, 784_111_777_000_000_000)
+            (
+                items[1].href.as_str(),
+                items[1].is_dir,
+                items[1].size,
+                items[1].modified,
+                items[1].created
+            ),
+            ("/dav/a%20&b.txt", false, 12, 784_111_777_000_000_000, 784_025_377_000_000_000)
         );
     }
 

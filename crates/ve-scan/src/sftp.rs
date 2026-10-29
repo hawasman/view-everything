@@ -63,6 +63,7 @@ impl Attrs {
             size,
             on_disk: size,
             modified: i64::from(self.mtime.unwrap_or(0)) * 1_000_000_000,
+            created: 0,
             is_dir,
             path,
         }
