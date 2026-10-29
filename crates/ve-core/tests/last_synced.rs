@@ -139,3 +139,16 @@ fn identity_survives_a_save_and_a_remount_renames_the_root() {
     assert_eq!(back.name(volume.root), "/run/media/a");
     assert!(!volume.online);
 }
+
+#[test]
+fn a_v4_file_is_refused_as_needing_a_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.bin");
+    let mut v4 = b"VEINDEX\0".to_vec();
+    v4.extend_from_slice(&4u32.to_le_bytes());
+    v4.extend_from_slice(&[0xAB; 64]);
+    std::fs::write(&path, v4).unwrap();
+    let err = Index::load(&path).err().expect("v4 must not load");
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert!(err.to_string().contains("needs rebuild"), "{err}");
+}

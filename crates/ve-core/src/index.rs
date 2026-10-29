@@ -33,6 +33,8 @@ pub struct EntryMeta {
     pub on_disk: u64,
     /// Modification time in nanoseconds since the Unix epoch.
     pub modified: i64,
+    /// Creation time in nanoseconds since the Unix epoch; 0 when the platform or Remote does not report it.
+    pub created: i64,
     /// Filesystem identity of the underlying file: the inode on Unix, the MFT record number on
     /// NTFS. Entries sharing a key on one Volume are hard links to one file.
     pub key: u64,
@@ -601,8 +603,8 @@ const NO_PARENT: u32 = u32::MAX;
 const NO_SLOT: u32 = u32::MAX;
 
 const MAGIC: &[u8; 8] = b"VEINDEX\0";
-/// v2 adds Last Synced and capacity per Volume; v3 adds the Volume's identity; v4 adds Remotes.
-const FORMAT_VERSION: u32 = 4;
+/// v2 adds Last Synced and capacity per Volume; v3 adds the Volume's identity; v4 adds Remotes; v5 adds creation time.
+const FORMAT_VERSION: u32 = 5;
 
 /// The persistent record of every Entry on every Indexed Volume.
 ///
@@ -617,6 +619,7 @@ pub struct Index {
     logical: Vec<u64>,
     on_disk: Vec<u64>,
     modified: Vec<i64>,
+    created: Vec<i64>,
     key: Vec<u64>,
     /// Folder slot per Entry, or `NO_SLOT` for files.
     slot: Vec<u32>,
@@ -791,6 +794,7 @@ impl Index {
         self.logical.push(meta.logical);
         self.on_disk.push(meta.on_disk);
         self.modified.push(meta.modified);
+        self.created.push(meta.created);
         self.key.push(meta.key);
         if meta.is_dir {
             self.slot.push(self.children.len() as u32);
@@ -820,6 +824,7 @@ impl Index {
             && self.logical[i] == meta.logical
             && self.on_disk[i] == meta.on_disk
             && self.modified[i] == meta.modified
+            && self.created[i] == meta.created
             && self.key[i] == meta.key
         {
             return;
@@ -828,6 +833,7 @@ impl Index {
         self.logical[i] = meta.logical;
         self.on_disk[i] = meta.on_disk;
         self.modified[i] = meta.modified;
+        self.created[i] = meta.created;
         self.key[i] = meta.key;
         self.touch();
     }
@@ -943,6 +949,12 @@ impl Index {
         self.modified[id.index()]
     }
 
+    /// Creation time in ns since the Unix epoch; 0 when unknown.
+    #[inline]
+    pub fn created(&self, id: EntryId) -> i64 {
+        self.created[id.index()]
+    }
+
     #[inline]
     pub fn key(&self, id: EntryId) -> u64 {
         self.key[id.index()]
@@ -954,6 +966,7 @@ impl Index {
             logical: self.logical(id),
             on_disk: self.on_disk(id),
             modified: self.modified(id),
+            created: self.created(id),
             key: self.key(id),
             hardlinked: self.is_hardlinked(id),
         }

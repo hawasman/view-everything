@@ -60,6 +60,7 @@ fn captured_find_output_is_indexed_with_hard_links_counted_once() {
     assert_eq!(names(&index, docs), ["big.bin", "sub", "tab\tname"]);
     let a = index.child_named(root, "a.txt").unwrap();
     assert_eq!((index.logical(a), index.on_disk(a)), (5, 4096));
+    assert_eq!(index.created(a), 1_600_000_000_000_000_000);
     assert_eq!(index.modified(a), 1_704_164_645_678_901_234);
     assert_eq!(progress.entries(), 9);
     // big.bin has two names (inode 553036, 2 links): its 10000 bytes and 24 blocks count once.
@@ -265,7 +266,7 @@ fn an_incomplete_listing_does_not_prune() {
     let partial = script(
         dir.path(),
         "ssh-partial",
-        "printf '1\\t1\\t1\\t8\\t1.0\\tf\\ta.txt\\0'; echo 'find: x: Permission denied' >&2; exit 1",
+        "printf '1\\t1\\t1\\t8\\t1.0\\t0\\tf\\ta.txt\\0'; echo 'find: x: Permission denied' >&2; exit 1",
     );
     remote::sync_with(partial.to_str().unwrap(), &index, id, &Progress::default()).unwrap();
     let index = index.read();

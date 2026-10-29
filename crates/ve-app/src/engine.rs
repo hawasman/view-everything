@@ -277,6 +277,11 @@ fn run_indexer(
         match Index::load(path) {
             Ok(index) => *shared.index.write() = index,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // The format changed (a new column, say): say so rather than show a bare error.
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported && e.to_string().contains("needs rebuild") => shared.report(
+                "Index format",
+                "This version of View Everything stores more about each Entry, so the saved Index is being rebuilt. Search works as Locations finish scanning.".to_owned(),
+            ),
             Err(e) => shared.report("save", format!("The saved Index could not be used ({e}); building a new one")),
         }
     }

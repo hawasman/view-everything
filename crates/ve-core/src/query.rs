@@ -15,6 +15,8 @@ pub struct Candidate<'a> {
     pub logical: u64,
     /// Modification time in nanoseconds since the Unix epoch.
     pub modified: i64,
+    /// Creation time in nanoseconds since the Unix epoch; 0 when unknown (never matches `dc:`).
+    pub created: i64,
     /// Levels below the Location root (the root is 0); required only when [`Query::needs_depth`].
     pub depth: u32,
     /// Names of a folder's direct children; required only when [`Query::needs_children`].
@@ -96,6 +98,11 @@ enum Term {
     },
     /// Half-open bounds on modification time, in nanoseconds since the Unix epoch.
     Modified {
+        from: i64,
+        until: i64,
+    },
+    /// Half-open bounds on creation time; an unknown creation time (0) never matches.
+    Created {
         from: i64,
         until: i64,
     },
@@ -222,6 +229,7 @@ impl Term {
             Term::Type(category, map) => !candidate.is_dir && map.of_name(candidate.name) == *category,
             Term::Size { min, max } => !candidate.is_dir && (*min..=*max).contains(&candidate.logical),
             Term::Modified { from, until } => !candidate.is_dir && (*from..*until).contains(&candidate.modified),
+            Term::Created { from, until } => !candidate.is_dir && candidate.created != 0 && (*from..*until).contains(&candidate.created),
             Term::Regex(regex) => regex.is_match(candidate.name),
             Term::Parent(folder) => candidate
                 .path
@@ -286,6 +294,10 @@ impl Term {
                 let (from, until) = date_bounds(value, context.now).map_err(|e| QueryError(format!("dm: {e}")))?;
                 Ok(Term::Modified { from, until })
             }
+            "dc" => {
+                let (from, until) = date_bounds(value, context.now).map_err(|e| QueryError(format!("dc: {e}")))?;
+                Ok(Term::Created { from, until })
+            }
             "regex" => regex::RegexBuilder::new(value)
                 .case_insensitive(true)
                 .build()
@@ -330,7 +342,9 @@ impl Term {
     }
 }
 
-const MODIFIERS: &[&str] = &["ext", "type", "size", "dm", "regex", "parent", "depth", "child", "empty", "dupe"];
+const MODIFIERS: &[&str] = &[
+    "ext", "type", "size", "dm", "dc", "regex", "parent", "depth", "child", "empty", "dupe",
+];
 /// Prefixes that change how the term after them matches; they chain (`case:wholeword:Foo`).
 const FLAGS: &[&str] = &["case", "wholeword"];
 

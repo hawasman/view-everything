@@ -472,3 +472,26 @@ fn dupe_matches_files_the_context_lists_as_having_a_duplicate() {
     }));
     assert!(Query::parse("dupe:x", &context).is_err());
 }
+
+#[test]
+fn dc_matches_like_dm_and_never_an_unknown_creation_time() {
+    let created = |y, mo, d, h| {
+        let created = Local.with_ymd_and_hms(y, mo, d, h, 0, 0).unwrap().timestamp_nanos_opt().unwrap();
+        Candidate {
+            name: "doc.txt",
+            created,
+            ..Default::default()
+        }
+    };
+    assert!(matches("dc:2025", &created(2025, 6, 1, 0)));
+    assert!(!matches("dc:2025", &created(2024, 12, 31, 23)));
+    assert!(matches("dc:>2024", &created(2025, 1, 1, 0)));
+    assert!(!matches(
+        "dc:<2020",
+        &Candidate {
+            name: "doc.txt",
+            ..Default::default()
+        }
+    ));
+    assert!(!matches("dc:2025", &folder("dir")));
+}

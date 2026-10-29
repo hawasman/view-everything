@@ -17,7 +17,7 @@ use ve_core::{Capacity, EntryId, EntryMeta, Remote, SshRemote, SyncState, Volume
 /// so that a tab inside it stays inside it. Fields: inode, link count, size in bytes, 512-byte
 /// blocks, modification time in seconds since the epoch (with fraction), file type, path relative
 /// to the root (empty for the root itself).
-const FORMAT: &str = r"%i\t%n\t%s\t%b\t%T@\t%y\t%P\0";
+const FORMAT: &str = r"%i\t%n\t%s\t%b\t%T@\t%B@\t%y\t%P\0";
 
 /// Entries applied to the Index per write lock.
 const BATCH: usize = 4096;
@@ -32,6 +32,8 @@ pub struct Record {
     pub on_disk: u64,
     /// Nanoseconds since the Unix epoch.
     pub modified: i64,
+    /// Nanoseconds since the Unix epoch; 0 when the server does not report a birth time.
+    pub created: i64,
     pub is_dir: bool,
     pub path: String,
 }
@@ -39,13 +41,17 @@ pub struct Record {
 impl Record {
     /// Parses one record without its terminating NUL; `None` if it is malformed.
     pub fn parse(record: &[u8]) -> Option<Record> {
-        let mut fields = record.splitn(7, |&b| b == b'\t');
+        let mut fields = record.splitn(8, |&b| b == b'\t');
         let number = |f: &[u8]| std::str::from_utf8(f).ok()?.parse::<u64>().ok();
         let inode = number(fields.next()?)?;
         let links = number(fields.next()?)?;
         let size = number(fields.next()?)?;
         let blocks = number(fields.next()?)?;
         let modified = parse_time(std::str::from_utf8(fields.next()?).ok()?)?;
+        // GNU find prints a birth time it does not know as blank, 0 or -1.
+        let created = parse_time(std::str::from_utf8(fields.next()?).ok()?)
+            .filter(|&t| t > 0)
+            .unwrap_or(0);
         let kind = fields.next()?;
         let path = String::from_utf8_lossy(fields.next()?).into_owned();
         Some(Record {
@@ -54,6 +60,7 @@ impl Record {
             size,
             on_disk: blocks.checked_mul(512)?,
             modified,
+            created,
             is_dir: kind == b"d",
             path,
         })
@@ -67,6 +74,7 @@ impl Record {
             logical: if file { self.size } else { 0 },
             on_disk: if file { self.on_disk } else { 0 },
             modified: self.modified,
+            created: self.created,
             key: self.inode,
             // Names sharing an inode (find lists each) are one file, counted once by the Index.
             hardlinked: file && self.links > 1,
@@ -489,7 +497,7 @@ mod tests {
 
     #[test]
     fn a_record_parses_with_tabs_in_the_name_and_fractional_time() {
-        let r = Record::parse(b"1234\t2\t5120\t16\t1700000000.5000000000\tf\tdir/odd\tname").unwrap();
+        let r = Record::parse(b"1234\t2\t5120\t16\t1700000000.5000000000\t1600000000.2500000000\tf\tdir/odd\tname").unwrap();
         assert_eq!(
             r,
             Record {
@@ -498,11 +506,12 @@ mod tests {
                 size: 5120,
                 on_disk: 16 * 512,
                 modified: 1_700_000_000_500_000_000,
+                created: 1_600_000_000_250_000_000,
                 is_dir: false,
                 path: "dir/odd\tname".into(),
             }
         );
-        assert!(Record::parse(b"1\t1\tx\t0\t0\tf\ta").is_none());
+        assert!(Record::parse(b"1\t1\tx\t0\t0\t0\tf\ta").is_none());
         assert_eq!(parse_time("-1.5"), Some(-1_500_000_000));
         assert_eq!(parse_time("-0.5"), Some(-500_000_000));
     }
@@ -560,7 +569,7 @@ mod tests {
     fn the_command_line_quotes_the_root() {
         assert_eq!(
             command_line("/srv/it's"),
-            r"find -H '/srv/it'\''s' -xdev -printf '%i\t%n\t%s\t%b\t%T@\t%y\t%P\0'"
+            r"find -H '/srv/it'\''s' -xdev -printf '%i\t%n\t%s\t%b\t%T@\t%B@\t%y\t%P\0'"
         );
     }
 

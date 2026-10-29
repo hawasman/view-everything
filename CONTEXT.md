@@ -11,7 +11,7 @@ The app's persistent record of every Entry in every Location. Both Search and th
 _Avoid_: database, cache, catalog
 
 **Entry**:
-One file or folder in the Index, with its name, parent folder, Logical Size, On-disk Size and modification time.
+One file or folder in the Index, with its name, parent folder, Logical Size, On-disk Size and modification time and, where the platform or Remote reports it, creation time.
 _Avoid_: node, item, record, file (when folders are included)
 
 **Location**:
