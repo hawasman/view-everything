@@ -86,6 +86,20 @@ struct Location {
     no_capacity_note: Option<&'static str>,
 }
 
+/// "9 Locations" (a Location is a Volume or a Remote, as in the sidebar), with the filesystems
+/// the Volumes share lanes on when there are fewer of them: "9 Locations (Volumes on 3 filesystems)".
+fn locations_phrase(locations: &[Location]) -> String {
+    let count: usize = locations.iter().map(|l| l.members.len()).sum();
+    let filesystems = locations.iter().filter(|l| l.kind != Kind::Remote).count();
+    let volumes: usize = locations.iter().filter(|l| l.kind != Kind::Remote).map(|l| l.members.len()).sum();
+    let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut phrase = plural(count, "Location", "Locations");
+    if filesystems < volumes {
+        phrase += &format!(" (Volumes on {})", plural(filesystems, "filesystem", "filesystems"));
+    }
+    phrase
+}
+
 pub struct DashboardPage {
     shared: Arc<Shared>,
     trash: Trash,
@@ -407,13 +421,7 @@ impl Render for DashboardPage {
                     Some(at) => format!("Index last synced {}, at {}.", ago(now, at), old.name),
                     None => format!("{} has not finished its first sync.", old.name),
                 };
-                format!(
-                    "{} indexed across {} Location{} and {} Entries. {synced}",
-                    format::size(s.indexed()),
-                    locations.len(),
-                    if locations.len() == 1 { "" } else { "s" },
-                    format::count(s.entries),
-                )
+                format!("{} indexed across {} and {} Entries. {synced}", format::size(s.indexed()), locations_phrase(&locations), format::count(s.entries))
             }
             _ => sub,
         };
@@ -762,10 +770,10 @@ impl DashboardPage {
                 Some(at) => (
                     ago(now, at),
                     format!(
-                        "{}, {}: the oldest of {} Locations.",
+                        "{}, {}: the oldest of {}.",
                         l.name,
                         Local.timestamp_opt(at, 0).single().map_or_else(String::new, |t| t.format("%Y-%m-%d %H:%M").to_string()),
-                        locations.len()
+                        locations_phrase(locations)
                     ),
                 ),
                 None => ("Not yet".to_owned(), format!("{} has not finished its first sync.", l.name)),

@@ -165,10 +165,14 @@ impl Settings {
 
     /// Adds a Remote (the same one twice is one). Returns whether it was new.
     pub fn add_remote(&mut self, remote: Remote, refresh_minutes: u64) -> bool {
+        // One Remote per identity: S3 and FTP ones that differ only in keys, profile or TLS are the
+        // same Location, and the same keyring entry. The later one replaces the earlier.
+        let id = remote.identity();
         let new = !self.remotes.contains(&remote);
-        self.volume_refresh_minutes.insert(remote.identity(), refresh_minutes);
-        if new {
-            self.remotes.push(remote);
+        self.volume_refresh_minutes.insert(id.clone(), refresh_minutes);
+        match self.remotes.iter().position(|r| r.identity() == id) {
+            Some(at) => self.remotes[at] = remote,
+            None => self.remotes.push(remote),
         }
         new
     }
@@ -324,6 +328,15 @@ mod tests {
         let file: Settings = toml::from_str("[[remotes]]\nhost = \"h\"\nport = 21\nuser = \"u\"\npath = \"/\"\n").unwrap();
         assert_eq!(file.remotes, [Remote::Ftp(ve_core::FtpRemote::new("h", 21, "u", "/", ve_core::FtpTls::Explicit).unwrap())]);
         assert_eq!(s.remote_refresh_minutes(&ftp), 0);
+    }
+
+    #[test]
+    fn remotes_of_one_identity_replace_each_other() {
+        let mut s = Settings::default();
+        s.add_remote(Remote::S3(S3Remote::new("b", "", "", "us-east-1", false, "work", "").unwrap()), 0);
+        s.add_remote(Remote::S3(S3Remote::new("b", "", "", "us-east-1", false, "", "AKIA").unwrap()), 60);
+        assert_eq!(s.remotes.len(), 1);
+        assert_eq!(s.remotes[0], Remote::S3(S3Remote::new("b", "", "", "us-east-1", false, "", "AKIA").unwrap()));
     }
 
     #[test]
