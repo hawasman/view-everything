@@ -11,9 +11,11 @@ pub fn write_csv(out: &mut impl Write, index: &Index, filter: &Filter, categorie
     for &id in ids.iter().filter(|&&id| index.is_live(id)) {
         let totals = filter.totals(index, id);
         let name = index.name(id);
-        let modified = chrono::DateTime::from_timestamp(index.modified(id), 0)
-            .filter(|_| index.modified(id) != 0)
-            .map_or(String::new(), |t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        // The Index keeps nanoseconds since the Unix epoch; 0 is unknown.
+        let modified = match index.modified(id) {
+            0 => String::new(),
+            ns => chrono::DateTime::from_timestamp_nanos(ns).format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        };
         let category = if index.is_dir(id) { "" } else { categories.of_name(name).name() };
         let path = index.path(id);
         write_row(
@@ -49,6 +51,39 @@ fn write_row(out: &mut impl Write, fields: &[&str]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{EntryMeta, SyncState};
+    use std::path::Path;
+
+    #[test]
+    fn modified_is_written_from_the_index_nanoseconds() {
+        let mut index = Index::new();
+        let vol = index.add_volume(
+            Path::new("/w"),
+            "ext4",
+            "uuid:w",
+            EntryMeta {
+                is_dir: true,
+                ..Default::default()
+            },
+            SyncState::Walk,
+        );
+        let root = index.volume(vol).unwrap().root;
+        // 2026-10-10T15:33:33Z
+        let f = index.insert(
+            root,
+            "a.txt",
+            EntryMeta {
+                modified: 1_791_646_413_000_000_000,
+                ..Default::default()
+            },
+        );
+        let g = index.insert(root, "unknown", EntryMeta::default());
+        let mut out = Vec::new();
+        write_csv(&mut out, &index, &Filter::compute(&index, None), &CategoryMap::builtin(), &[f, g]).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains(",2026-10-10T15:33:33Z,"), "{text}");
+        assert!(text.contains("/w/unknown,unknown,0,0,,"), "{text}");
+    }
 
     fn row(fields: &[&str]) -> String {
         let mut out = Vec::new();
