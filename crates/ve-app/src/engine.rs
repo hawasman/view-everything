@@ -80,6 +80,8 @@ pub struct DuplicateState {
     pub version: u64,
     /// The Index generation the latest search started from, `None` before the first search.
     pub generation: Option<u64>,
+    /// When the latest search finished.
+    pub finished: Option<std::time::Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -671,9 +673,26 @@ fn hashes_path() -> Option<PathBuf> {
 /// Starts a search for Duplicates unless the last one is current for the Index, or the Index
 /// is still being read (hashing would chase every change). Cached hashes keep a repeat cheap.
 pub fn refresh_duplicates(shared: &Arc<Shared>) {
-    let current = shared.duplicates.lock().generation == Some(shared.index.read().generation());
+    let generation = shared.index.read().generation();
+    let state = shared.duplicates.lock();
+    // The Index moves on with every live change: a finished search is redone only once it is
+    // a while old, so painting the panel does not keep every Volume being walked and hashed.
+    let current = state.generation == Some(generation) || state.finished.is_some_and(|at| at.elapsed() < DUPLICATES_MAX_AGE);
+    drop(state);
     if !current && matches!(shared.status.lock().phase, Phase::Idle) {
         start_hashing(shared);
+    }
+}
+
+/// Searches for Duplicates redone at most this often because the Index changed.
+const DUPLICATES_MAX_AGE: Duration = Duration::from_secs(300);
+
+struct HashingDone(Arc<Shared>);
+
+impl Drop for HashingDone {
+    fn drop(&mut self) {
+        self.0.hash_progress.stage.store(0, Ordering::Relaxed);
+        self.0.hashing.store(false, Ordering::Relaxed);
     }
 }
 
@@ -696,6 +715,8 @@ pub fn start_hashing(shared: &Arc<Shared>) {
     let spawned = thread::Builder::new().name("ve-hasher".into()).spawn({
         let shared = shared.clone();
         move || {
+            // Clears `hashing` even if the search panics, so Rescan and `dupe:` keep working.
+            let done = HashingDone(shared.clone());
             let path = hashes_path();
             let mut cache = path.as_deref().map(HashCache::load).unwrap_or_default();
             let (groups, _) = duplicates::find(
@@ -719,8 +740,9 @@ pub fn start_hashing(shared: &Arc<Shared>) {
             state.set = Arc::new(set);
             state.version += 1;
             state.generation = Some(generation);
+            state.finished = Some(std::time::Instant::now());
             drop(state);
-            shared.hashing.store(false, Ordering::Relaxed);
+            drop(done);
             (shared.repaint)();
         }
     });
