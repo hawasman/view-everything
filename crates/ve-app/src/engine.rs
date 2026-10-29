@@ -1,13 +1,16 @@
 //! Background work: loading, syncing and saving the Index, and computing Views for the UI.
 
+mod live;
+
 use crate::settings;
 use crate::view::View;
 use chrono::{Local, Utc};
+use live::Live;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -55,6 +58,8 @@ pub struct Shared {
     saving: Mutex<()>,
     /// Set while a Snapshot is being captured and written.
     snapshotting: AtomicBool,
+    /// The FSEvents event id up to which changes are in the Index; 0 when there is none.
+    live_position: AtomicU64,
     /// Called from the background threads whenever something the GUI shows has changed.
     repaint: Repaint,
 }
@@ -103,6 +108,8 @@ enum Command {
     #[allow(dead_code)]
     Refresh,
     SetIntervals(Intervals),
+    /// Turns the Linux `fanotify` helper on or off.
+    SetLiveHelper(bool),
     Shutdown,
 }
 
@@ -122,6 +129,7 @@ impl Engine {
         remotes: Vec<Remote>,
         intervals: Intervals,
         categories: CategoryMap,
+        live_helper: bool,
     ) -> Engine {
         let shared = Arc::new(Shared {
             index: SharedIndex::new(Index::new()),
@@ -138,15 +146,17 @@ impl Engine {
             hashing: AtomicBool::new(false),
             saving: Mutex::new(()),
             snapshotting: AtomicBool::new(false),
+            live_position: AtomicU64::new(0),
             repaint,
         });
         let (commands, command_rx) = mpsc::channel();
         let (queries, query_rx) = mpsc::channel();
         let indexer = {
             let shared = shared.clone();
+            let again = commands.clone();
             thread::Builder::new()
                 .name("ve-indexer".into())
-                .spawn(move || run_indexer(&shared, mounted, volumes, remotes, intervals, &command_rx))
+                .spawn(move || run_indexer(&shared, mounted, volumes, remotes, intervals, &command_rx, again))
                 .expect("spawn indexer thread")
         };
         {
@@ -156,6 +166,7 @@ impl Engine {
                 .spawn(move || run_viewer(&shared, &query_rx, &categories))
                 .expect("spawn view thread");
         }
+        let _ = commands.send(Command::SetLiveHelper(live_helper));
         let _ = queries.send(String::new());
         Engine {
             shared,
@@ -181,6 +192,10 @@ impl Engine {
 
     pub fn forget(&self, identity: String) {
         let _ = self.commands.send(Command::Forget(identity));
+    }
+
+    pub fn set_live_helper(&self, on: bool) {
+        let _ = self.commands.send(Command::SetLiveHelper(on));
     }
 
     pub fn set_intervals(&self, intervals: Intervals) {
@@ -255,6 +270,7 @@ fn run_indexer(
     mut remotes: Vec<Remote>,
     mut intervals: Intervals,
     commands: &Receiver<Command>,
+    command_tx: Sender<Command>,
 ) {
     let index_path = settings::index_path();
     if let Some(path) = &index_path {
@@ -271,7 +287,23 @@ fn run_indexer(
     let returned = reconcile_volumes(shared, &mounted, &wanted, &remotes);
     // The saved Index is already on screen; Catch-up runs where it has gone stale, and for a
     // Volume that is back (possibly at another path).
+    let mut live = Live::new(shared, command_tx);
+    #[cfg(target_os = "macos")]
+    let replaying = {
+        // Changes since the last launch are replayed from the saved event id, which stands in
+        // for the re-walk of Volumes that have been walked before.
+        let saved = index_path.as_deref().and_then(live::saved_position);
+        live.start_stream(local_mounts(&wanted), saved);
+        saved.is_some()
+    };
+    #[cfg(not(target_os = "macos"))]
+    live.set_mounts(local_mounts(&wanted));
     let mut pending = stale_volumes(&shared.index.read(), &intervals, now_secs());
+    #[cfg(target_os = "macos")]
+    if replaying {
+        let covered = live.covered();
+        pending.retain(|id| !covered.contains(id));
+    }
     for id in returned {
         if !pending.contains(&id) {
             pending.push(id);
@@ -315,7 +347,12 @@ fn run_indexer(
                 wanted = volumes;
                 remotes = now_remotes;
                 pending = reconcile_volumes(shared, &mounted, &wanted, &remotes);
+                live.set_mounts(local_mounts(&wanted));
             }
+            #[cfg(target_os = "linux")]
+            Ok(Command::SetLiveHelper(on)) => live.set_helper(on),
+            #[cfg(not(target_os = "linux"))]
+            Ok(Command::SetLiveHelper(_)) => {}
             Ok(Command::RefreshLocation(identity)) => {
                 let target = refresh_target(&shared.index.read(), &identity);
                 // Several requests in a row (a filesystem's Volumes) are all kept.
@@ -351,14 +388,33 @@ fn run_indexer(
             }
             Err(RecvTimeoutError::Timeout) => {
                 pending = stale_volumes(&shared.index.read(), &intervals, now_secs());
+                // Volumes followed live are current: no re-walk, and Last Synced keeps up.
+                let covered = live.covered();
+                pending.retain(|id| !covered.contains(id));
+                {
+                    let mut index = shared.index.write();
+                    for &id in &covered {
+                        let capacity = index.volume(id).and_then(|v| v.capacity);
+                        index.mark_synced(id, now_secs(), capacity);
+                    }
+                }
                 pending.retain(|id| journaled.contains(id) || last_attempt.get(id).is_none_or(|t| t.elapsed() >= MIN_WAIT));
                 quiet = pending.iter().all(|id| journaled.contains(id));
+                if !covered.is_empty() && last_save.elapsed() >= POLL_SAVE_INTERVAL {
+                    save_if_changed(shared, index_path.as_deref(), &mut saved_generation, false);
+                    last_save = Instant::now();
+                }
             }
         }
         if !pending.is_empty() && !quiet {
             shared.busy.store(true, Ordering::Relaxed);
         }
     }
+}
+
+/// The mount points of the Volumes whose changes a live source can follow: local ones.
+fn local_mounts(volumes: &[VolumeInfo]) -> Vec<PathBuf> {
+    volumes.iter().filter(|v| !v.network).map(|v| v.mount.clone()).collect()
 }
 
 fn now_secs() -> i64 {
@@ -514,11 +570,16 @@ fn save_if_changed(shared: &Arc<Shared>, path: Option<&Path>, saved_generation: 
     let Some(path) = path else { return };
     let _saving = shared.saving.lock();
     let index = shared.index.read();
+    // Taken before the save: the Index holds at least what this position covers.
+    #[cfg(target_os = "macos")]
+    let position = shared.live_position.load(Ordering::Relaxed);
     if !force && index.generation() == *saved_generation {
         return;
     }
     match index.save(path) {
         Ok(()) => {
+            #[cfg(target_os = "macos")]
+            live::save_position(path, position);
             *saved_generation = index.generation();
             shared.resolve("save");
             snapshot_first_save_of_day(shared, path);
@@ -710,6 +771,7 @@ mod tests {
             hashing: AtomicBool::new(false),
             saving: Mutex::new(()),
             snapshotting: AtomicBool::new(false),
+            live_position: AtomicU64::new(0),
             repaint: Arc::new(|| {}),
         }
     }

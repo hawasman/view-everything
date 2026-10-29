@@ -7448,6 +7448,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ve-fanotify"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+]
+
+[[package]]
 name = "ve-scan"
 version = "0.1.0"
 dependencies = [

@@ -138,6 +138,7 @@ impl Shell {
             settings.remotes.clone(),
             intervals,
             categories.clone(),
+            settings.live_helper,
         );
 
         let trash = Trash::new(engine.shared.clone(), repaint.clone());
@@ -172,6 +173,7 @@ impl Shell {
             this.engine
                 .set_volumes(changed.mounted.clone(), changed.indexed.clone(), changed.remotes.clone());
             this.engine.set_intervals(changed.intervals.clone());
+            this.engine.set_live_helper(changed.live_helper);
             let settings = this.settings_page.read(cx).settings().clone();
             this.dashboard
                 .update(cx, |d, cx| d.set_context(&settings, changed.mounted.clone(), cx));
