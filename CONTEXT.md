@@ -114,7 +114,7 @@ The view for reclaiming space from files that can be regenerated or discarded: t
 _Avoid_: cleanup window, optimizer
 
 **Cleanup Rule**:
-A Query, the project markers that must be present, and how to remove what matches: either the matched paths themselves or a tool's own command. Built-in and user-written rules are the same kind of thing.
+A Query, the project markers that must be present (or a location the Query names), and how to remove what matches: either the matched paths themselves or a tool's own command. Each rule files its Cleanables under Temporary Files, Caches or Build Artefacts, which decides the age limit for pre-ticking. Built-in and user-written rules are the same kind of thing.
 _Avoid_: action, preset, Category
 
 **Cleanable**:

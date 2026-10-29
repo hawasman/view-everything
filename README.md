@@ -66,7 +66,7 @@ estimate = "target"              # what to size for the Estimated figure
 | --- | --- |
 | `name`, `group` | Required. `group` is `temp` (Temporary Files), `cache` (Caches) or `build` (Build Artefacts). |
 | `query` | Required. A [Query](#query-language) over the Index. `{home}`, `{cache}` and `{temp}` stand for those folders of the user, so `parent:"{cache}"` selects what is directly inside the user cache folder. |
-| `markers` | Paths relative to a match, such as `../package.json` (a sibling) or `CACHEDIR.TAG` (inside). A match counts only when one is a plain file (never a link). Without markers the Query alone decides, so use a location such as `parent:`. |
+| `markers` | Required unless the Query names a location with `parent:`. Paths relative to a match, such as `../package.json` (a sibling) or `CACHEDIR.TAG` (inside). A match counts only when one is a plain file (never a link).  |
 | `files` | `true` lets files match too, not only folders. |
 | `tick` | `false` never pre-ticks the rule. Caches are never pre-ticked either. |
 | `platforms` | Any of `linux`, `macos`, `windows`; every platform when left out. |

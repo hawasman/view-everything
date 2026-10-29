@@ -88,6 +88,21 @@ impl Rule {
     pub fn is_command(&self) -> bool {
         !self.command.is_empty()
     }
+
+    /// The exact command, as shown in the advanced view.
+    pub fn argv_text(&self) -> String {
+        self.command
+            .iter()
+            .map(|a| {
+                if a.is_empty() || a.contains([' ', '"', '\'']) {
+                    format!("{a:?}")
+                } else {
+                    a.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 /// The rules in force, and what was wrong with the ones that are not.
@@ -132,7 +147,7 @@ pub fn parse(text: &str, source: &str, os: &str, context: &QueryContext) -> Rule
     let headers: Vec<usize> = text
         .lines()
         .enumerate()
-        .filter(|(_, l)| l.trim() == "[[rule]]")
+        .filter(|(_, l)| l.trim_start().starts_with("[[rule]]"))
         .map(|(i, _)| i + 1)
         .collect();
     for (n, raw) in file.rule.into_iter().enumerate() {
@@ -162,6 +177,9 @@ fn check(raw: Raw, os: &str, context: &QueryContext) -> Result<Option<Rule>, Str
     }
     let text = expand(&raw.query).map_err(|e| format!("`{name}`: {e}"))?;
     let query = Query::parse(&text, context).map_err(|e| format!("`{name}`: query `{}`: {e}", raw.query))?;
+    if raw.markers.is_empty() && !text.contains("parent:") {
+        return Err(format!("`{name}`: a rule needs `markers` or a `parent:` location in its query"));
+    }
     if query.needs_depth() {
         return Err(format!("`{name}`: depth: is not supported in a Cleanup Rule"));
     }
@@ -232,23 +250,8 @@ impl Cleanable {
             Group::Temp => temp_days,
             Group::Build => build_days,
         };
-        self.rule.tick && now_ns.saturating_sub(self.newest) > days as i64 * 86_400 * 1_000_000_000
-    }
-
-    /// The exact command, as shown in the advanced view.
-    pub fn argv_text(&self) -> String {
-        self.rule
-            .command
-            .iter()
-            .map(|a| {
-                if a.is_empty() || a.contains([' ', '"', '\'']) {
-                    format!("{a:?}")
-                } else {
-                    a.clone()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
+        // No file at all (an unknown age) is not "old".
+        self.rule.tick && self.newest > 0 && now_ns.saturating_sub(self.newest) > days as i64 * 86_400 * 1_000_000_000
     }
 }
 
@@ -483,13 +486,7 @@ pub fn clean(plan: &[(Arc<Rule>, PathBuf)], volumes: &[VolumeInfo]) -> Outcome {
             out.skipped.push((path.clone(), why));
         } else if rule.is_command() {
             out.commands.push(CommandReport {
-                argv: Cleanable {
-                    rule: rule.clone(),
-                    path: path.clone(),
-                    on_disk: 0,
-                    newest: 0,
-                }
-                .argv_text(),
+                argv: rule.argv_text(),
                 cwd: path.clone(),
                 result: run(&rule.command, path),
             });
@@ -573,13 +570,13 @@ mod tests {
         let bad_syntax = parse("[[rule]]\nname = \"x\"\ngroup = = \"temp\"\n", "cleanup.toml", OS, &ctx);
         assert!(bad_syntax.rules.is_empty());
         assert!(bad_syntax.errors[0].starts_with("cleanup.toml line 3: "), "{:?}", bad_syntax.errors);
-        let text = "[[rule]]\nname = \"ok\"\ngroup = \"temp\"\nquery = \"foo\"\n\n[[rule]]\nname = \"bad\"\ngroup = \"temp\"\nquery = \"size:abc\"\n";
+        let text = "[[rule]]\nname = \"ok\"\ngroup = \"temp\"\nmarkers = [\"m\"]\nquery = \"foo\"\n\n[[rule]]\nname = \"bad\"\ngroup = \"temp\"\nquery = \"size:abc\"\n";
         let two = parse(text, "cleanup.toml", OS, &ctx);
         assert_eq!(two.rules.len(), 1, "{:?}", two.errors);
         assert!(
             two.errors
                 .iter()
-                .any(|e| e.starts_with("cleanup.toml line 6: rule 2: `bad`: query `size:abc`")),
+                .any(|e| e.starts_with("cleanup.toml line 7: rule 2: `bad`: query `size:abc`")),
             "{:?}",
             two.errors
         );
@@ -605,7 +602,7 @@ mod tests {
         let loaded = load(Some(&broken));
         assert_eq!(loaded.errors.len(), 1);
         assert_eq!(loaded.rules.len(), load(None).rules.len());
-        std::fs::write(&broken, "[[rule]]\nname=\"mine\"\ngroup=\"cache\"\nquery=\"x\"\n").unwrap();
+        std::fs::write(&broken, "[[rule]]\nname=\"mine\"\ngroup=\"cache\"\nmarkers=[\"m\"]\nquery=\"x\"\n").unwrap();
         assert_eq!(load(Some(&broken)).rules.len(), load(None).rules.len() + 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -726,6 +723,7 @@ mod tests {
         };
         assert!(c("Rust build artefacts", now - 31 * day).pre_ticked(now, 7, 30));
         assert!(!c("Rust build artefacts", now - 29 * day).pre_ticked(now, 7, 30));
+        assert!(!c("Rust build artefacts", 0).pre_ticked(now, 7, 30));
         assert!(!c("node_modules", 0).pre_ticked(now, 7, 30));
         assert!(!c("User cache folder", 0).pre_ticked(now, 7, 30));
     }
@@ -857,13 +855,7 @@ mod tests {
         assert_eq!((*code, text.as_str()), (Some(3), "oops"));
         assert!(out.commands[2].result.as_ref().unwrap_err().contains("not found"));
         // The argv is shown exactly, quoting what has spaces.
-        let c = Cleanable {
-            rule: mk(r#"["a", "b c"]"#),
-            path: project.clone(),
-            on_disk: 0,
-            newest: 0,
-        };
-        assert_eq!(c.argv_text(), "a \"b c\"");
+        assert_eq!(mk(r#"["a", "b c"]"#).argv_text(), "a \"b c\"");
         // A command rule whose marker is gone does not run.
         std::fs::remove_file(project.join("marker")).unwrap();
         let out = clean(&[(ok, project)], &[]);

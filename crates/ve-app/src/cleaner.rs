@@ -287,7 +287,7 @@ impl Render for CleanerPage {
             }
             let key = c.key();
             let by = if c.rule.is_command() {
-                format!("{}: runs {}", c.rule.name, c.argv_text())
+                format!("{}: runs {}", c.rule.name, c.rule.argv_text())
             } else {
                 c.rule.name.clone()
             };
@@ -348,7 +348,7 @@ impl Render for CleanerPage {
                     ))
                     .children(commands.iter().map(|c| {
                         v_flex()
-                            .child(div().child(c.argv_text()))
+                            .child(div().child(c.rule.argv_text()))
                             .child(caption(format!("in {}", c.path.display()), cx))
                     }))
                 })
