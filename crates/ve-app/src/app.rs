@@ -60,6 +60,17 @@ enum Page {
     Settings,
 }
 
+/// The self-update of the release in the sidebar row (ADR-0007).
+#[cfg(feature = "updater")]
+enum SelfUpdate {
+    /// This install cannot update itself: the row links to the release.
+    Link,
+    Downloading,
+    /// Downloaded and verified: "Restart to update".
+    Ready(crate::update::Staged),
+    Failed(String),
+}
+
 pub struct Shell {
     engine: Engine,
     page: Page,
@@ -86,6 +97,9 @@ pub struct Shell {
     /// A newer release than the running app, as the last update check found.
     #[cfg(feature = "updater")]
     update: Option<crate::update::Release>,
+    /// Where the self-update of `update` stands (ADR-0007).
+    #[cfg(feature = "updater")]
+    self_update: SelfUpdate,
     /// The Explorer lists' width in pixels, as of the last paint.
     list_width: Rc<Cell<f32>>,
     #[cfg(feature = "bench")]
@@ -306,6 +320,7 @@ impl Shell {
         // A newer version: once at startup if a day has passed, then hourly (the app may run for days).
         #[cfg(feature = "updater")]
         {
+            crate::update::cleanup();
             cx.subscribe(&settings_page, |this, _, _: &CheckNow, cx| this.check_update(cx))
                 .detach();
             cx.spawn(async move |this, cx| {
@@ -349,6 +364,8 @@ impl Shell {
             startup_problems,
             #[cfg(feature = "updater")]
             update: None,
+            #[cfg(feature = "updater")]
+            self_update: SelfUpdate::Link,
             list_width: Rc::default(),
             #[cfg(feature = "bench")]
             demoed: false,
@@ -379,7 +396,12 @@ impl Shell {
                 };
                 // A failed check keeps showing the row of an earlier one.
                 if let Ok(release) = found {
+                    // A staged or failed update belongs to the version it was for.
+                    if this.update.as_ref().map(|r| &r.version) != release.as_ref().map(|r| &r.version) {
+                        this.self_update = SelfUpdate::Link;
+                    }
                     this.update = release;
+                    this.start_download(cx);
                 }
                 let now = chrono::Utc::now().timestamp();
                 this.settings_page.update(cx, |page, cx| page.update_checked(status, now, cx));
@@ -389,12 +411,77 @@ impl Shell {
         .detach();
     }
 
+    /// Downloads and verifies the update in the background when this install can update itself (a failure is
+    /// not retried until a newer version is out);
+    /// otherwise (or on failure) the row keeps the release link.
+    #[cfg(feature = "updater")]
+    fn start_download(&mut self, cx: &mut Context<Self>) {
+        let (Some(release), SelfUpdate::Link) = (self.update.clone(), &self.self_update) else {
+            return;
+        };
+        let Some(kind) = crate::update::Kind::detect() else { return };
+        self.self_update = SelfUpdate::Downloading;
+        cx.spawn(async move |this, cx| {
+            let staged = cx.background_spawn(async move { crate::update::prepare(&kind, &release) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.self_update = match staged {
+                    Ok(staged) => SelfUpdate::Ready(staged),
+                    Err(e) => SelfUpdate::Failed(e),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// "Restart to update": swaps the verified update in, saves the Index and starts the new version.
+    #[cfg(feature = "updater")]
+    fn restart_to_update(&mut self, cx: &mut Context<Self>) {
+        let SelfUpdate::Ready(staged) = &self.self_update else { return };
+        let engine = &mut self.engine;
+        match crate::update::apply(staged, || engine.shutdown()) {
+            Ok(()) => cx.quit(),
+            Err(e) => {
+                self.self_update = SelfUpdate::Failed(e);
+                cx.notify();
+            }
+        }
+    }
+
     /// The row above Settings when a newer version is out.
     #[cfg(feature = "updater")]
     fn update_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let release = self.update.as_ref()?;
         let p = palette(cx);
         let url = release.notes_url.clone();
+        let action = match &self.self_update {
+            SelfUpdate::Link => None,
+            SelfUpdate::Downloading => Some(
+                div()
+                    .text_xs()
+                    .text_color(p.muted)
+                    .child("Downloading the update…")
+                    .into_any_element(),
+            ),
+            SelfUpdate::Ready(_) => Some(
+                div()
+                    .id("restart-to-update")
+                    .cursor_pointer()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.accent)
+                    .child("Restart to update")
+                    .on_click(cx.listener(|this, _, _, cx| this.restart_to_update(cx)))
+                    .into_any_element(),
+            ),
+            SelfUpdate::Failed(e) => Some(
+                div()
+                    .text_xs()
+                    .text_color(p.muted)
+                    .child(format!("Could not update: {e}"))
+                    .into_any_element(),
+            ),
+        };
         Some(
             v_flex()
                 .mt(px(16.))
@@ -419,6 +506,7 @@ impl Shell {
                             let _ = opener::open_browser(&url);
                         }),
                 )
+                .children(action)
                 .into_any_element(),
         )
     }

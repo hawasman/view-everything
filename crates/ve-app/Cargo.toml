@@ -12,7 +12,7 @@ path = "src/main.rs"
 [features]
 # Checks GitHub Releases for a newer version. Builds another tool updates (the AUR package) turn it off.
 default = ["updater"]
-updater = ["dep:minisign-verify", "dep:serde_json", "dep:ureq"]
+updater = ["dep:minisign-verify", "dep:serde_json", "dep:ureq", "dep:zip"]
 # Measurement hooks: VE_BENCH (scroll timing) and VE_BENCH_MOUNT (synthetic Index; see examples/gen_index.rs).
 bench = []
 
@@ -31,9 +31,11 @@ trash = "5.2.9"
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"], optional = true }
 ve-core = { path = "../ve-core" }
 ve-scan = { path = "../ve-scan" }
+zip = { version = "2.6.1", default-features = false, features = ["deflate"], optional = true }
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell"] }
 
 [dev-dependencies]
 minisign = "0.7"
+tempfile = "3.27.0"

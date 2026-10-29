@@ -4,6 +4,9 @@
 use serde::Deserialize;
 use std::time::Duration;
 
+mod install;
+pub use install::{Kind, Staged, apply, cleanup};
+
 /// The release signing key (`packaging/minisign.pub`); every release asset carries a `.minisig` for it.
 const PUBLIC_KEY: &str = include_str!("../../../packaging/minisign.pub");
 const LATEST: &str = "https://api.github.com/repos/hawasman/view-everything/releases/latest";
@@ -17,10 +20,21 @@ pub struct Release {
     pub version: String,
     /// The release notes page ("What's new").
     pub notes_url: String,
+    /// The release files, for self-updates to download.
+    pub assets: Vec<Asset>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct Asset {
+    pub name: String,
+    #[serde(rename = "browser_download_url")]
+    pub url: String,
 }
 
 #[derive(Deserialize)]
 struct Latest {
+    #[serde(default)]
+    assets: Vec<Asset>,
     tag_name: String,
     html_url: String,
     #[serde(default)]
@@ -85,6 +99,7 @@ pub fn check(url: &str, current: &str) -> Result<Option<Release>, String> {
     Ok(newer.then_some(Release {
         version,
         notes_url: latest.html_url,
+        assets: latest.assets,
     }))
 }
 
@@ -97,9 +112,13 @@ pub fn verify(public_key: &str, file: &[u8], signature: &str) -> Result<(), Stri
         .map_err(|e| format!("signature does not match: {e}"))
 }
 
-/// [`verify`] with the release key built into the app.
-#[allow(dead_code)] // the per-platform self-update slices call it on a downloaded asset
-pub fn verify_release(file: &[u8], signature: &str) -> Result<(), String> {
+/// Starts the download of `release` for the install `kind`, verified with the release key built into the app.
+pub fn prepare(kind: &Kind, release: &Release) -> Result<Staged, String> {
+    install::prepare(kind, release, PUBLIC_KEY, &std::env::temp_dir())
+}
+
+#[cfg(test)]
+fn verify_release(file: &[u8], signature: &str) -> Result<(), String> {
     verify(PUBLIC_KEY, file, signature)
 }
 
@@ -173,7 +192,8 @@ mod tests {
             found,
             Some(Release {
                 version: "0.2.0".into(),
-                notes_url: "https://example.test/v0.2.0".into()
+                notes_url: "https://example.test/v0.2.0".into(),
+                assets: vec![]
             })
         );
     }
