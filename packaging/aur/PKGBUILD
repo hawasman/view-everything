@@ -10,7 +10,8 @@ arch=('x86_64')
 license=('MIT' 'Apache-2.0' 'OFL-1.1')
 depends=('gcc-libs' 'glibc' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'vulkan-icd-loader'
          'wayland' 'libglvnd')
-optdepends=('vulkan-driver: GPU rendering (any Vulkan ICD: mesa, nvidia-utils, ...)')
+optdepends=('vulkan-driver: GPU rendering (any Vulkan ICD: mesa, nvidia-utils, ...)'
+            'polkit: live updates on Linux (Settings > Live updates)')
 makedepends=('cargo' 'git')
 provides=('view-everything')
 conflicts=('view-everything')
@@ -35,13 +36,16 @@ build() {
   export CARGO_TARGET_DIR=target
   # The package manager updates this build: no update checks.
   cargo build --release --frozen -p ve-app --no-default-features
-  cargo build --release --frozen -p ve-cli
+  cargo build --release --frozen -p ve-cli -p ve-fanotify
 }
 
 package() {
   cd "$pkgname"
   install -Dm755 target/release/view-everything "$pkgdir/usr/bin/view-everything"
   install -Dm755 target/release/ve "$pkgdir/usr/bin/ve"
+  install -Dm755 target/release/ve-fanotify "$pkgdir/usr/libexec/view-everything/ve-fanotify"
+  install -Dm644 packaging/linux/org.view-everything.fanotify.policy \
+    "$pkgdir/usr/share/polkit-1/actions/org.view-everything.fanotify.policy"
   install -Dm644 packaging/linux/view-everything.desktop \
     "$pkgdir/usr/share/applications/view-everything.desktop"
   install -Dm644 packaging/icons/view-everything.svg \
