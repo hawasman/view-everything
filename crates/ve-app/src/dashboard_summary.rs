@@ -490,8 +490,9 @@ mod tests {
     }
 
     /// A Remote reached through a stand-in ssh that runs the command locally appears in the
-    /// per-Location totals and the Category totals, with the capacity its df reported.
-    #[cfg(unix)]
+    /// per-Location totals and the Category totals, with the capacity its df reported. The
+    /// stand-in runs the local `find -printf`, which needs GNU find.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_remote_counts_in_the_locations_and_categories() {
         use std::os::unix::fs::PermissionsExt;

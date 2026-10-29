@@ -79,6 +79,7 @@ fn a_hard_linked_file_counts_once() {
     assert_eq!((totals.logical, totals.files), (4096, 1));
 }
 
+#[cfg(unix)]
 #[test]
 fn symlinks_are_indexed_but_not_followed() {
     let dir = tempfile::tempdir().unwrap();
@@ -144,6 +145,7 @@ fn catch_up_works_on_an_index_saved_and_loaded_from_disk() {
     assert_eq!(snapshot(&loaded.read(), volume), snapshot(&fresh.read(), fresh_volume));
 }
 
+#[cfg(unix)]
 #[test]
 fn unreadable_folders_are_kept_and_counted() {
     use std::os::unix::fs::PermissionsExt;

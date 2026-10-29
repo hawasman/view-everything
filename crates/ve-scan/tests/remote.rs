@@ -1,8 +1,9 @@
 //! Remotes against a stand-in for `ssh`: a script that skips ssh's options and host and runs the
 //! command locally (the real `ssh localhost` needs interactive host-key confirmation here), or
-//! prints canned `find` output.
+//! prints canned `find` output. The stand-in runs the local `find` and `df`, so these need GNU
+//! find (`-printf`): Linux only.
 
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
