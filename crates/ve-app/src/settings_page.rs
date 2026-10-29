@@ -130,7 +130,7 @@ impl FtpForm {
         let tls = if allow_plain { FtpTls::Plain } else { FtpTls::Explicit };
         let remote = FtpRemote::new(&text(&self.host), port, &text(&self.user), &text(&self.path), tls)?;
         let password = self.password.read(cx).value().to_string();
-        match (password.is_empty(), matches!(remote.user.as_str(), "anonymous" | "ftp")) {
+        match (password.is_empty(), remote.is_anonymous()) {
             (true, false) => return Err("Enter the password for this user".into()),
             (true, true) => {}
             (false, _) => ve_scan::s3::store_secret(&remote.identity(), &password)?,
@@ -539,7 +539,7 @@ impl SettingsPage {
         window.open_dialog(cx, move |dialog, _, cx| {
             let (host, path, every, page, form, ftp_form) =
                 (host.clone(), path.clone(), every.clone(), page.clone(), form.clone(), ftp_form.clone());
-            let (tab_now, path_style, plain) = page.read_with(cx, |p, _| (p.remote_tab, p.s3_path_style, p.ftp_plain));
+            let (shown_tab, path_style, plain) = page.read_with(cx, |p, _| (p.remote_tab, p.s3_path_style, p.ftp_plain));
             let p = palette(cx);
             let (surface, ground, border, muted, text) = (p.surface, p.ground, p.border, p.muted, p.text);
             let field = |label: &'static str, input: &Entity<InputState>| {
@@ -570,14 +570,14 @@ impl SettingsPage {
             };
             let tab = |id: &'static str, label: &'static str, which: RemoteTab| {
                 let page = page.clone();
-                seg(label, tab_now == which).id(id).on_click(move |_, window, cx| {
+                seg(label, shown_tab == which).id(id).on_click(move |_, window, cx| {
                     page.update(cx, |page, _| page.remote_tab = which);
                     window.refresh();
                 })
             };
             let refresh = Select::new(&every).w_full();
             let refresh = v_flex().gap(px(8.)).child(div().font_weight(FontWeight::MEDIUM).child("Refresh")).child(refresh);
-            let body = if tab_now == RemoteTab::S3 {
+            let body = if shown_tab == RemoteTab::S3 {
                 v_flex()
                     .gap(px(11.))
                     .child(h_flex().gap(px(12.)).child(field("Bucket", &form.bucket)).child(field("Prefix", &form.prefix)))
@@ -597,7 +597,7 @@ impl SettingsPage {
                             .child(div().text_color(muted).child("Path-style URLs (MinIO and most custom endpoints)")),
                     )
                     .child(refresh)
-            } else if tab_now == RemoteTab::Ftp {
+            } else if shown_tab == RemoteTab::Ftp {
                 v_flex()
                     .gap(px(11.))
                     .child(
@@ -681,7 +681,7 @@ impl SettingsPage {
                     h_flex()
                         .gap(px(8.))
                         .items_center()
-                        .child(div().flex_1().text_xs().text_color(muted).child(match tab_now {
+                        .child(div().flex_1().text_xs().text_color(muted).child(match shown_tab {
                             RemoteTab::S3 => "Keys left empty: AWS_* or ~/.aws",
                             RemoteTab::Ftp => "Passive mode, FTPS (AUTH TLS) by default",
                             RemoteTab::Ssh => "Keys and ssh-agent only",

@@ -1,6 +1,6 @@
 //! FTP Remotes (ADR-0006 addendum): walk an FTP server's folders in passive mode with MLSD where
 //! `FEAT` offers it, else by parsing `LIST` (unix and DOS formats), and apply what is listed to
-//! the Index. Read-only: only login, `FEAT`, `CWD`, `MLSD`/`LIST` and `QUIT` are ever sent.
+//! the Index. Read-only: only `AUTH`/`PBSZ`/`PROT`, login, `FEAT`, `TYPE`, `CWD`, `PASV`, `MLSD`/`LIST` and `QUIT` are ever sent.
 //! Connections are explicit FTPS (`AUTH TLS`) unless the Remote allows plain FTP. The password is
 //! in the OS keyring, through the same helper as S3's secrets.
 
@@ -72,6 +72,12 @@ fn usable(name: &str) -> bool {
     !(name.is_empty() || name == "." || name == ".." || name.contains('/'))
 }
 
+/// A name that cannot be an Entry: `.` and `..` are just skipped, but a name that is empty or holds
+/// a `/` is an Entry we cannot record, so the listing is not complete.
+fn unusable(name: &str) -> Line {
+    if name == "." || name == ".." { Line::Skip } else { Line::Bad }
+}
+
 /// `Mon D HH:MM` or `Mon D YYYY` from `ls -l`, as nanoseconds. A time of day carries no year:
 /// it is this year's, unless that is more than a day ahead of `now`, then last year's (`ls`
 /// shows times only for the last six months). The server's time zone is not known, so times are
@@ -95,7 +101,7 @@ fn unix_time(month: &str, day: &str, year_or_time: &str, now: NaiveDateTime) -> 
 /// the month, so servers that omit the group still parse.
 fn parse_unix(line: &str, now: NaiveDateTime) -> Line {
     let f = fields(line);
-    let kind = line.chars().next();
+    let kind = f.first().and_then(|(_, perms)| perms.chars().next());
     if !f.first().is_some_and(|(_, perms)| perms.len() >= 10 && perms.chars().skip(1).all(|c| "rwxsStT-+@.".contains(c))) {
         return Line::Bad;
     }
@@ -112,7 +118,7 @@ fn parse_unix(line: &str, now: NaiveDateTime) -> Line {
         Some('-') if usable(name) => Line::Item { name: name.into(), is_dir: false, size, modified },
         // Symlinks are skipped; so are devices, pipes and sockets.
         Some('l' | 'c' | 'b' | 'p' | 's') => Line::Skip,
-        Some('d' | '-') => Line::Skip,
+        Some('d' | '-') => unusable(name),
         _ => Line::Bad,
     }
 }
@@ -152,7 +158,7 @@ fn parse_dos(line: &str) -> Line {
             Err(_) => return Line::Bad,
         }
     };
-    if usable(name) { Line::Item { name: name.into(), is_dir, size, modified } } else { Line::Skip }
+    if usable(name) { Line::Item { name: name.into(), is_dir, size, modified } } else { unusable(name) }
 }
 
 /// One line of `LIST` output in either format. `now` anchors the year of times without one.
@@ -193,7 +199,8 @@ pub fn parse_mlsd_line(line: &str) -> Line {
     match kind.as_deref() {
         Some("file") if usable(name) => Line::Item { name: name.into(), is_dir: false, size, modified },
         Some("dir") if usable(name) => Line::Item { name: name.into(), is_dir: true, size: 0, modified },
-        Some("file" | "dir" | "cdir" | "pdir") => Line::Skip,
+        Some("file" | "dir") => unusable(name),
+        Some("cdir" | "pdir") => Line::Skip,
         // Symlinks (OS.unix=slink, OS.unix=symlink) and anything unknown are not Entries.
         Some(_) => Line::Skip,
         None => Line::Bad,
@@ -262,7 +269,8 @@ fn connect(remote: &FtpRemote, password: &str, tls: Arc<ClientConfig>) -> io::Re
     ftp.set_passive_nat_workaround(true);
     if remote.tls == FtpTls::Explicit {
         ftp = ftp.into_secure(RustlsConnector::from(tls), &remote.host).map_err(|e| match e {
-            FtpError::UnexpectedResponse(_) => io::Error::new(
+            // A refusal of AUTH itself (suppaftp reads 534 as no known status): a busy (421) or login (530) reply is not "no FTPS".
+            FtpError::UnexpectedResponse(r) if !matches!(r.status.code(), 421 | 530) => io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("{host} does not offer FTPS (AUTH TLS): turn on Allow plain FTP to connect without encryption"),
             ),
@@ -333,19 +341,19 @@ pub fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::R
 /// The password kept in the keyring. A public server has none to keep.
 fn password(remote: &FtpRemote) -> Result<String, String> {
     match read_secret(&remote.identity()) {
-        Err(_) if matches!(remote.user.as_str(), "anonymous" | "ftp") => Ok("anonymous@".into()),
+        Err(_) if remote.is_anonymous() => Ok("anonymous@".into()),
         Err(e) => Err(e.replace("the secret key is", "the password is")),
         Ok(p) => Ok(p),
     }
 }
 
-/// [`sync`] with `password` giving the password and `tls` the trust for FTPS (test doubles, or the
+/// [`sync`] with `auth` giving the password and `tls` the trust for FTPS (test doubles, or the
 /// keyring and the bundled web roots).
 pub fn sync_with(
     index: &SharedIndex,
     volume: VolumeId,
     progress: &Progress,
-    password: &dyn Fn(&FtpRemote) -> Result<String, String>,
+    auth: &dyn Fn(&FtpRemote) -> Result<String, String>,
     tls: Arc<ClientConfig>,
 ) -> io::Result<()> {
     let (root, remote): (EntryId, FtpRemote) = {
@@ -356,7 +364,7 @@ pub fn sync_with(
             _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "not an FTP Remote")),
         }
     };
-    let password = password(&remote).map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))?;
+    let password = auth(&remote).map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))?;
     let mut ftp = connect(&remote, &password, tls)?;
     let mut applier = Applier::new(index, root, progress);
     let mut batch = Vec::new();
@@ -410,6 +418,9 @@ mod tests {
         assert_eq!(p("total 24"), Line::Skip);
         assert_eq!(p(""), Line::Skip);
         assert_eq!(p("drwxr-xr-x 2 u g 4096 Nov  5  2018 .."), Line::Skip);
+        // A name we cannot record makes the listing incomplete, so it is not pruned after.
+        assert_eq!(p("-rw-r--r-- 1 u g 5 Nov  5  2018 a/b"), Line::Bad);
+        assert_eq!(parse_mlsd_line("type=file;size=1; x/y"), Line::Bad);
         // Anything else is not understood.
         assert_eq!(p("-rw-r--r-- 1 u g notasize Nov  5  2018 x"), Line::Bad);
         assert_eq!(p("what is this"), Line::Bad);

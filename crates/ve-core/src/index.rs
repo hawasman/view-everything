@@ -178,6 +178,11 @@ impl FtpRemote {
         Ok(FtpRemote { host: host.into(), port, user: user.into(), path: if path.is_empty() { "/".into() } else { path.into() }, tls })
     }
 
+    /// A public server: it needs no password in the keyring.
+    pub fn is_anonymous(&self) -> bool {
+        matches!(self.user.as_str(), "anonymous" | "ftp")
+    }
+
     /// `ftp://user@host:port/path`: the same Location wherever it is listed.
     pub fn identity(&self) -> String {
         format!("ftp://{}@{}:{}{}", self.user, self.host, self.port, self.path)
