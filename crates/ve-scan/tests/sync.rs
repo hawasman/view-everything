@@ -170,3 +170,34 @@ fn unreadable_folders_are_kept_and_counted() {
     assert_eq!(progress.unreadable(), 1);
     assert_eq!(snapshot(&index.read(), volume).keys().collect::<Vec<_>>(), ["/locked"]);
 }
+
+#[test]
+fn a_full_sync_re_walks_and_a_cancelled_one_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("keep/a.txt"), 5);
+    let (index, volume) = scan(dir.path());
+    // Added without touching any folder time the catch-up could notice.
+    write(&dir.path().join("keep/b.txt"), 7);
+    let before = snapshot(&index.read(), volume);
+
+    let cancelled = Progress::default();
+    cancelled.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    ve_scan::sync_full(&index, volume, &cancelled).unwrap();
+    assert_eq!(snapshot(&index.read(), volume), before);
+
+    ve_scan::sync_full(&index, volume, &Progress::default()).unwrap();
+    assert!(snapshot(&index.read(), volume).contains_key("/keep/b.txt"));
+}
+
+#[test]
+fn a_cancelled_walk_keeps_every_entry_it_did_not_reach() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("sub/a.txt"), 5);
+    let (index, volume) = scan(dir.path());
+    let before = snapshot(&index.read(), volume);
+    fs::remove_dir_all(dir.path().join("sub")).unwrap();
+    let progress = Progress::default();
+    progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    ve_scan::sync(&index, volume, &progress).unwrap();
+    assert_eq!(snapshot(&index.read(), volume), before);
+}

@@ -106,6 +106,16 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-22.04
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+          path: src
+      # The release body is this tag's section of CHANGELOG.md.
+      - name: Release notes
+        run: |
+          awk -v tag="## $GITHUB_REF_NAME" '$0 == tag {on=1; next} /^## / {on=0} on' src/CHANGELOG.md > notes.md
+          test -s notes.md || { echo "::error::CHANGELOG.md has no '## $GITHUB_REF_NAME' section"; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -128,4 +138,4 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          body_path: notes.md

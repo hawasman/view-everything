@@ -31,7 +31,7 @@ pub use volumes::{VolumeInfo, discover_volumes};
 use parking_lot::RecursiveRwLock;
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use ve_core::{Index, SyncState, VolumeId};
 
 /// The Index as shared between scanners, the View computation and the GUI.
@@ -47,6 +47,8 @@ pub struct Progress {
     pub entries: AtomicU64,
     /// Folders that could not be read (usually permission denied).
     pub unreadable: AtomicU64,
+    /// Set to ask a running walk to stop; folders not reached keep what the Index knows.
+    pub cancel: AtomicBool,
 }
 
 impl Progress {
@@ -57,6 +59,15 @@ impl Progress {
     pub fn unreadable(&self) -> u64 {
         self.unreadable.load(Ordering::Relaxed)
     }
+
+    pub fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+/// The error every cancelled walk returns.
+pub(crate) fn cancelled_error() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, "cancelled")
 }
 
 /// Adds the Volume mounted at `mount` to the Index with only its root, ready for [`sync`].
@@ -71,11 +82,23 @@ pub fn add_volume(index: &SharedIndex, mount: &Path, fs_type: &str, identity: &s
 /// change journal when the process is elevated; otherwise, and on every other platform, the
 /// folder tree is walked and differences applied.
 pub fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::Result<()> {
+    sync_with_mode(index, volume, progress, false)
+}
+
+/// [`sync`] that never relies on what the Index already knows: an NTFS Volume's whole Master
+/// File Table is read again instead of replaying the change journal. The folder walk of every
+/// other Volume is already a full re-walk.
+pub fn sync_full(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::Result<()> {
+    sync_with_mode(index, volume, progress, true)
+}
+
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn sync_with_mode(index: &SharedIndex, volume: VolumeId, progress: &Progress, full: bool) -> io::Result<()> {
     if index.read().volume(volume).is_some_and(|v| v.is_remote()) {
         return remote::sync(index, volume, progress);
     }
     #[cfg(windows)]
-    if ntfs::sync_windows(index, volume, progress)? {
+    if ntfs::sync_windows(index, volume, progress, full)? {
         return Ok(());
     }
     walk::sync(index, volume, progress)

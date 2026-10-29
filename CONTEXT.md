@@ -1,8 +1,12 @@
 # view-everything
 
-A cross-platform desktop app for finding files by name and finding what is consuming disk space, built on one shared record of every file on the user's disks and remote storage. Its goal is a WizTree-grade GUI that is easier to read and use than existing tools.
+One place to see and manage everything about your device: its files, apps, network and performance, and a global search. Files is the first Module: finding files by name and finding what is consuming disk space, built on one shared record of every file on the user's disks and remote storage, with a WizTree-grade GUI that is easier to read and use than existing tools.
 
 ## Language
+
+**Module**:
+A top-level area of the app with its own pages, such as Files. Later Modules cover apps, network, performance and global search.
+_Avoid_: tool, feature, plugin, section
 
 ### The Index
 
@@ -31,7 +35,7 @@ An Indexed Volume that is not currently mounted. Its Entries stay in the Index a
 _Avoid_: missing drive, disconnected, unplugged
 
 **Remote**:
-Storage reached over a network protocol (S3, FTP, WebDAV, Azure Blob, SFTP or SSH) without mounting it. Remotes are read-only: the app never changes or removes their Entries, and they have no Trash.
+Storage reached over a network protocol (S3, FTP, WebDAV, Azure Blob, SFTP or SSH) without mounting it. Remotes are read-only: the app never changes or removes their Entries, and they have no Trash. A Remote may carry a name the user gave it, shown in place of its address.
 _Avoid_: cloud, network drive, server, share
 
 **Last Synced**:
@@ -41,6 +45,14 @@ _Avoid_: last updated, last scan, last refresh
 **Catch-up**:
 Bringing a Location up to date with changes made while the app was not running, done at launch for Locations whose Last Synced is stale. On macOS a Volume with a saved event id is caught up by replaying the changes since it instead of a re-walk.
 _Avoid_: rescan, resync, refresh
+
+**Sync**:
+One full re-walk that brings a Location, or one folder in it, up to date. A Sync of a whole Location resets its Last Synced. The user starts one with Sync now; Catch-up and the periodic Sync run on their own.
+_Avoid_: rescan, reindex, refresh, resync
+
+**Task**:
+One piece of work the app does in the background: a Sync, a Catch-up, a Duplicate search, a Cleaner search, a Clean, a Trash, an Empty Trash or a Compare.
+_Avoid_: job, operation, process, activity
 
 **Live updates**:
 Following changes to a local Volume while the app runs, from FSEvents on macOS or the opt-in `fanotify` helper on Linux, instead of waiting for a re-walk. On macOS the same source also provides Catch-up, by replaying the changes since the last saved event id.
@@ -83,6 +95,14 @@ _Avoid_: file type, kind, group
 A file on a Volume whose content is identical to another file's, confirmed by hash. Hard links to one file are not Duplicates.
 _Avoid_: copy, twin, same file
 
+**Duplicate Exclusions**:
+A Query naming Entries that the search for Duplicates treats as absent, because they are copies by design: dependency, build-output, version-control and package-cache folders.
+_Avoid_: ignore list, duplicate filter
+
+**Owner**:
+The program, game, package or project that a folder belongs to, such as a Steam game, the operating system or a code project.
+_Avoid_: app, vendor, source
+
 ### Views
 
 **Dashboard**:
@@ -101,7 +121,7 @@ _Avoid_: search, filter, find
 A Query kept under a name in the settings, to apply again from the Explorer. Saving under an existing name (ignoring case) replaces that Query.
 
 **Treemap**:
-The panel that draws Filtered Sizes as nested rectangles coloured by Category. It draws the folder everything the Query shows sits in; zooming into a folder (on the Treemap or in a list) adds that folder to the Query, so the tree and flat list follow and the Query can still be refined.
+The panel that draws Filtered Sizes as nested rectangles coloured by Category. It draws the folder everything the Query shows sits in; zooming into a folder (on the Treemap or in a list) adds that folder to the Query, so the tree and flat list follow and the Query can still be refined. Folders down to the chosen **Depth** carry a header with their name and size.
 _Avoid_: size map, block view
 
 ### Changes

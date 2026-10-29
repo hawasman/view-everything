@@ -2,6 +2,7 @@
 
 use crate::engine::{Repaint, Shared};
 use crate::format;
+use crate::tasks::{Outcome, TaskKind};
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, v_flex};
@@ -48,8 +49,8 @@ pub struct PurgeFailure {
 
 /// Permanently removes everything in the trash, item by item, so one item that can't be
 /// deleted doesn't stop the others.
-pub fn empty_trash() -> Result<EmptyOutcome, String> {
-    platform::empty_trash()
+pub fn empty_trash(progress: &dyn Fn(u64, u64)) -> Result<EmptyOutcome, String> {
+    platform::empty_trash(progress)
 }
 
 /// Opens the system trash in the file manager.
@@ -71,10 +72,15 @@ pub fn delete_as_admin(paths: &[PathBuf]) -> Result<(), String> {
 /// Empties the trash one item at a time where the `trash` crate can list it (Windows and
 /// freedesktop systems). `admin_paths` says how to delete an item the user may not.
 #[cfg(not(target_os = "macos"))]
-fn purge_each(admin_paths: impl Fn(&trash::TrashItem, &trash::Error) -> Option<Vec<PathBuf>>) -> Result<EmptyOutcome, String> {
+fn purge_each(
+    admin_paths: impl Fn(&trash::TrashItem, &trash::Error) -> Option<Vec<PathBuf>>,
+    progress: &dyn Fn(u64, u64),
+) -> Result<EmptyOutcome, String> {
     let items = trash::os_limited::list().map_err(|e| e.to_string())?;
+    let total = items.len() as u64;
+    progress(0, total);
     let mut outcome = EmptyOutcome::default();
-    for item in items {
+    for (k, item) in items.into_iter().enumerate() {
         let original = item.original_path();
         match trash::os_limited::purge_all([&item]) {
             Ok(()) => outcome.purged += 1,
@@ -87,6 +93,7 @@ fn purge_each(admin_paths: impl Fn(&trash::TrashItem, &trash::Error) -> Option<V
                 });
             }
         }
+        progress(k as u64 + 1, total);
     }
     Ok(outcome)
 }
@@ -107,21 +114,24 @@ mod platform {
         Some(items.fold((0, 0), |(bytes, count), entry| (bytes + on_disk_size(&entry.path()), count + 1)))
     }
 
-    pub fn empty_trash() -> Result<EmptyOutcome, String> {
-        super::purge_each(|item, error| {
-            let trash::Error::FileSystem { source, .. } = error else {
-                return None;
-            };
-            if source.kind() != std::io::ErrorKind::PermissionDenied {
-                return None;
-            }
-            // On freedesktop systems an item's id is its `.trashinfo` file; the item itself
-            // sits in the sibling `files` folder under the same name.
-            let info = PathBuf::from(&item.id);
-            let trash = info.parent()?.parent()?;
-            let file = trash.join("files").join(info.file_stem()?);
-            Some(vec![file, info])
-        })
+    pub fn empty_trash(progress: &dyn Fn(u64, u64)) -> Result<EmptyOutcome, String> {
+        super::purge_each(
+            |item, error| {
+                let trash::Error::FileSystem { source, .. } = error else {
+                    return None;
+                };
+                if source.kind() != std::io::ErrorKind::PermissionDenied {
+                    return None;
+                }
+                // On freedesktop systems an item's id is its `.trashinfo` file; the item itself
+                // sits in the sibling `files` folder under the same name.
+                let info = PathBuf::from(&item.id);
+                let trash = info.parent()?.parent()?;
+                let file = trash.join("files").join(info.file_stem()?);
+                Some(vec![file, info])
+            },
+            progress,
+        )
     }
 
     pub fn admin_command(paths: &[PathBuf]) -> Vec<String> {
@@ -202,8 +212,8 @@ mod platform {
 
     /// Windows runs the app elevated when it can, so items it can't delete are reported, not
     /// retried with more rights.
-    pub fn empty_trash() -> Result<EmptyOutcome, String> {
-        super::purge_each(|_, _| None)
+    pub fn empty_trash(progress: &dyn Fn(u64, u64)) -> Result<EmptyOutcome, String> {
+        super::purge_each(|_, _| None, progress)
     }
 
     pub fn admin_command(_paths: &[PathBuf]) -> Vec<String> {
@@ -235,7 +245,7 @@ mod platform {
         None
     }
 
-    pub fn empty_trash() -> Result<EmptyOutcome, String> {
+    pub fn empty_trash(_progress: &dyn Fn(u64, u64)) -> Result<EmptyOutcome, String> {
         Err("emptying the Trash is not supported on macOS; use Finder".into())
     }
 
@@ -298,6 +308,16 @@ impl Trash {
         });
     }
 
+    /// Moving to the Trash is running.
+    pub fn trashing(&self) -> bool {
+        self.shared.tasks.is_running(TaskKind::Trash)
+    }
+
+    /// Empty Trash is running.
+    pub fn emptying(&self) -> bool {
+        self.shared.tasks.is_running(TaskKind::EmptyTrash)
+    }
+
     pub fn open(&self, window: &mut Window, cx: &mut App) {
         if let Err(e) = open_trash() {
             window.push_notification(Notification::error(format!("Could not open the Trash: {e}")), cx);
@@ -312,6 +332,9 @@ impl Trash {
 
     /// Asks before moving `ids` to the Trash. Says why instead when they can't go.
     pub fn ask_trash(&self, ids: &[EntryId], volumes: &[VolumeInfo], window: &mut Window, cx: &mut App) {
+        if self.trashing() {
+            return;
+        }
         let (items, total) = {
             let index = self.shared.index.read();
             let ids = top_level(&index, ids);
@@ -360,6 +383,9 @@ impl Trash {
 
     /// Asks before permanently deleting everything in the Trash.
     pub fn ask_empty(&self, window: &mut Window, cx: &mut App) {
+        if self.emptying() {
+            return;
+        }
         let this = self.clone();
         let amount = self.size().map_or_else(|| "everything".to_owned(), format::size);
         window.open_alert_dialog(cx, move |dialog, _, _| {
@@ -422,7 +448,17 @@ impl Trash {
     }
 
     fn start_trash(&self, items: Vec<PathBuf>, window: &mut Window, cx: &mut App) {
+        if self.trashing() {
+            return;
+        }
         let this = self.clone();
+        let total = items.len() as u64;
+        let task = self
+            .shared
+            .tasks
+            .begin(TaskKind::Trash, format!("Move {total} item(s) to the Trash"), false);
+        task.set_progress(0, Some(total));
+        (self.repaint)();
         window
             .spawn(cx, async move |cx| {
                 let outcome = cx
@@ -430,7 +466,24 @@ impl Trash {
                     .spawn(async move {
                         // Check the disk first: anything already gone just leaves the Index.
                         let (present, missing): (Vec<_>, Vec<_>) = items.into_iter().partition(|p| std::fs::symlink_metadata(p).is_ok());
-                        let result = if present.is_empty() { Ok(()) } else { move_to_trash(&present) };
+                        // One by one, so progress is real and a failure leaves the rest moved.
+                        let mut errors: Vec<String> = Vec::new();
+                        task.set_progress(missing.len() as u64, Some(total));
+                        for (k, path) in present.iter().enumerate() {
+                            if let Err(e) = move_to_trash(std::slice::from_ref(path)) {
+                                errors.push(e);
+                            }
+                            task.set_progress((missing.len() + k + 1) as u64, Some(total));
+                        }
+                        let result = match errors.as_slice() {
+                            [] => Ok(()),
+                            [only] => Err(only.clone()),
+                            [first, ..] => Err(format!("{} items could not be moved; the first: {first}", errors.len())),
+                        };
+                        task.finish(match &result {
+                            Ok(()) => Outcome::Done(format!("Moved {} item(s)", crate::format::count(present.len() as u64))),
+                            Err(e) => Outcome::Failed(e.clone()),
+                        });
                         (present, missing, result)
                     })
                     .await;
@@ -456,10 +509,36 @@ impl Trash {
     }
 
     fn start_empty(&self, window: &mut Window, cx: &mut App) {
+        if self.emptying() {
+            return;
+        }
         let this = self.clone();
+        let task = self.shared.tasks.begin(TaskKind::EmptyTrash, "Empty the Trash".into(), false);
+        (self.repaint)();
         window
             .spawn(cx, async move |cx| {
-                let result = cx.background_executor().spawn(async { empty_trash() }).await;
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let result = empty_trash(&|k, n| task.set_progress(k, Some(n)));
+                        task.finish(match &result {
+                            Ok(o) if o.failed.is_empty() => {
+                                Outcome::Done(format!("Emptied the Trash ({} item(s))", crate::format::count(o.purged as u64)))
+                            }
+                            Ok(o) => {
+                                let admin = o.failed.iter().filter(|f| f.admin_paths.is_some()).count();
+                                let other = o.failed.len() - admin;
+                                if other == 0 {
+                                    Outcome::Done(format!("{admin} item(s) need an administrator"))
+                                } else {
+                                    Outcome::Failed(format!("{other} item(s) could not be removed"))
+                                }
+                            }
+                            Err(e) => Outcome::Failed(e.clone()),
+                        });
+                        result
+                    })
+                    .await;
                 this.measure();
                 cx.update(|window, cx| match result {
                     Err(e) => window.push_notification(Notification::error(format!("Could not empty the Trash: {e}")), cx),
@@ -467,11 +546,11 @@ impl Trash {
                         let (needs_admin, other): (Vec<_>, Vec<_>) = outcome.failed.into_iter().partition(|f| f.admin_paths.is_some());
                         let mut text = match outcome.purged {
                             0 => String::new(),
-                            n => format!("Permanently deleted {n} item(s) from the Trash."),
+                            n => format!("Emptied the Trash: {n} item(s) gone."),
                         };
                         if let Some(first) = other.first() {
                             text.push_str(&format!(
-                                " {} item(s) could not be deleted: {} ({})",
+                                " {} item(s) could not be removed: {} ({})",
                                 other.len(),
                                 first.original.display(),
                                 first.error
@@ -498,7 +577,7 @@ impl Trash {
                 this.measure();
                 cx.update(|window, cx| {
                     let note = match result {
-                        Ok(()) => Notification::info("Deleted the remaining Trash items as administrator."),
+                        Ok(()) => Notification::info("Emptied the remaining Trash items as administrator."),
                         Err(e) => Notification::warning(format!("Left in the Trash: {e}")),
                     };
                     window.push_notification(note, cx);

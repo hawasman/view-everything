@@ -1,9 +1,11 @@
 //! The Settings page: which Volumes are indexed, how often they are re-read, and the theme.
 
 use crate::engine::{Intervals, last_synced_label};
-use crate::settings::{Settings, ThemeChoice};
+use crate::settings::{Settings, ThemeChoice, default_duplicate_exclusions};
 use crate::theme::{self, SERIF_FAMILY, palette};
 use crate::ui::{Tone, caption, panel, pill, tag};
+use chrono::Local;
+use gpui_kit::component::Disableable as _;
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -13,10 +15,14 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use ve_core::{AzureRemote, FtpRemote, FtpTls, Remote, S3Remote, WebdavRemote};
+use ve_core::paths::load_categories;
+use ve_core::{AzureRemote, CategoryMap, FtpRemote, FtpTls, Query, QueryContext, Remote, S3Remote, WebdavRemote};
 use ve_scan::VolumeInfo;
+
+/// How long typing in the Duplicate Exclusions pauses before they are saved.
+const EXCLUSIONS_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// The protocol tabs of the Add Remote dialog.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -358,7 +364,7 @@ pub struct Changed {
     pub live_helper: bool,
 }
 
-/// The user asked to Refresh the Remote with this identity now.
+/// The user asked to Sync the Remote with this identity now.
 pub struct Refresh(pub String);
 
 /// The user asked to check for a newer version now.
@@ -379,10 +385,20 @@ pub struct SettingsPage {
     /// The Cleaner's age limits for pre-ticking temporary files and build artefacts.
     temp_days: DaysSelect,
     build_days: DaysSelect,
+    /// The Duplicate Exclusions field, and why its text is not a usable Query.
+    exclusions: Entity<InputState>,
+    exclusions_error: Option<String>,
+    /// The pending save of typed exclusions; dropping it cancels the save.
+    exclusions_pending: Option<gpui::Task<()>>,
+    /// The category names a Query may use, read once.
+    categories: CategoryMap,
+    /// A start-at-login change is in flight.
+    login_busy: bool,
     /// Set when the settings file could not be written.
     problem: Option<String>,
     /// Fields of the Remote dialog.
     remote_host: Entity<InputState>,
+    remote_name: Entity<InputState>,
     remote_path: Entity<InputState>,
     remote_every: RefreshSelect,
     s3: S3Form,
@@ -406,6 +422,8 @@ pub struct SettingsPage {
     remote_refresh: Vec<RefreshSelect>,
     /// Last Synced of each Remote by identity, as the Engine reports it.
     remote_synced: HashMap<String, Option<i64>>,
+    /// Identities of the Locations being synced now.
+    syncing: HashSet<String>,
     /// What the last update check found, for the Updates section.
     #[cfg(feature = "updater")]
     update_status: String,
@@ -437,6 +455,7 @@ impl SettingsPage {
         let build_days = Self::days_select(settings.cleaner_build_days, true, window, cx);
         let remote_host = cx.new(|cx| InputState::new(window, cx).placeholder("user@host or ssh config alias"));
         let remote_path = cx.new(|cx| InputState::new(window, cx).placeholder("/srv/backup"));
+        let remote_name = cx.new(|cx| InputState::new(window, cx).placeholder("Shown instead of the address"));
         let (items, manual) = refresh_items(0);
         let remote_every = cx.new(|cx| SelectState::new(items, Some(manual), window, cx));
         let remote_refresh = Self::remote_selects(&settings, window, cx);
@@ -457,6 +476,22 @@ impl SettingsPage {
             })
             .detach();
         }
+        let exclusions = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("A Query, e.g. \"*/node_modules/*\"|\"*/.git/*\"")
+                .default_value(settings.duplicate_exclusions.clone())
+        });
+        cx.subscribe(&exclusions, |this, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let text = input.read(cx).value().to_string();
+                this.exclusions_pending = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(EXCLUSIONS_DEBOUNCE).await;
+                    let _ = this.update(cx, |this, cx| this.set_exclusions(text, cx));
+                }));
+            }
+        })
+        .detach();
+        let categories = load_categories().unwrap_or_else(|_| CategoryMap::builtin());
         Self {
             settings,
             offline: Vec::new(),
@@ -465,9 +500,15 @@ impl SettingsPage {
             volume_refresh,
             temp_days,
             build_days,
+            exclusions,
+            exclusions_error: None,
+            exclusions_pending: None,
+            categories,
+            login_busy: false,
             problem: None,
             remote_host,
             remote_path,
+            remote_name,
             remote_every,
             s3,
             ftp,
@@ -490,6 +531,7 @@ impl SettingsPage {
             check_run: 0,
             remote_refresh,
             remote_synced: HashMap::new(),
+            syncing: HashSet::new(),
             #[cfg(feature = "updater")]
             update_status: String::new(),
         }
@@ -549,12 +591,15 @@ impl SettingsPage {
         {
             ve_scan::remote::forget_secret(o);
         }
+        let named = remote.clone();
         match &old {
             Some(o) => self.settings.replace_remote(o, remote, minutes),
             None => {
                 self.settings.add_remote(remote, minutes);
             }
         }
+        let typed = self.remote_name.read(cx).value().to_string();
+        self.settings.set_remote_name(&named, &typed);
         self.editing = None;
         self.remote_refresh = Self::remote_selects(&self.settings, window, cx);
         self.commit(cx);
@@ -615,6 +660,14 @@ impl SettingsPage {
     pub fn set_remote_synced(&mut self, synced: HashMap<String, Option<i64>>, cx: &mut Context<Self>) {
         if self.remote_synced != synced {
             self.remote_synced = synced;
+            cx.notify();
+        }
+    }
+
+    /// Replaces the identities of the Locations being synced now.
+    pub fn set_syncing(&mut self, syncing: HashSet<String>, cx: &mut Context<Self>) {
+        if self.syncing != syncing {
+            self.syncing = syncing;
             cx.notify();
         }
     }
@@ -684,6 +737,55 @@ impl SettingsPage {
                 "Pre-ticked when nothing in the project changed for this long",
                 &self.build_days,
             ))
+    }
+
+    fn duplicate_exclusions_editor(&self, cx: &mut Context<Self>) -> Div {
+        let error = self.exclusions_error.clone();
+        v_flex()
+            .gap(px(8.))
+            .child(div().font_weight(FontWeight::MEDIUM).child("Duplicate Exclusions"))
+            .child(caption(
+                "A Query for files a Duplicate search leaves out. A folder name such as \"target\" or \"vendor\" matches at any depth, anywhere in your files.",
+                cx,
+            ))
+            .child(Input::new(&self.exclusions))
+            .when_some(error, |d, e| d.child(div().text_xs().text_color(palette(cx).negative).child(e)))
+            .child(
+                h_flex().child(
+                    pill("exclusions-reset", "Reset to default")
+                        .small()
+                        .disabled(
+                            (self.settings.duplicate_exclusions == default_duplicate_exclusions() && self.exclusions_error.is_none())
+                                .then_some("Already the default"),
+                        )
+                        .build(
+                            cx,
+                            cx.listener(|this, _, window, cx| {
+                                let text = default_duplicate_exclusions();
+                                this.exclusions.update(cx, |input, cx| input.set_value(text.clone(), window, cx));
+                                this.set_exclusions(text, cx);
+                            }),
+                        ),
+                ),
+            )
+    }
+
+    /// Keeps the typed Duplicate Exclusions when they parse as a Query; otherwise shows why not
+    /// and keeps the saved text, which the Engine goes on using.
+    fn set_exclusions(&mut self, text: String, cx: &mut Context<Self>) {
+        self.exclusions_pending = None;
+        let context = QueryContext::new(self.categories.clone(), Local::now());
+        match Query::parse(&text, &context) {
+            Ok(_) => {
+                self.exclusions_error = None;
+                if self.settings.duplicate_exclusions != text {
+                    self.settings.duplicate_exclusions = text;
+                    self.commit(cx);
+                }
+            }
+            Err(e) => self.exclusions_error = Some(e.to_string()),
+        }
+        cx.notify();
     }
 
     pub fn has_problem(&self) -> bool {
@@ -761,7 +863,7 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// A Remote: its host and path or bucket, the Remote · protocol tag, Last Synced with Refresh now and Edit, and Remove.
+    /// A Remote: its host and path or bucket, the Remote · protocol tag, Last Synced with Sync now and Edit, and Remove.
     fn remote_row(&self, ix: usize, first: bool, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
         let remote = self.settings.remotes[ix].clone();
@@ -784,7 +886,12 @@ impl SettingsPage {
                         h_flex()
                             .gap(px(8.))
                             .items_center()
-                            .child(div().font_weight(FontWeight::MEDIUM).truncate().child(remote.label()))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .truncate()
+                                    .child(self.settings.remote_display_name(&remote)),
+                            )
                             .child(tag(format!("Remote · {}", remote.kind()), Tone::Neutral, cx)),
                     )
                     .child(
@@ -792,14 +899,31 @@ impl SettingsPage {
                             .gap(px(8.))
                             .text_xs()
                             .text_color(p.muted)
+                            .when(self.settings.remote_name(&remote).is_some(), |d| {
+                                d.child(div().truncate().child(remote.label()))
+                            })
                             .child(format!("{label} · Read-only"))
                             .child(
                                 div()
                                     .id(("refresh-remote", ix))
-                                    .cursor_pointer()
-                                    .text_color(p.accent)
-                                    .child("Refresh now")
-                                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(Refresh(refresh_identity.clone())))),
+                                    .when(self.syncing.contains(&identity), |d| {
+                                        d.flex()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .text_color(p.muted)
+                                            .child(
+                                                gpui_kit::component::spinner::Spinner::new()
+                                                    .with_size(gpui_kit::component::Size::XSmall)
+                                                    .color(p.muted),
+                                            )
+                                            .child("Syncing…")
+                                    })
+                                    .when(!self.syncing.contains(&identity), |d| {
+                                        d.cursor_pointer()
+                                            .text_color(p.accent)
+                                            .child("Sync now")
+                                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(Refresh(refresh_identity.clone()))))
+                                    }),
                             )
                             .child(
                                 div()
@@ -900,8 +1024,33 @@ impl SettingsPage {
                             })),
                     ),
             )
-            // Room for the Forget link of an Offline Volume.
-            .child(div().w(px(64.)).flex_none())
+            .child({
+                let identity = volume.identity.clone();
+                let busy = self.syncing.contains(&identity);
+                div()
+                    .id(("sync-volume", ix))
+                    .w(px(84.))
+                    .flex_none()
+                    .text_xs()
+                    .when(busy, |d| {
+                        d.flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .text_color(muted)
+                            .child(
+                                gpui_kit::component::spinner::Spinner::new()
+                                    .with_size(gpui_kit::component::Size::XSmall)
+                                    .color(muted),
+                            )
+                            .child("Syncing…")
+                    })
+                    .when(!busy, |d| {
+                        d.cursor_pointer()
+                            .text_color(p.accent)
+                            .child("Sync now")
+                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(Refresh(identity.clone()))))
+                    })
+            })
             .into_any_element()
     }
 
@@ -956,6 +1105,69 @@ impl SettingsPage {
                 )
                 .child("Follow file changes live (asks for administrator authentication)"),
         )
+    }
+
+    /// The Background section: keep running in the tray, and start at login.
+    fn background(&self, cx: &mut Context<Self>) -> Div {
+        let tray = cx.try_global::<crate::host::Host>().is_some_and(|h| h.has_tray());
+        let p = palette(cx);
+        let keep = h_flex()
+            .gap(px(12.))
+            .items_center()
+            .child(
+                Switch::new("keep-in-tray")
+                    .checked(self.settings.keep_in_tray && tray)
+                    .disabled(!tray)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        this.settings.keep_in_tray = *on;
+                        this.commit(cx);
+                    })),
+            )
+            .child(
+                div()
+                    .text_color(if tray { p.text } else { p.muted })
+                    .child("Closing the window keeps the app in the tray"),
+            )
+            .when(!tray, |d| {
+                d.child(caption("No system tray found (GNOME needs the AppIndicator extension)", cx))
+            });
+        let login = h_flex()
+            .gap(px(12.))
+            .items_center()
+            .child(
+                Switch::new("start-at-login")
+                    .checked(self.settings.start_at_login)
+                    .disabled(self.login_busy)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| this.set_start_at_login(*on, cx))),
+            )
+            .child("Start at login");
+        panel(cx).child(v_flex().gap(px(16.)).child(keep).child(login))
+    }
+
+    /// Saves the setting, then makes (or removes) the login entry off the UI thread: on Windows
+    /// that waits for the elevation prompt. A failure puts the switch back and says why.
+    fn set_start_at_login(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.login_busy {
+            return;
+        }
+        let before = self.settings.start_at_login;
+        self.login_busy = true;
+        self.settings.start_at_login = on;
+        self.commit(cx);
+        cx.spawn(async move |this, cx| {
+            let done = cx.background_executor().spawn(async move { crate::autostart::set(on) }).await;
+            this.update(cx, |this, cx| {
+                this.login_busy = false;
+                if let Err(why) = done {
+                    this.settings.start_at_login = before;
+                    this.commit(cx);
+                    this.problem = Some(why);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The Updates section: the daily-check switch, Check now and what the last check found.
@@ -1021,6 +1233,7 @@ impl SettingsPage {
         self.editing = editing;
         self.forget_check(cx);
         let (host, path, every) = (self.remote_host.clone(), self.remote_path.clone(), self.remote_every.clone());
+        let name = self.remote_name.clone();
         let (form, ftp_form) = (self.s3.clone(), self.ftp.clone());
         let (dav_form, azure_form) = (self.webdav.clone(), self.azure.clone());
         let page = cx.entity();
@@ -1082,7 +1295,7 @@ impl SettingsPage {
             let refresh = Select::new(&every).w_full();
             let refresh = v_flex()
                 .gap(px(8.))
-                .child(div().font_weight(FontWeight::MEDIUM).child("Refresh"))
+                .child(div().font_weight(FontWeight::MEDIUM).child("Sync"))
                 .child(refresh);
             let body =
                 if shown_tab == RemoteTab::S3 {
@@ -1271,6 +1484,7 @@ impl SettingsPage {
                         )
                         // An edited Remote stays the kind it is.
                         .when(!editing, |d| d.child(tabs))
+                        .child(field("Name (optional)", &name))
                         .child(body)
                         .when_some(outcome, |d, (color, line)| d.child(div().text_color(color).child(line))),
                 )
@@ -1312,6 +1526,12 @@ impl SettingsPage {
         {
             set(input, "", window, cx);
         }
+        set(
+            &self.remote_name,
+            remote.map_or("", |r| self.settings.remote_name(r).unwrap_or("")),
+            window,
+            cx,
+        );
         secret_hint(&self.s3.secret, false, window, cx);
         secret_hint(&self.ftp.password, false, window, cx);
         secret_hint(&self.webdav.password, false, window, cx);
@@ -1393,7 +1613,7 @@ impl Render for SettingsPage {
             .text_color(muted)
             .gap(px(16.))
             .child(div().flex_1().child("Location"))
-            .child(div().w(px(150.)).flex_none().child("Refresh interval"))
+            .child(div().w(px(150.)).flex_none().child("Sync interval"))
             .child(div().w(px(36.)).flex_none().child("Index"))
             .child(div().w(px(64.)).flex_none());
         let default = h_flex()
@@ -1406,7 +1626,7 @@ impl Render for SettingsPage {
             .child(
                 v_flex()
                     .flex_1()
-                    .child(div().font_weight(FontWeight::MEDIUM).child("Default refresh interval"))
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Default sync interval"))
                     .child(
                         div()
                             .text_xs()
@@ -1426,11 +1646,30 @@ impl Render for SettingsPage {
             .child(default);
         let showing = if cx.theme().is_dark() { "dark" } else { "light" };
         let theme = panel(cx)
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(self.theme_buttons(cx))
-            .child(caption(format!("Showing {showing}"), cx));
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .child(self.theme_buttons(cx))
+                    .child(caption(format!("Showing {showing}"), cx)),
+            )
+            .child(
+                h_flex()
+                    .mt(px(16.))
+                    .gap(px(12.))
+                    .items_center()
+                    .child(
+                        Switch::new("reduce-motion")
+                            .checked(self.settings.reduce_motion)
+                            .on_click(cx.listener(|this, on: &bool, _, cx| {
+                                this.settings.reduce_motion = *on;
+                                crate::motion::apply(*on, cx);
+                                this.commit(cx);
+                            })),
+                    )
+                    .child("Reduce motion")
+                    .child(caption("Off follows the operating system.", cx)),
+            );
         let mut column = v_flex()
             .w_full()
             .max_w(px(1164.))
@@ -1456,17 +1695,24 @@ impl Render for SettingsPage {
             )
             .child(section(
                 "Locations",
-                "Volumes are indexed by default. Removable Volumes and mounted network shares are opt-in. An Offline Volume stays searchable until you forget it. Remotes are read-only and refresh only when you ask unless you set an interval.",
+                "Volumes are indexed by default. Removable Volumes and mounted network shares are opt-in. An Offline Volume stays searchable until you forget it. Remotes are read-only and sync only when you ask unless you set an interval.",
                 locations,
                 cx,
             ))
             .child(div().h(px(1.)).bg(border))
-            .child(section("Theme", "System follows the operating system and changes with it.", theme, cx))
+            .child(section("Theme", "System follows the operating system and changes with it. Reduce motion turns off the short transitions.", theme, cx))
             .child(div().h(px(1.)).bg(border))
             .child(section(
                 "Cleaner",
                 "The Cleaner pre-ticks only what has been left alone long enough. Caches and node_modules are never pre-ticked.",
                 panel(cx).child(self.cleaner_limits(cx)),
+                cx,
+            ))
+            .child(div().h(px(1.)).bg(border))
+            .child(section(
+                "Duplicates",
+                "Files this Query matches are left out of Duplicate searches, as if they did not exist. The default skips dependency, build, VCS and package-cache folders.",
+                panel(cx).child(self.duplicate_exclusions_editor(cx)),
                 cx,
             ));
         #[cfg(target_os = "linux")]
@@ -1479,6 +1725,13 @@ impl Render for SettingsPage {
                 cx,
             ));
         }
+        let background = self.background(cx);
+        column = column.child(div().h(px(1.)).bg(border)).child(section(
+            "Background",
+            "The app can keep running in the system tray after its window closes, so the Index stays fresh and Live updates keep running, and can start when you log in.",
+            background,
+            cx,
+        ));
         #[cfg(feature = "updater")]
         {
             let updates = self.updates(cx);

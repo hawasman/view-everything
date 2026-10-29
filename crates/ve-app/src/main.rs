@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod autostart;
 #[cfg(feature = "bench")]
 mod bench;
 mod categories;
@@ -11,16 +12,24 @@ mod dashboard;
 mod dashboard_summary;
 mod duplicates;
 mod engine;
+mod entry_actions;
 mod explorer;
 mod export;
 mod filters;
 mod format;
+mod host;
+mod locations;
+mod motion;
 mod scope;
 mod selection;
+mod selection_panel;
 mod settings;
 mod settings_page;
+mod tasks;
 mod theme;
 mod trash;
+mod tray;
+mod tray_icon;
 mod tree;
 mod treemap;
 mod ui;
@@ -91,29 +100,15 @@ fn main() {
         });
     }
 
-    gpui_kit::application().with_assets(theme::Assets).run(move |cx| {
-        gpui_kit::init(cx);
-        theme::init(settings.theme, cx);
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1440.), px(900.)), cx))),
-            window_min_size: Some(size(px(720.), px(480.))),
-            titlebar: Some(TitlebarOptions {
-                title: Some(app::APP_NAME.into()),
-                ..Default::default()
-            }),
-            app_id: Some("view-everything".into()),
-            ..Default::default()
-        };
-        gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| app::Shell::new(settings, categories, volumes, problems, window, cx))
-        })
-        .expect("failed to open window");
-        cx.activate(true);
-    });
+    let login = autostart::started_at_login();
+    gpui_kit::application()
+        .with_assets(theme::Assets)
+        // The app outlives its windows while it sits in the tray; Host decides when to quit.
+        .with_quit_mode(QuitMode::Explicit)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            theme::init(settings.theme, cx);
+            motion::init(settings.reduce_motion, cx);
+            host::Host::start(&settings, categories, volumes, problems, login, cx);
+        });
 }

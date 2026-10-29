@@ -109,6 +109,9 @@ struct Listed {
 
 impl<'a> Walk<'a> {
     fn visit<'s>(&'s self, scope: &rayon::Scope<'s>, dir: EntryId, path: PathBuf) {
+        if self.progress.cancelled() {
+            return;
+        }
         // An unreadable folder keeps what the Index already knows about it: the failure may be
         // passing, and stale is better than silently losing a subtree.
         let Some(listing) = self.list(&path) else {

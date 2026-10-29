@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use ve_core::{Index, Remote};
+use ve_core::{BitSet, Index, Remote};
 use ve_scan::duplicates::{HashCache, HashProgress, find};
 use ve_scan::{Progress, SharedIndex, VolumeInfo};
 
@@ -23,7 +23,99 @@ fn scanned(root: &Path) -> SharedIndex {
 }
 
 fn run(index: &SharedIndex, cache: &mut HashCache) -> (Vec<ve_scan::duplicates::Group>, ve_scan::duplicates::Stats) {
-    find(index, cache, 1, &HashProgress::default(), &AtomicBool::new(false))
+    let none = BitSet::new(index.read().capacity());
+    find(index, cache, 1, &none, &HashProgress::default(), &AtomicBool::new(false))
+}
+
+/// Runs a search excluding every file whose full path contains `part`.
+fn run_excluding(index: &SharedIndex, cache: &mut HashCache, part: &str) -> (Vec<ve_scan::duplicates::Group>, ve_scan::duplicates::Stats) {
+    let excluded = {
+        let index = index.read();
+        let mut set = BitSet::new(index.capacity());
+        for i in 0..index.capacity() {
+            let id = ve_core::EntryId(i as _);
+            if index.is_live(id) && index.path(id).to_string_lossy().contains(part) {
+                set.insert(i);
+            }
+        }
+        set
+    };
+    find(index, cache, 1, &excluded, &HashProgress::default(), &AtomicBool::new(false))
+}
+
+#[test]
+fn excluded_copies_are_dropped_and_counted() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir(tmp.path().join("node_modules")).unwrap();
+    fs::write(tmp.path().join("a.bin"), body(1, 5000)).unwrap();
+    fs::write(tmp.path().join("b.bin"), body(1, 5000)).unwrap();
+    fs::write(tmp.path().join("node_modules/c.bin"), body(1, 5000)).unwrap();
+    let index = scanned(tmp.path());
+    let (groups, stats) = run_excluding(&index, &mut HashCache::default(), "node_modules");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].files.len(), 2, "the excluded copy is not listed");
+    assert_eq!(stats.excluded, 1);
+}
+
+#[test]
+fn an_excluded_hard_link_does_not_hide_its_other_link() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir(tmp.path().join("node_modules")).unwrap();
+    fs::write(tmp.path().join("node_modules/a.bin"), body(1, 5000)).unwrap();
+    fs::hard_link(tmp.path().join("node_modules/a.bin"), tmp.path().join("z.bin")).unwrap();
+    fs::write(tmp.path().join("b.bin"), body(1, 5000)).unwrap();
+    let index = scanned(tmp.path());
+    let (groups, stats) = run_excluding(&index, &mut HashCache::default(), "node_modules");
+    assert_eq!(groups.len(), 1, "z.bin still pairs with b.bin");
+    assert_eq!(groups[0].files.len(), 2);
+    assert_eq!(stats.excluded, 1);
+}
+
+#[test]
+fn a_cancelled_search_leaves_the_cache_as_it_was() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("a.bin"), body(1, 5000)).unwrap();
+    fs::write(tmp.path().join("b.bin"), body(1, 5000)).unwrap();
+    let index = scanned(tmp.path());
+    let mut cache = HashCache::default();
+    run(&index, &mut cache);
+    let before = cache.len();
+    assert!(before > 0);
+    let none = BitSet::new(index.read().capacity());
+    let (groups, _) = find(&index, &mut cache, 1, &none, &HashProgress::default(), &AtomicBool::new(true));
+    assert!(groups.is_empty());
+    assert_eq!(cache.len(), before);
+}
+
+#[test]
+fn a_group_left_with_one_copy_disappears() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir(tmp.path().join("node_modules")).unwrap();
+    fs::write(tmp.path().join("a.bin"), body(1, 5000)).unwrap();
+    fs::write(tmp.path().join("node_modules/c.bin"), body(1, 5000)).unwrap();
+    let index = scanned(tmp.path());
+    let (groups, stats) = run_excluding(&index, &mut HashCache::default(), "node_modules");
+    assert!(groups.is_empty());
+    assert_eq!(stats.excluded, 1);
+    assert_eq!(stats.partial_hashed, 0, "one file left, so nothing to compare");
+}
+
+#[test]
+fn excluding_keeps_cached_hashes() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir(tmp.path().join("node_modules")).unwrap();
+    fs::write(tmp.path().join("node_modules/a.bin"), body(1, 5000)).unwrap();
+    fs::write(tmp.path().join("node_modules/b.bin"), body(1, 5000)).unwrap();
+    let index = scanned(tmp.path());
+    let mut cache = HashCache::default();
+    run(&index, &mut cache);
+    let cached = cache.len();
+    assert!(cached > 0);
+    run_excluding(&index, &mut cache, "node_modules");
+    assert_eq!(cache.len(), cached);
+    let (groups, stats) = run(&index, &mut cache);
+    assert_eq!(groups.len(), 1);
+    assert_eq!((stats.partial_hashed, stats.full_hashed), (0, 0));
 }
 
 fn body(byte: u8, len: usize) -> Vec<u8> {

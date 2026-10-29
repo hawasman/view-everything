@@ -2,6 +2,7 @@
 //! with it, computed off the UI thread and kept current while the Index changes.
 
 use crate::engine::{Shared, snapshots_dir};
+use crate::tasks::{Outcome, TaskHandle, TaskKind};
 use crate::theme::{SERIF_FAMILY, palette};
 use crate::ui::pill;
 use chrono::{Local, NaiveDate};
@@ -10,6 +11,7 @@ use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use ve_core::snapshot::{self, Comparison, Snapshot};
 
@@ -50,6 +52,12 @@ impl Compare {
         self.active
     }
 
+    /// A comparison the user asked for is running as a Task (quiet recomputes as the Index
+    /// changes do not count, or the control would spin every few seconds).
+    pub fn working(&self) -> bool {
+        user_compare_running(&self.shared.tasks)
+    }
+
     /// Compares with the Snapshot of `date`, or stops comparing.
     pub fn choose(&mut self, date: Option<NaiveDate>, cx: &mut Context<Self>) {
         self.active = date;
@@ -58,7 +66,7 @@ impl Compare {
         if date.is_none() {
             cx.emit(CompareEvent::Result(None));
         }
-        self.start(cx);
+        self.start(true, cx);
         cx.notify();
     }
 
@@ -69,11 +77,13 @@ impl Compare {
             .as_ref()
             .is_some_and(|r| r.generation() != self.shared.index.read().generation());
         if stale && self.last.elapsed() >= REFRESH {
-            self.start(cx);
+            self.start(false, cx);
         }
     }
 
-    fn start(&mut self, cx: &mut Context<Self>) {
+    /// `user`: the comparison answers a choice the user made, so it is a Task they can see and
+    /// cancel; recomputing as the Index changes is quiet.
+    fn start(&mut self, user: bool, cx: &mut Context<Self>) {
         let Some(date) = self.active else { return };
         if self.working {
             return;
@@ -81,8 +91,12 @@ impl Compare {
         self.working = true;
         self.last = Instant::now();
         let (shared, known) = (self.shared.clone(), self.snapshot.clone());
+        let task = user.then(|| shared.tasks.begin(TaskKind::Compare, format!("Compare with {date}"), true));
+        let cancel = task.as_ref().map(TaskHandle::cancel_flag);
         cx.spawn(async move |this, cx| {
+            let stopped = cancel.clone();
             let work = cx.background_spawn(async move {
+                let stop = || cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed));
                 let snap = match known {
                     Some(snap) => snap,
                     None => {
@@ -91,24 +105,53 @@ impl Compare {
                         Arc::new(Snapshot::load(&path).map_err(|e| format!("Could not read the Snapshot of {date}: {e}"))?)
                     }
                 };
-                let comparison = snap.compare_with(|| shared.index.read());
+                if stop() {
+                    return Err("cancelled".to_owned());
+                }
+                let comparison = snap
+                    .compare_with(|| shared.index.read(), stop)
+                    .ok_or_else(|| "cancelled".to_owned())?;
                 Ok::<_, String>((snap, Arc::new(comparison)))
             });
             let done = work.await;
+            let cancelled = stopped.is_some_and(|c| c.load(Ordering::Relaxed));
             this.update(cx, |this, cx| {
                 this.working = false;
                 // The choice changed while this was running: its answer is for something else.
                 if this.active != Some(date) {
-                    this.start(cx);
+                    if let Some(task) = task {
+                        task.finish(Outcome::Cancelled);
+                    }
+                    this.start(true, cx);
+                    return;
+                }
+                if cancelled {
+                    if let Some(task) = task {
+                        task.finish(Outcome::Cancelled);
+                    }
+                    this.active = None;
+                    this.result = None;
+                    cx.emit(CompareEvent::Result(None));
+                    cx.notify();
                     return;
                 }
                 match done {
                     Ok((snap, comparison)) => {
+                        if let Some(task) = task {
+                            task.finish(Outcome::Done(format!("Compared with {date}")));
+                        }
                         this.snapshot = Some(snap);
                         this.result = Some(comparison.clone());
                         cx.emit(CompareEvent::Result(Some(comparison)));
                     }
                     Err(why) => {
+                        if let Some(task) = task {
+                            let again = cx.weak_entity();
+                            task.set_retry(Arc::new(move |cx| {
+                                again.update(cx, |c, cx| c.choose(Some(date), cx)).ok();
+                            }));
+                            task.finish(Outcome::Failed(why.clone()));
+                        }
                         this.active = None;
                         cx.emit(CompareEvent::Failed(why));
                         cx.emit(CompareEvent::Result(None));
@@ -212,5 +255,28 @@ impl Compare {
                         .child(pill("snapshot-close", "Close").build(cx, |_, window, cx| window.close_dialog(cx))),
                 )
         });
+    }
+}
+
+/// Whether a comparison the user asked for (a Task, not a quiet recompute) is running.
+fn user_compare_running(tasks: &crate::tasks::Tasks) -> bool {
+    tasks.is_running(TaskKind::Compare)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tasks::{Outcome, TaskKind, Tasks};
+
+    #[test]
+    fn only_a_compare_task_makes_the_control_busy() {
+        let tasks = Tasks::new();
+        assert!(!super::user_compare_running(&tasks));
+        let other = tasks.begin(TaskKind::Trash, "x".into(), false);
+        assert!(!super::user_compare_running(&tasks));
+        let task = tasks.begin(TaskKind::Compare, "Compare with 2026-01-01".into(), true);
+        assert!(super::user_compare_running(&tasks));
+        task.finish(Outcome::Cancelled);
+        other.finish(Outcome::Cancelled);
+        assert!(!super::user_compare_running(&tasks));
     }
 }

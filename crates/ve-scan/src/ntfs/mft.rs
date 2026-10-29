@@ -486,7 +486,8 @@ pub fn finish_record<R: Read + Seek>(
 }
 
 /// Reads every in-use record of the volume. Extension records are merged into their bases.
-pub fn read_all<R: Read + Seek>(reader: &mut R) -> io::Result<Vec<Record>> {
+/// Fails with `Interrupted` once `cancel` is raised.
+pub fn read_all<R: Read + Seek>(reader: &mut R, cancel: &std::sync::atomic::AtomicBool) -> io::Result<Vec<Record>> {
     let geometry = read_geometry(reader)?;
     let (runs, size) = mft_extents(reader, &geometry)?;
     let record_size = u64::from(geometry.record_size);
@@ -497,6 +498,9 @@ pub fn read_all<R: Read + Seek>(reader: &mut R) -> io::Result<Vec<Record>> {
     let mut extensions: Vec<Parsed> = Vec::new();
     let mut first = 0;
     while first < total {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(crate::cancelled_error());
+        }
         let count = per_chunk.min(total - first);
         let mut chunk = read_runs(reader, &geometry, &runs, first * record_size, (count * record_size) as usize)?;
         for (i, raw) in chunk.chunks_exact_mut(record_size as usize).enumerate() {

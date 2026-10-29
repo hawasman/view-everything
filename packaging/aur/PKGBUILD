@@ -11,7 +11,8 @@ license=('MIT' 'Apache-2.0' 'OFL-1.1')
 depends=('gcc-libs' 'glibc' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11' 'vulkan-icd-loader'
          'wayland' 'libglvnd')
 optdepends=('vulkan-driver: GPU rendering (any Vulkan ICD: mesa, nvidia-utils, ...)'
-            'polkit: live updates on Linux (Settings > Live updates)')
+            'polkit: live updates on Linux (Settings > Live updates)'
+            'gnome-shell-extension-appindicator: tray icon on GNOME (KDE and most other desktops need nothing)')
 makedepends=('cargo' 'git')
 provides=('view-everything')
 conflicts=('view-everything')

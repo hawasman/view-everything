@@ -200,6 +200,17 @@ impl Filters {
         terms.join(" ")
     }
 
+    /// The Query text with only the clauses the other fields wrote removed: Name, which holds the
+    /// scope and every free-typed term, stays as it is.
+    pub fn reset_text(&self) -> String {
+        let mut kept = Filters::read("");
+        kept.name = Field {
+            on: true,
+            value: self.name.value.clone(),
+        };
+        kept.write()
+    }
+
     /// The terms of every field except Name, which is what "Filters · N" counts.
     fn terms(&self) -> impl Iterator<Item = String> {
         let ext = (self.ext.on && !self.ext.value.trim().is_empty()).then(|| format!("ext:{}", quoted(self.ext.value.trim())));
@@ -421,6 +432,24 @@ impl FiltersPanel {
         self.form.active()
     }
 
+    /// Removes the clauses this panel wrote from the Query, keeping the scope and free-typed terms.
+    fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.form.reset_text();
+        let form = Filters::read(&text);
+        let mut set = |input: &Entity<InputState>, value: &str, cx: &mut Context<Self>| {
+            input.update(cx, |input, cx| input.set_value(value, window, cx));
+        };
+        set(&self.name, &form.name.value, cx);
+        set(&self.ext, "", cx);
+        set(&self.regex, "", cx);
+        set(&self.min, "", cx);
+        set(&self.max, "", cx);
+        self.dates.update(cx, |d, cx| d.set_date(Date::Range(None, None), window, cx));
+        self.form = form;
+        cx.emit(text);
+        cx.notify();
+    }
+
     fn set_dates(&mut self, range: Dates, window: &mut Window, cx: &mut Context<Self>) {
         self.dates.update(cx, |d, cx| d.set_date(Date::Range(range.0, range.1), window, cx));
         self.edit(cx, |f| {
@@ -576,6 +605,15 @@ impl Render for FiltersPanel {
                 self.toggle("on-regex", "Regex", f.regex.on, |f, on| f.regex.on = on, cx),
                 wide(&self.regex),
             ))
+            .child(
+                h_flex().justify_end().child(
+                    Button::new("filters-reset")
+                        .label("Reset")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| this.reset(window, cx))),
+                ),
+            )
     }
 }
 
@@ -645,5 +683,12 @@ mod tests {
         let text = form.write();
         assert_eq!(text, r#"regex:"a b""#);
         assert_eq!(Filters::read(&text).regex.value, "a b");
+    }
+
+    #[test]
+    fn reset_removes_only_what_the_panel_wrote() {
+        let form = Filters::read(r#""/srv/a/*" ext:mp4 holiday size:>=1gb !tmp regex:^a"#);
+        assert_eq!(form.reset_text(), r#""/srv/a/*" holiday !tmp"#);
+        assert_eq!(Filters::read("ext:rs").reset_text(), "");
     }
 }

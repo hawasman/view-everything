@@ -466,6 +466,9 @@ pub fn sync_with(
     list(&remote, credentials.as_ref(), |objects| {
         let (mut batch, skipped) = entries(objects, &mut seen);
         progress.unreadable.fetch_add(skipped, Ordering::Relaxed);
+        if progress.cancelled() {
+            return Err(crate::cancelled_error());
+        }
         applier.apply(&mut batch);
         Ok(())
     })?;

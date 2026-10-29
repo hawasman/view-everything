@@ -152,11 +152,20 @@ fn slash(path: &str) -> String {
 
 /// Walks the Remote's folders, calling `emit` with each Entry's path under the root. Returns how
 /// many folders or names could not be read. A failure of the root itself is an error.
-fn walk(agent: &ureq::Agent, remote: &WebdavRemote, password: &str, mut emit: impl FnMut(String, EntryMeta)) -> io::Result<u64> {
+fn walk(
+    agent: &ureq::Agent,
+    remote: &WebdavRemote,
+    password: &str,
+    cancel: &std::sync::atomic::AtomicBool,
+    mut emit: impl FnMut(String, EntryMeta),
+) -> io::Result<u64> {
     let (origin, root) = split(remote)?;
     let mut stack = vec![(slash(&root), String::new())];
     let (mut seen, mut unreadable) = (HashSet::new(), 0);
     while let Some((request, rel)) = stack.pop() {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(crate::cancelled_error());
+        }
         let (_, folder) = href_path(&request, "/");
         if !seen.insert(folder.clone()) {
             continue;
@@ -225,7 +234,7 @@ pub fn sync_with(
     let password = auth(&remote).map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))?;
     let mut applier = Applier::new(index, root, progress);
     let mut batch = Vec::new();
-    let walked = walk(&agent(), &remote, &password, |path, meta| {
+    let walked = walk(&agent(), &remote, &password, &progress.cancel, |path, meta| {
         batch.push((path, meta));
         if batch.len() >= BATCH {
             applier.apply(&mut batch);

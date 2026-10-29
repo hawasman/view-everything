@@ -5,7 +5,9 @@ use crate::engine::{Shared, refresh_duplicates};
 use crate::format;
 use crate::theme::palette;
 use crate::trash::Trash;
-use crate::ui::{caption, pill};
+use crate::ui::{caption, pill, task_progress};
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::{Sizable as _, Size};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -30,7 +32,7 @@ pub struct DuplicatesPanel {
     shown: Vec<Shown>,
     rows: Vec<Row>,
     /// (search version, Index generation) `shown` was built from.
-    built_from: Option<(u64, u64)>,
+    built_from: Option<(u64, u64, Option<u64>)>,
 }
 
 impl DuplicatesPanel {
@@ -57,18 +59,23 @@ impl DuplicatesPanel {
             let state = self.shared.duplicates.lock();
             (state.groups.clone(), state.version)
         };
+        let view = self.shared.view.lock().clone();
         let index = self.shared.index.read();
-        if self.built_from == Some((version, index.generation())) {
+        let built = (version, index.generation(), view.as_ref().map(|v| v.id));
+        if self.built_from == Some(built) {
             return;
         }
-        self.built_from = Some((version, index.generation()));
+        self.built_from = Some(built);
+        // The panel follows the Query: a group is shown when any copy counts under it, and then
+        // lists every copy.
+        let follows = |ids: &[EntryId]| view.as_ref().is_none_or(|v| ids.iter().any(|&id| v.filter.is_counted(id)));
         self.shown = groups
             .iter()
             .map(|g| Shown {
                 size: g.size,
                 copies: g.files.iter().copied().filter(|&id| index.is_live(id)).collect(),
             })
-            .filter(|g| g.copies.len() > 1)
+            .filter(|g| g.copies.len() > 1 && follows(&g.copies))
             .collect();
         self.shown.sort_by_key(|g| std::cmp::Reverse(g.wasted()));
         self.rows.clear();
@@ -168,25 +175,40 @@ impl Render for DuplicatesPanel {
         self.rebuild();
         let muted = palette(cx).muted;
         let hashing = self.shared.hashing_now();
+        let skipped = self.shared.duplicates.lock().skipped;
         let wasted: u64 = self.shown.iter().map(Shown::wasted).sum();
         let progress = &self.shared.hash_progress;
         let status = if hashing {
-            let what = if progress.stage.load(Ordering::Relaxed) == 2 {
-                "Hashing whole files"
+            let (done, total) = (progress.done.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed));
+            if total == 0 {
+                h_flex()
+                    .gap(px(10.))
+                    .items_center()
+                    .child(Spinner::new().with_size(Size::XSmall).color(muted))
+                    .child("Grouping files by size…")
+                    .into_any_element()
             } else {
-                "Comparing file starts and ends"
-            };
-            format!(
-                "{what} — {} of {}",
-                progress.done.load(Ordering::Relaxed),
-                progress.total.load(Ordering::Relaxed)
-            )
+                let what = if progress.stage.load(Ordering::Relaxed) == 2 {
+                    "files hashed whole"
+                } else {
+                    "file starts and ends compared"
+                };
+                task_progress("dupes-progress", done, Some(total), what, cx).into_any_element()
+            }
         } else {
-            format!(
+            let mut line = format!(
                 "{} groups · {} wasted",
                 format::count(self.shown.len() as u64),
                 format::size(wasted)
-            )
+            );
+            if skipped > 0 {
+                line += &format!(
+                    " · {} file{} skipped by Duplicate Exclusions",
+                    format::count(skipped),
+                    if skipped == 1 { "" } else { "s" }
+                );
+            }
+            line.into_any_element()
         };
         v_flex()
             .id("duplicates")
@@ -202,6 +224,7 @@ impl Render for DuplicatesPanel {
                     .child(
                         pill("dupes-rescan", "Rescan")
                             .small()
+                            .busy(hashing)
                             .disabled(hashing.then_some("Hashing is running"))
                             .build(
                                 cx,

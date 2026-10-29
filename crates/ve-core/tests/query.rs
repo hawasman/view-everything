@@ -82,6 +82,21 @@ fn wildcards_match_the_whole_name() {
 }
 
 #[test]
+fn wildcards_ignore_case_for_ascii_and_unicode_names() {
+    assert!(matches("img_*.jpg", &file("IMG_0042.JPG")));
+    assert!(matches("IMG_????.JPG", &file("img_0042.jpg")));
+    assert!(!matches("img_*.png", &file("IMG_0042.JPG")));
+    // `?` is one character, however many bytes it takes.
+    assert!(matches("caf?.txt", &file("café.txt")));
+    assert!(matches("?.txt", &file("日.txt")));
+    assert!(!matches("??.txt", &file("日.txt")));
+    // Backtracking after a partial multi-byte match.
+    assert!(matches("*é", &file("éaé")));
+    assert!(matches("é*", &file("ÉCOLE")));
+    assert!(!matches("*é", &file("éa")));
+}
+
+#[test]
 fn a_slash_or_backslash_matches_against_the_full_path() {
     let query = Query::parse("node_modules/", &context()).unwrap();
     assert!(query.needs_path());
@@ -445,6 +460,36 @@ fn tree_modifiers_filter_a_real_index() {
     assert_eq!(matched("child:.git"), [true, false, false, false, false]);
     assert_eq!(matched("empty:"), [false, false, true, false, false]);
     assert_eq!(matched("parent:/m/loc/proj"), [false, true, true, true, false]);
+}
+
+#[test]
+fn path_queries_see_each_entrys_own_path_across_siblings_folders_and_roots() {
+    use std::path::Path;
+    use ve_core::{EntryMeta, Filter, Index, SyncState};
+    let dir = EntryMeta {
+        is_dir: true,
+        ..EntryMeta::default()
+    };
+    let mut index = Index::new();
+    let vol = index.add_volume(Path::new("/m/loc"), "ext4", "loc", dir, SyncState::Walk);
+    let root = index.volume(vol).unwrap().root;
+    let a = index.insert(root, "a", dir);
+    let b = index.insert(root, "b", dir);
+    let ax = index.insert(a, "x.txt", EntryMeta::default());
+    let ay = index.insert(a, "y.txt", EntryMeta::default());
+    let bx = index.insert(b, "x.txt", EntryMeta::default());
+    let all = [root, a, b, ax, ay, bx];
+    let matched = |q: &str| {
+        let query = Query::parse(q, &context()).unwrap();
+        let filter = Filter::compute(&index, Some(&query));
+        all.map(|id| filter.is_matched(id))
+    };
+    // Siblings share a cached parent path; the entry in another folder must not reuse it.
+    assert_eq!(matched("/m/loc/a/x.txt"), [false, false, false, true, false, false]);
+    assert_eq!(matched("/m/loc/b/x.txt"), [false, false, false, false, false, true]);
+    assert_eq!(matched("/m/loc/a/?.txt"), [false, false, false, true, true, false]);
+    // The root has no parent: its path is its own.
+    assert_eq!(matched("/m/l?c"), [true, false, false, false, false, false]);
 }
 
 #[test]

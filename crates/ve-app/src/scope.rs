@@ -51,6 +51,16 @@ pub fn set(query: &str, term: Option<&str>) -> String {
         .join(" ")
 }
 
+/// `query` with only its folder scope kept: the Escape step that drops the other terms.
+pub fn keep_scope(query: &str) -> String {
+    clauses(query)
+        .iter()
+        .filter(|c| is_scope(c))
+        .map(|c| c.source)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,7 +88,7 @@ mod tests {
         let categories = CategoryMap::builtin();
         let view = |text: &str| {
             let query = Query::parse(text, &QueryContext::new(categories.clone(), chrono::Local::now())).unwrap();
-            View::compute(&index, text, Some(&query), &categories)
+            View::compute(&index, text, Some(&query), &categories, &mut crate::view::FileOrder::default())
         };
         let text = set("ext:rs", term(&index, a).as_deref());
         // `a` holds only `b`, yet the Treemap draws `a`: the folder zoomed into.
@@ -100,5 +110,13 @@ mod tests {
         // A scope inside an `|` clause or negated is not a scope.
         assert_eq!(set("\"/a/*\"|b !\"/c/*\"", None), "\"/a/*\"|b !\"/c/*\"");
         assert_eq!(set("", Some("\"/x/*\"")), "\"/x/*\"");
+    }
+
+    #[test]
+    fn keep_scope_drops_everything_but_the_scope() {
+        assert_eq!(keep_scope("ext:rs \"/srv/a/*\" foo"), "\"/srv/a/*\"");
+        assert_eq!(keep_scope("ext:rs foo"), "");
+        assert_eq!(keep_scope("\"/srv/a/*\""), "\"/srv/a/*\"");
+        assert_eq!(keep_scope(""), "");
     }
 }

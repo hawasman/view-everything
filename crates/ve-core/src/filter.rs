@@ -38,22 +38,33 @@ pub struct Filter {
 
 impl Filter {
     pub fn compute(index: &Index, query: Option<&Query>) -> Filter {
+        Self::compute_until(index, query, &|| false).expect("never cancelled")
+    }
+
+    /// Like [`Filter::compute`], but gives up with `None` as soon as `cancelled` says so; it is
+    /// polled between chunks of work, so a superseded Query stops costing time.
+    pub fn compute_until(index: &Index, query: Option<&Query>, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<Filter> {
         let n = index.capacity();
         let matched = match query {
             None => BitSet::full(n),
-            Some(query) => match_all(index, query),
+            Some(query) => match_all(index, query, cancelled)?,
         };
         let mut counted = BitSet::new(n);
         let mut shown = BitSet::new(n);
         let mut repeated_links = BitSet::new(n);
         let mut folders = vec![Totals::default(); index.folder_slots()];
-        let mut scratch = (String::new(), Vec::new());
+        let mut scratch = PathScratch::default();
+        let mut visited = 0usize;
 
         for (_, volume) in index.volumes() {
             let mut seen_links = HashSet::new();
             let mut folders_preorder = Vec::new();
             let mut stack = vec![(volume.root, false)];
             while let Some((dir, inherited)) = stack.pop() {
+                visited += 1;
+                if visited.is_multiple_of(4096) && cancelled() {
+                    return None;
+                }
                 folders_preorder.push(dir);
                 let captured = inherited || (query.is_some() && matched.contains(dir.index()));
                 let dir_slot = index.folder_slot(dir).expect("only folders are stacked");
@@ -99,14 +110,14 @@ impl Filter {
             }
         }
 
-        Filter {
+        Some(Filter {
             generation: index.generation(),
             matched,
             counted,
             shown,
             folders,
             repeated_links,
-        }
+        })
     }
 
     /// The Index generation this Filter was computed from.
@@ -154,10 +165,31 @@ impl Filter {
     }
 }
 
-fn candidate<'a>(index: &'a Index, query: &Query, id: EntryId, scratch: &'a mut (String, Vec<EntryId>)) -> Candidate<'a> {
+/// Scratch for building match paths: entries of one folder (the usual run of ids) share the
+/// folder's path, so it is written once and only the name changes.
+#[derive(Default)]
+struct PathScratch {
+    path: String,
+    chain: Vec<EntryId>,
+    /// The parent of the Entry whose path `path` holds, and how much of `path` is the parent's
+    /// path plus separator.
+    base: Option<(EntryId, usize)>,
+}
+
+fn candidate<'a>(index: &'a Index, query: &Query, id: EntryId, scratch: &'a mut PathScratch) -> Candidate<'a> {
     let path = if query.needs_path() {
-        index.write_match_path(id, &mut scratch.0, &mut scratch.1);
-        Some(scratch.0.as_str())
+        let parent = index.parent(id);
+        match (parent, scratch.base) {
+            (Some(p), Some((last, base))) if p == last => {
+                scratch.path.truncate(base);
+                scratch.path.push_str(index.name(id));
+            }
+            _ => {
+                index.write_match_path(id, &mut scratch.path, &mut scratch.chain);
+                scratch.base = parent.map(|p| (p, scratch.path.len() - index.name(id).len()));
+            }
+        }
+        Some(scratch.path.as_str())
     } else {
         None
     };
@@ -178,13 +210,23 @@ fn candidate<'a>(index: &'a Index, query: &Query, id: EntryId, scratch: &'a mut 
     }
 }
 
-fn match_all(index: &Index, query: &Query) -> BitSet {
+fn match_all(index: &Index, query: &Query, cancelled: &(dyn Fn() -> bool + Sync)) -> Option<BitSet> {
+    use std::sync::atomic::{AtomicBool, Ordering};
     let n = index.capacity();
     const WORDS_PER_TASK: usize = 64;
     let mut words = vec![0u64; n.div_ceil(64)];
-    words.par_chunks_mut(WORDS_PER_TASK).enumerate().for_each_init(
-        || (String::new(), Vec::new()),
-        |scratch, (task, chunk)| {
+    let stopped = AtomicBool::new(false);
+    words
+        .par_chunks_mut(WORDS_PER_TASK)
+        .enumerate()
+        .for_each_init(PathScratch::default, |scratch, (task, chunk)| {
+            if stopped.load(Ordering::Relaxed) {
+                return;
+            }
+            if task.is_multiple_of(16) && cancelled() {
+                stopped.store(true, Ordering::Relaxed);
+                return;
+            }
             let first = task * WORDS_PER_TASK * 64;
             for (w, word) in chunk.iter_mut().enumerate() {
                 for bit in 0..64 {
@@ -198,7 +240,6 @@ fn match_all(index: &Index, query: &Query) -> BitSet {
                     }
                 }
             }
-        },
-    );
-    BitSet::from_words(words, n)
+        });
+    (!stopped.load(Ordering::Relaxed)).then(|| BitSet::from_words(words, n))
 }

@@ -173,6 +173,19 @@ fn names(index: &Index, dir: EntryId) -> Vec<String> {
 }
 
 #[test]
+fn a_cancelled_azure_listing_is_interrupted_and_indexes_nothing() {
+    let server = start();
+    let index = SharedIndex::new(Index::new());
+    let id = index.write().add_remote(&Remote::Azure(remote(&server, "photos", false)));
+    let progress = Progress::default();
+    progress.cancel.store(true, Ordering::Relaxed);
+    let err = azure::sync_with(&index, id, &progress, &|_| Ok(key())).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    let index = index.read();
+    assert!(names(&index, index.volume(id).unwrap().root).is_empty());
+}
+
+#[test]
 fn a_container_prefix_is_indexed_page_by_page_with_a_signed_key_and_refreshed() {
     let server = start();
     let index = SharedIndex::new(Index::new());

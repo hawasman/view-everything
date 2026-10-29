@@ -45,3 +45,24 @@ fn reads_names_and_sizes_from_a_real_ntfs_image() {
     assert!(file("$Extend").is_dir);
     assert!(file("$MFT").logical > 0);
 }
+
+#[test]
+fn a_cancelled_mft_read_is_interrupted_before_the_index_is_touched() {
+    let mut image = Vec::new();
+    GzDecoder::new(&include_bytes!("fixtures/small.ntfs.gz")[..])
+        .read_to_end(&mut image)
+        .unwrap();
+    let mut index = Index::new();
+    let root = EntryMeta {
+        is_dir: true,
+        ..EntryMeta::default()
+    };
+    let volume = index.add_volume(Path::new("X:\\"), "NTFS", "guid:x", root, SyncState::Walk);
+    let index = SharedIndex::new(index);
+    let progress = Progress::default();
+    progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let err = ve_scan::ntfs::load(&index, volume, Cursor::new(image), &progress).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    let index = index.read();
+    assert!(index.children(index.volume(volume).unwrap().root).is_empty());
+}

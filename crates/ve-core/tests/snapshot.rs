@@ -99,6 +99,19 @@ fn a_volume_gone_since_the_snapshot_is_removed() {
 }
 
 #[test]
+fn a_cancelled_comparison_stops_with_nothing() {
+    let mut index = Index::new();
+    let v = index.add_volume(Path::new("/v"), "ext4", "v", folder(), SyncState::Walk);
+    let root = index.volume(v).unwrap().root;
+    for i in 0..600 {
+        index.insert(root, &format!("d{i}"), folder());
+    }
+    let snap = Snapshot::capture(&index);
+    assert!(snap.compare_with(|| &index, || true).is_none());
+    assert!(snap.compare_with(|| &index, || false).is_some());
+}
+
+#[test]
 fn retention_keeps_30_days_and_the_first_snapshot_of_each_month() {
     let today = day("2026-10-29");
     let mut dates: Vec<NaiveDate> = (0..30).map(|n| today - chrono::Duration::days(n)).collect();

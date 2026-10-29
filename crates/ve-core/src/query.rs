@@ -521,6 +521,7 @@ impl Text {
         }
         match (self.wildcard, self.case_sensitive) {
             (true, true) => wildcard_match(&self.pattern, subject),
+            (true, false) if subject.is_ascii() => wildcard_match_with(&self.pattern, subject, true),
             (true, false) => wildcard_match(&self.pattern, &subject.to_lowercase()),
             (false, true) => subject.contains(&self.pattern),
             (false, false) => contains_ignore_case(subject, &self.pattern),
@@ -567,26 +568,42 @@ fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
 
 /// Whole-string match where `*` is any run of characters and `?` exactly one.
 fn wildcard_match(pattern: &str, subject: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let s: Vec<char> = subject.chars().collect();
+    wildcard_match_with(pattern, subject, false)
+}
+
+/// [`wildcard_match`]; with `fold`, an ASCII `subject` matches a lower-cased `pattern` without
+/// regard to case, with no allocation.
+fn wildcard_match_with(pattern: &str, subject: &str, fold: bool) -> bool {
+    // Works on bytes: UTF-8 is self-synchronizing, and `?` and the backtrack step advance by
+    // whole characters, so no position falls inside one.
+    let (p, s) = (pattern.as_bytes(), subject.as_bytes());
+    let char_len = |lead: u8| match lead {
+        0..0x80 => 1,
+        0x80..0xE0 => 2,
+        0xE0..0xF0 => 3,
+        _ => 4,
+    };
     let (mut pi, mut si) = (0, 0);
     let mut backtrack: Option<(usize, usize)> = None;
     while si < s.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == s[si]) {
+        if pi < p.len() && p[pi] == b'?' {
+            pi += 1;
+            si += char_len(s[si]);
+        } else if pi < p.len() && (p[pi] == s[si] || (fold && p[pi] == s[si].to_ascii_lowercase())) {
             pi += 1;
             si += 1;
-        } else if pi < p.len() && p[pi] == '*' {
+        } else if pi < p.len() && p[pi] == b'*' {
             backtrack = Some((pi, si));
             pi += 1;
         } else if let Some((star, matched)) = backtrack {
             pi = star + 1;
-            si = matched + 1;
-            backtrack = Some((star, matched + 1));
+            si = matched + char_len(s[matched]);
+            backtrack = Some((star, si));
         } else {
             return false;
         }
     }
-    p[pi..].iter().all(|&c| c == '*')
+    p[pi..].iter().all(|&c| c == b'*')
 }
 
 enum Token {

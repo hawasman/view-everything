@@ -6,10 +6,12 @@ use crate::cleaner::{CleanerPage, ShowInExplorer};
 use crate::compare::{Compare, CompareEvent};
 use crate::dashboard::{Act, DashboardPage};
 use crate::duplicates::DuplicatesPanel;
-use crate::engine::{Engine, Phase, Repaint, last_synced_label};
+use crate::engine::{Engine, Phase, last_synced_label};
 use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
 use crate::format;
+use crate::host::{Attached, Host};
+use crate::selection_panel::{SelectionEvent, SelectionPanel};
 use crate::settings::Settings;
 #[cfg(feature = "updater")]
 use crate::settings_page::CheckNow;
@@ -21,6 +23,7 @@ use crate::treemap::{Treemap, TreemapEvent};
 use crate::ui::{caption, dot, pill};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::table::{DataTable, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
@@ -38,13 +41,38 @@ use ve_scan::VolumeInfo;
 /// The app's name as people read it (the binary, app id and data folders stay `view-everything`).
 pub const APP_NAME: &str = "View Everything";
 
-/// The app icon the packages install, drawn in the sidebar.
-static APP_ICON: std::sync::LazyLock<Arc<Image>> = std::sync::LazyLock::new(|| {
-    Arc::new(Image::from_bytes(
-        ImageFormat::Svg,
-        include_bytes!("../../../packaging/icons/view-everything.svg").to_vec(),
-    ))
-});
+/// Most Entries "Open" and "Show in file manager" act on at once; more would launch a process
+/// or window each.
+const MAX_OPEN: usize = 10;
+
+/// What the cached selected size was computed from: (tree shown, selection version, View id,
+/// Index generation).
+type SelectedSizeKey = (bool, u64, u64, u64);
+
+/// The app icon the packages install, rasterized at exactly `size` points on a display of
+/// `scale`. gpui rasterizes an `Image` SVG once, at the SVG's own size (here 256 px, doubled
+/// by its smoothing factor), and the GPU then shrinks that bitmap to the 24-pt slot with
+/// plain bilinear sampling, which at 1x and 2x discards most of the texels and blurs the
+/// edges. Declaring the SVG's size as the device pixels it will cover (the viewBox scales
+/// the drawing) makes the bitmap land on the pixel grid 1:1.
+fn app_icon(size: f32, scale: f32) -> Arc<Image> {
+    static CACHE: std::sync::Mutex<Vec<(u32, Arc<Image>)>> = std::sync::Mutex::new(Vec::new());
+    const SVG: &str = include_str!("../../../packaging/icons/view-everything.svg");
+    let device = (size * scale).round().max(1.) as u32;
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, image)) = cache.iter().find(|(d, _)| *d == device) {
+        return image.clone();
+    }
+    // gpui renders at twice the SVG's declared size (SMOOTH_SVG_SCALE_FACTOR) and treats the
+    // bitmap as that many logical pixels, so declare half the device size.
+    let declared = device as f32 / 2.;
+    let from = "width=\"256\" height=\"256\"";
+    debug_assert!(SVG.contains(from), "the app icon SVG no longer declares width and height 256");
+    let sized = SVG.replacen(from, &format!("width=\"{declared}\" height=\"{declared}\""), 1);
+    let image = Arc::new(Image::from_bytes(ImageFormat::Svg, sized.into_bytes()));
+    cache.push((device, image.clone()));
+    image
+}
 
 /// A Volume's label, or its mount point when it has none (a device path is no name).
 pub fn volume_name(v: &VolumeInfo) -> String {
@@ -74,10 +102,15 @@ enum SelfUpdate {
     Failed(String),
 }
 
+/// How long typing in the Query pauses before the engine is asked.
+const QUERY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(120);
+
 pub struct Shell {
-    engine: Engine,
+    engine: Arc<Engine>,
     page: Page,
     query: Entity<InputState>,
+    /// The pending send of typed text to the engine; dropping it cancels the send.
+    query_debounce: Option<gpui::Task<()>>,
     table: Entity<TableState<FlatList>>,
     tree: Entity<TableState<TreeList>>,
     /// The Snapshot the tree's Change column compares with.
@@ -97,12 +130,21 @@ pub struct Shell {
     cleaner: Entity<CleanerPage>,
     trash: Trash,
     treemap: Entity<Treemap>,
+    selection_panel: Entity<SelectionPanel>,
     categories: Entity<CategoryPanel>,
     category_map: CategoryMap,
     volumes: Vec<VolumeInfo>,
     /// Identities of the Volumes already offered for indexing this session.
     offered: HashSet<String>,
     startup_problems: Vec<String>,
+    /// The Tasks list (opened from the sidebar) is showing.
+    tasks_open: bool,
+    /// When an outside click last closed the Tasks list.
+    tasks_closed: Option<std::time::Instant>,
+    /// The Locations list (opened from the sidebar) is showing.
+    locations_open: bool,
+    /// When an outside click last closed the Locations list.
+    locations_closed: Option<std::time::Instant>,
     /// A newer release than the running app, as the last update check found.
     #[cfg(feature = "updater")]
     update: Option<crate::update::Release>,
@@ -111,35 +153,31 @@ pub struct Shell {
     self_update: SelfUpdate,
     /// The Explorer lists' width in pixels, as of the last paint.
     list_width: Rc<Cell<f32>>,
+    /// The selected size shown in the status bar, with what it was computed from: (tree shown,
+    /// selection version, View id, Index generation).
+    selected_size: Cell<Option<(SelectedSizeKey, u64)>>,
+    /// A repaint is already scheduled for the open Tasks list's elapsed times.
+    tasks_ticking: bool,
     #[cfg(feature = "bench")]
     demoed: bool,
 }
 
 impl Shell {
-    pub fn new(
-        settings: Settings,
-        categories: CategoryMap,
-        volumes: Vec<VolumeInfo>,
-        startup_problems: Vec<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let indexed: Vec<VolumeInfo> = volumes.iter().filter(|v| settings.is_indexed(v)).cloned().collect();
-        let intervals = settings.intervals(&indexed);
-        // One pending wake-up is enough: the window then reads everything that changed.
-        let (wake, woken) = async_channel::bounded::<()>(1);
-        let repaint: Repaint = Arc::new(move || {
-            let _ = wake.try_send(());
-        });
-        let engine = Engine::start(
-            repaint.clone(),
-            volumes.clone(),
-            indexed,
-            settings.remotes.clone(),
-            intervals,
-            categories.clone(),
-            settings.live_helper,
-        );
+    pub fn new(settings: Settings, attached: Attached, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let Attached {
+            wake: woken,
+            mounts: mounted,
+            problems: startup_problems,
+        } = attached;
+        let (engine, categories, volumes, repaint) = {
+            let host = cx.global::<Host>();
+            (
+                host.engine.clone(),
+                host.categories.clone(),
+                host.volumes.clone(),
+                host.repaint.clone(),
+            )
+        };
 
         let trash = Trash::new(engine.shared.clone(), repaint.clone());
 
@@ -168,6 +206,7 @@ impl Shell {
             page
         });
         let duplicates = cx.new(|_| DuplicatesPanel::new(engine.shared.clone(), trash.clone(), volumes.clone()));
+        let treemap_depth = settings.treemap_depth;
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
         cx.subscribe_in(&dashboard, window, |this, _, act: &Act, window, cx| {
             this.dashboard_act(act, window, cx)
@@ -182,8 +221,17 @@ impl Shell {
             this.engine
                 .set_volumes(changed.mounted.clone(), changed.indexed.clone(), changed.remotes.clone());
             this.engine.set_intervals(changed.intervals.clone());
-            this.engine.set_live_helper(changed.live_helper);
+            let paused = cx.global::<Host>().live_paused();
+            // A login start holds Live updates back until the user starts them.
+            if !paused {
+                this.engine.set_live_helper(changed.live_helper);
+            }
+            cx.global_mut::<Host>().live_setting_changed(changed.live_helper);
+            let keep_in_tray = this.settings_page.read(cx).settings().keep_in_tray;
+            cx.global_mut::<Host>().set_keep_in_tray(keep_in_tray);
             let settings = this.settings_page.read(cx).settings().clone();
+            this.engine.set_duplicate_exclusions(settings.duplicate_exclusions.clone());
+            this.engine.set_remote_names(&settings.remote_names);
             this.dashboard
                 .update(cx, |d, cx| d.set_context(&settings, changed.mounted.clone(), cx));
             this.cleaner.update(cx, |c, cx| c.set_settings(&settings, cx));
@@ -197,25 +245,42 @@ impl Shell {
         cx.subscribe(&settings_page, |this, _, forget: &Forget, _| this.engine.forget(forget.0.clone()))
             .detach();
         cx.subscribe(&settings_page, |this, _, refresh: &Refresh, _| {
-            this.engine.refresh_location(refresh.0.clone())
+            this.engine.sync_location(refresh.0.clone())
         })
         .detach();
 
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Find a file by name"));
         let filters = cx.new(|cx| FiltersPanel::new(window, cx));
         cx.subscribe_in(&query, window, |this, query, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::Change) {
-                let text = query.read(cx).value().to_string();
-                this.filters.update(cx, |f, cx| f.reload(&text, window, cx));
+            // Typing (Change) waits for a pause; Enter, and the programmatic setters that emit
+            // PressEnter after the silent set_value, send at once.
+            let now = match event {
+                InputEvent::Change => query.read(cx).value().is_empty(),
+                InputEvent::PressEnter { .. } => true,
+                _ => return,
+            };
+            let text = query.read(cx).value().to_string();
+            this.filters.update(cx, |f, cx| f.reload(&text, window, cx));
+            if now {
+                this.query_debounce = None;
                 this.engine.set_query(text);
-                // Searching from anywhere shows the results.
-                this.page = Page::Explorer;
-                cx.notify();
+            } else {
+                this.query_debounce = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(QUERY_DEBOUNCE).await;
+                    let _ = this.update(cx, |this, _| {
+                        this.query_debounce = None;
+                        this.engine.set_query(text);
+                    });
+                }));
             }
+            // Searching from anywhere shows the results.
+            this.page = Page::Explorer;
+            cx.notify();
         })
         .detach();
         cx.subscribe_in(&filters, window, |this, _, text: &String, window, cx| {
             this.query.update(cx, |q, cx| q.set_value(text.as_str(), window, cx));
+            this.query_debounce = None;
             this.engine.set_query(text.clone());
         })
         .detach();
@@ -225,7 +290,18 @@ impl Shell {
                 .col_resizable(false)
                 .select_on_modifier_click(false)
         });
-        let treemap = cx.new(|cx| Treemap::new(engine.shared.clone(), categories.clone(), cx));
+        let treemap = cx.new(|cx| Treemap::new(engine.shared.clone(), categories.clone(), treemap_depth, cx));
+        let selection_panel = cx.new(|_| SelectionPanel::new(engine.shared.clone()));
+        cx.subscribe_in(
+            &selection_panel,
+            window,
+            |this, _, event: &SelectionEvent, window, cx| match event {
+                SelectionEvent::Scope(folder) => this.scope(Some(*folder), window, cx),
+                SelectionEvent::Trash(id) => this.trash.ask_trash(&[*id], &this.volumes, window, cx),
+                SelectionEvent::Sync(folder) => this.engine.sync_folder(*folder),
+            },
+        )
+        .detach();
         let category_panel = cx.new(|_| CategoryPanel::new(Some(query.clone()), "All Locations · click a row to add type: to the Query"));
 
         let tree = cx.new(|cx| {
@@ -247,15 +323,30 @@ impl Shell {
         })
         .detach();
 
+        let menu: crate::entry_actions::MenuFn = {
+            let shell = cx.weak_entity();
+            Rc::new(move |menu, ids, last, _, cx| match shell.upgrade() {
+                Some(this) => this
+                    .read(cx)
+                    .explorer_menu_items(&shell, ids, last)
+                    .into_iter()
+                    .fold(menu, |menu, item| menu.item(item)),
+                None => menu,
+            })
+        };
+        table.update(cx, |t, _| t.delegate_mut().menu = Some(menu.clone()));
+        tree.update(cx, |t, _| t.delegate_mut().menu = Some(menu));
+
         // Keyboard moves select a single row; clicks go through the lists' own handlers. A
         // double-click on a folder zooms the Query into it, as on the Treemap.
         cx.subscribe_in(&table, window, |this, table, event: &TableEvent, window, cx| {
             match event {
                 TableEvent::SelectRow(row) => table.update(cx, |t, _| {
                     if let Some(id) = t.delegate().entry_at(*row) {
-                        t.delegate_mut().selection.only(*row, id);
+                        t.delegate_mut().selection.only(id);
                     }
                 }),
+                TableEvent::ClearSelection => this.clear_selection(cx),
                 TableEvent::DoubleClickedRow(row) => {
                     if let Some(id) = table.read(cx).delegate().entry_at(*row) {
                         this.scope_to_folder(id, window, cx);
@@ -270,9 +361,10 @@ impl Shell {
             match event {
                 TableEvent::SelectRow(row) => tree.update(cx, |t, _| {
                     if let Some(id) = t.delegate().entry_at(*row) {
-                        t.delegate_mut().selection.only(*row, id);
+                        t.delegate_mut().selection.only(id);
                     }
                 }),
+                TableEvent::ClearSelection => this.clear_selection(cx),
                 TableEvent::DoubleClickedRow(row) => {
                     if let Some(id) = tree.read(cx).delegate().entry_at(*row) {
                         this.scope_to_folder(id, window, cx);
@@ -296,8 +388,16 @@ impl Shell {
         })
         .detach();
         cx.subscribe_in(&treemap, window, |this, _, event: &TreemapEvent, window, cx| match event {
-            TreemapEvent::Select(id) => this.reveal(*id, cx),
+            TreemapEvent::Select(id) => {
+                this.selection_panel.update(cx, |p, cx| p.set_selected(Some(*id), cx));
+                this.reveal(*id, cx)
+            }
             TreemapEvent::Scope(folder) => this.scope(*folder, window, cx),
+            TreemapEvent::Depth(depth) => {
+                let depth = *depth;
+                this.settings_page
+                    .update(cx, |page, cx| page.apply(|s| s.treemap_depth = depth, cx));
+            }
         })
         .detach();
 
@@ -338,25 +438,15 @@ impl Shell {
         .detach();
 
         // Volumes mounted while running: a returning Offline Volume catches up at once, a new
-        // removable one is offered for indexing.
-        #[cfg(feature = "bench")]
-        let watching = std::env::var_os("VE_BENCH_MOUNT").is_none() && std::env::var_os("VE_FAKE_SHARE").is_none();
-        #[cfg(not(feature = "bench"))]
-        let watching = true;
-        if watching {
-            let (mounts, mounted) = async_channel::unbounded::<Vec<VolumeInfo>>();
-            ve_scan::watch::watch(volumes.clone(), move |now| {
-                let _ = mounts.send_blocking(now);
-            });
-            cx.spawn_in(window, async move |this, cx| {
-                while let Ok(now) = mounted.recv().await {
-                    if this.update_in(cx, |this, window, cx| this.mounts_changed(now, window, cx)).is_err() {
-                        break;
-                    }
+        // removable one is offered for indexing. The host follows the mounts; this window applies them.
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(now) = mounted.recv().await {
+                if this.update_in(cx, |this, window, cx| this.mounts_changed(now, window, cx)).is_err() {
+                    break;
                 }
-            })
-            .detach();
-        }
+            }
+        })
+        .detach();
 
         // A newer version: once at startup if a day has passed, then hourly (the app may run for days).
         #[cfg(feature = "updater")]
@@ -375,17 +465,11 @@ impl Shell {
             .detach();
         }
 
-        // Save the Index as the app quits.
-        cx.on_app_quit(|this, _| {
-            this.engine.shutdown();
-            async {}
-        })
-        .detach();
-
         Self {
             engine,
             page,
             query,
+            query_debounce: None,
             table,
             tree,
             compare,
@@ -402,16 +486,23 @@ impl Shell {
             show_duplicates: false,
             trash,
             treemap,
+            selection_panel,
             categories: category_panel,
             category_map: categories.clone(),
             volumes,
             offered: HashSet::new(),
             startup_problems,
+            tasks_open: false,
+            tasks_closed: None,
+            locations_open: false,
+            locations_closed: None,
             #[cfg(feature = "updater")]
             update: None,
             #[cfg(feature = "updater")]
             self_update: SelfUpdate::Link,
             list_width: Rc::default(),
+            selected_size: Cell::new(None),
+            tasks_ticking: false,
             #[cfg(feature = "bench")]
             demoed: false,
         }
@@ -483,7 +574,7 @@ impl Shell {
     #[cfg(feature = "updater")]
     fn restart_to_update(&mut self, cx: &mut Context<Self>) {
         let SelfUpdate::Ready(staged) = &self.self_update else { return };
-        let engine = &mut self.engine;
+        let engine = &self.engine;
         match crate::update::apply(staged, || engine.shutdown()) {
             Ok(()) => cx.quit(),
             Err(e) => {
@@ -559,6 +650,24 @@ impl Shell {
     #[cfg(not(feature = "updater"))]
     fn update_row(&self, _: &mut Context<Self>) -> Option<AnyElement> {
         None
+    }
+
+    /// How far the sidebar's Tasks and Locations rows sit higher while the update notice (which
+    /// goes between them and Settings) shows: its margin, padding, border and text lines.
+    #[cfg(feature = "updater")]
+    fn update_row_height(&self) -> f32 {
+        const NOTICE: f32 = 16. + 16. + 2. + 20. + 16.;
+        const ACTION: f32 = 16.;
+        match (&self.update, &self.self_update) {
+            (None, _) => 0.,
+            (Some(_), SelfUpdate::Link) => NOTICE,
+            (Some(_), _) => NOTICE + ACTION,
+        }
+    }
+
+    #[cfg(not(feature = "updater"))]
+    fn update_row_height(&self) -> f32 {
+        0.
     }
 
     /// The mounted Volumes changed: the Settings page re-applies them to the Engine, and each
@@ -651,7 +760,10 @@ impl Shell {
         self.query.update(cx, |q, cx| {
             q.set_value(text.as_str(), window, cx);
             // set_value is silent; Change recomputes the View.
-            cx.emit(InputEvent::Change);
+            cx.emit(InputEvent::PressEnter {
+                secondary: false,
+                shift: false,
+            });
         });
     }
 
@@ -672,12 +784,28 @@ impl Shell {
         });
     }
 
-    /// Outlines on the Treemap the one Entry the shown list selects. A list that cannot show
-    /// what the Treemap selected leaves its outline alone.
+    /// Outlines on the Treemap what the shown list selects, the last-clicked Entry boldest, and
+    /// shows that Entry in the Selection panel. A list that cannot show what the Treemap selected
+    /// leaves its outline alone.
     fn outline_selection(&self, cx: &mut Context<Self>) {
-        if let [id] = self.selected_entries(cx).as_slice() {
-            let id = *id;
-            self.treemap.update(cx, |t, cx| t.set_selected(Some(id), cx));
+        let ids = self.selected_entries(cx);
+        let Some(last) = self.last_clicked(cx).or_else(|| ids.first().copied()) else {
+            return;
+        };
+        let rest: Vec<_> = ids.into_iter().filter(|&id| id != last).collect();
+        self.treemap.update(cx, |t, cx| {
+            t.set_selected(Some(last), cx);
+            t.set_also_selected(rest, cx);
+        });
+        self.selection_panel.update(cx, |p, cx| p.set_selected(Some(last), cx));
+    }
+
+    /// The Entry last clicked in whichever list the Explorer shows.
+    fn last_clicked(&self, cx: &App) -> Option<ve_core::EntryId> {
+        if self.show_tree {
+            self.tree.read(cx).delegate().selection.last()
+        } else {
+            self.table.read(cx).delegate().selection.last()
         }
     }
 
@@ -688,14 +816,11 @@ impl Shell {
         self.table.update(cx, |table, cx| {
             if table.delegate_mut().set_view(latest.clone()) {
                 table.refresh(cx);
-                // Row numbers mean something else in a new View.
-                table.clear_selection(cx);
             }
         });
         self.tree.update(cx, |table, cx| {
             if table.delegate_mut().set_view(latest.clone()) {
                 table.refresh(cx);
-                table.clear_selection(cx);
             }
             // A new Query opened the tree at the Treemap's folder; bring it into sight.
             if let Some(row) = table.delegate_mut().take_focus_row() {
@@ -730,9 +855,20 @@ impl Shell {
             .filter(|(_, v)| v.is_remote())
             .map(|(_, v)| (v.identity.clone(), v.last_synced))
             .collect();
+        let mounts = self.engine.shared.syncing_mounts();
+        let syncing: std::collections::HashSet<String> = self
+            .engine
+            .shared
+            .index
+            .read()
+            .volumes()
+            .filter(|(_, v)| v.online && mounts.contains(&v.mount))
+            .map(|(_, v)| v.identity.clone())
+            .collect();
         self.settings_page.update(cx, |page, cx| {
             page.set_offline(offline, cx);
             page.set_remote_synced(synced, cx);
+            page.set_syncing(syncing, cx);
         });
         self.dashboard.update(cx, |d, cx| d.poll(cx));
         cx.notify();
@@ -743,7 +879,10 @@ impl Shell {
         self.query.update(cx, |q, cx| {
             q.set_value(text, window, cx);
             // set_value is silent; Change recomputes the View.
-            cx.emit(InputEvent::Change);
+            cx.emit(InputEvent::PressEnter {
+                secondary: false,
+                shift: false,
+            });
         });
     }
 
@@ -920,10 +1059,15 @@ impl Shell {
                     .update(cx, |page, cx| page.apply(|s| s.forget(identity, mount), cx));
                 self.engine.forget(identity.clone());
             }
-            Act::Refresh(identities) => {
+            Act::Sync(identities) => {
                 for identity in identities {
-                    self.engine.refresh_location(identity.clone());
+                    self.engine.sync_location(identity.clone());
                 }
+            }
+            Act::SyncAll => self.engine.sync_now(),
+            Act::StartLive => {
+                Host::start_live(cx);
+                cx.notify();
             }
             Act::MoveToTrash(id) => self.trash.ask_trash(&[*id], &self.volumes, window, cx),
             Act::SaveQuery(text) => {
@@ -964,14 +1108,23 @@ impl Shell {
                 catching_up,
                 started,
             } => {
-                let what = if *catching_up { "Catching up" } else { "Scanning" };
-                let names: Vec<_> = volumes.iter().map(|v| v.display().to_string()).collect();
-                bar = bar.child(item().child(dot(accent)).child(format!(
+                let what = if *catching_up { "Catching up" } else { "Syncing" };
+                let names: Vec<String> = {
+                    let index = shared.index.read();
+                    volumes
+                        .iter()
+                        .map(|m| {
+                            let named = index.volumes().find(|(_, v)| v.mount == *m).and_then(|(_, v)| v.name.clone());
+                            named.unwrap_or_else(|| m.display().to_string())
+                        })
+                        .collect()
+                };
+                bar = bar.child(item().min_w_0().child(dot(accent)).child(div().min_w_0().truncate().child(format!(
                     "{what} {} — {} Entries read, {}s",
                     names.join(", "),
                     format::count(progress.entries()),
                     started.elapsed().as_secs()
-                )));
+                ))));
             }
             Phase::Idle => {}
         }
@@ -987,20 +1140,27 @@ impl Shell {
             } else {
                 "Comparing file starts and ends"
             };
-            bar = bar.child(sep()).child(
-                item()
-                    .child(dot(accent))
-                    .child(format!("{what} for Duplicates — {done} of {total}")),
-            );
+            bar = bar
+                .child(sep())
+                .child(item().min_w_0().child(dot(accent)).child(div().min_w_0().truncate().child(format!(
+                    "{what} for Duplicates — {} of {}",
+                    format::count(done),
+                    format::count(total)
+                ))));
         }
-        let synced = {
-            let oldest = shared.index.read().oldest_synced();
-            last_synced_label(oldest, chrono::Utc::now().timestamp())
+        // One look at the Index per frame: three separate read locks queue behind any writer.
+        let (oldest, offline, live) = {
+            let index = shared.index.read();
+            (
+                index.oldest_synced(),
+                index.volumes().filter(|(_, v)| !v.online).count(),
+                index.live_count(),
+            )
         };
+        let synced = last_synced_label(oldest, chrono::Utc::now().timestamp());
         if let Some(label) = synced.filter(|_| !matches!(status.phase, Phase::LoadingIndex)) {
             bar = bar.child(sep()).child(item().child(label));
         }
-        let offline = shared.index.read().volumes().filter(|(_, v)| !v.online).count();
         if offline > 0 {
             bar = bar.child(sep()).child(item().child(dot(warn)).child(format!("{offline} Offline")));
         }
@@ -1023,19 +1183,19 @@ impl Shell {
             .chain(shared.query_error.lock().clone())
             .chain(self.startup_problems.iter().cloned());
         for problem in problems {
-            bar = bar.child(sep()).child(div().text_color(warn).child(problem));
+            bar = bar.child(sep()).child(div().min_w_0().truncate().text_color(warn).child(problem));
         }
-        bar.child(div().flex_1())
+        bar.child(div().flex_1().min_w_0())
             .child(
-                item().child(
+                item().flex_none().child(
                     h_flex()
                         .gap(px(4.))
-                        .child(div().text_color(text).child(format::count(shared.index.read().live_count() as u64)))
+                        .child(div().text_color(text).child(format::count(live as u64)))
                         .child("Entries"),
                 ),
             )
             .child(sep())
-            .child(self.trash_controls(cx))
+            .child(div().flex_none().child(self.trash_controls(cx)))
     }
 
     fn trash_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1057,17 +1217,27 @@ impl Shell {
                 .on_click(cx.listener(|this, _, window, cx| this.trash.open(window, cx))),
         );
         if trash::CAN_EMPTY {
+            let emptying = self.trash.emptying();
             let empty = size == Some(0);
             controls = controls.child(
-                div()
+                h_flex()
                     .id("empty-trash")
+                    .gap(px(6.))
+                    .items_center()
                     .rounded(px(6.))
                     .px(px(4.))
-                    .when(empty, |d| d.opacity(0.5))
-                    .when(!empty, |d| {
+                    .when(empty && !emptying, |d| d.opacity(0.5))
+                    .when(!empty && !emptying, |d| {
                         d.cursor_pointer()
                             .hover(move |s| s.bg(hover).text_color(text))
                             .on_click(cx.listener(|this, _, window, cx| this.trash.ask_empty(window, cx)))
+                    })
+                    .when(emptying, |d| {
+                        d.child(
+                            gpui_kit::component::spinner::Spinner::new()
+                                .with_size(gpui_kit::component::Size::XSmall)
+                                .color(p.muted),
+                        )
                     })
                     .child("Empty Trash"),
             );
@@ -1093,10 +1263,221 @@ impl Shell {
     /// The Entries selected in whichever list the Explorer shows.
     fn selected_entries(&self, cx: &App) -> Vec<ve_core::EntryId> {
         if self.show_tree {
-            self.tree.read(cx).delegate().selection.ids()
+            self.tree.read(cx).delegate().selected()
         } else {
-            self.table.read(cx).delegate().selection.ids()
+            self.table.read(cx).delegate().selected()
         }
+    }
+
+    /// The right-click menu of the tree and flat list. It acts on the selection, which a
+    /// right-click outside it has already replaced with the clicked row.
+    fn explorer_menu_items(
+        &self,
+        shell: &WeakEntity<Shell>,
+        ids: Vec<ve_core::EntryId>,
+        last: Option<ve_core::EntryId>,
+    ) -> Vec<PopupMenuItem> {
+        let Some(last) = last.filter(|id| ids.contains(id)).or_else(|| ids.first().copied()) else {
+            return Vec::new();
+        };
+        let (can_sync, syncing, can_zoom_out) = {
+            let index = self.engine.shared.index.read();
+            if !index.is_live(last) {
+                return Vec::new();
+            }
+            let folder = crate::engine::folder_of(&index, last);
+            let root = self
+                .engine
+                .shared
+                .view
+                .lock()
+                .clone()
+                .and_then(|v| crate::treemap::zoom_root(&index, &v));
+            (
+                crate::engine::can_sync_folder(&index, folder),
+                self.engine.shared.folder_syncing(folder),
+                root.is_some_and(|r| index.parent(r).is_some()),
+            )
+        };
+        let blocker = self.trash.blocker_of(&ids, &self.volumes);
+        let many = ids.len() > 1;
+        let too_many = ids.len() > MAX_OPEN;
+        let item = |label: &str, act: MenuAct, disabled: bool| {
+            let (shell, ids) = (shell.clone(), ids.clone());
+            PopupMenuItem::new(label.to_owned())
+                .disabled(disabled)
+                .on_click(move |_, window, cx| {
+                    shell.update(cx, |this, cx| this.menu_act(act, &ids, last, window, cx)).ok();
+                })
+        };
+        let mut items = vec![
+            item("Open", MenuAct::Open, too_many),
+            item("Show in file manager", MenuAct::Reveal, too_many),
+            item(
+                if many {
+                    "Open terminal at last clicked"
+                } else {
+                    "Open terminal here"
+                },
+                MenuAct::Terminal,
+                false,
+            ),
+            item(if many { "Copy paths" } else { "Copy path" }, MenuAct::CopyPath, false),
+            item("Copy name and size", MenuAct::CopyNameSize, false),
+            PopupMenuItem::separator(),
+            item(
+                if many { "Zoom in last clicked" } else { "Zoom in Treemap" },
+                MenuAct::ZoomIn,
+                false,
+            ),
+            item("Zoom out Treemap", MenuAct::ZoomOut, !can_zoom_out),
+            PopupMenuItem::separator(),
+            item(
+                if many { "Sync last clicked folder" } else { "Sync this folder" },
+                MenuAct::Sync,
+                !can_sync || syncing,
+            ),
+        ];
+        if !can_sync {
+            items.push(PopupMenuItem::label(crate::engine::WHOLE_ONLY));
+        }
+        if too_many {
+            items.push(PopupMenuItem::label("Open and Show in file manager take up to 10 Entries"));
+        }
+        items.push(item(
+            if many { "Export selection to CSV" } else { "Export to CSV" },
+            MenuAct::Export,
+            false,
+        ));
+        items.push(PopupMenuItem::separator());
+        items.push(item("Move to Trash", MenuAct::Trash, blocker.is_some()));
+        if let Some(why) = blocker {
+            items.push(PopupMenuItem::label(why));
+        }
+        items
+    }
+
+    fn menu_act(&mut self, act: MenuAct, ids: &[ve_core::EntryId], last: ve_core::EntryId, window: &mut Window, cx: &mut Context<Self>) {
+        let (paths, folder, parent_scope) = {
+            let index = self.engine.shared.index.read();
+            let live: Vec<_> = ids.iter().copied().filter(|&id| index.is_live(id)).collect();
+            let paths: Vec<_> = live.iter().map(|&id| index.path(id)).collect();
+            let folder = crate::entry_actions::terminal_folder(&index, last);
+            let parent = self
+                .engine
+                .shared
+                .view
+                .lock()
+                .clone()
+                .and_then(|v| crate::treemap::zoom_root(&index, &v))
+                .and_then(|r| index.parent(r));
+            (paths, folder, parent)
+        };
+        let fail = |what: &str, path: &std::path::Path, e: &dyn std::fmt::Display, window: &mut Window, cx: &mut App| {
+            window.push_notification(Notification::error(format!("Could not {what} {}: {e}", path.display())), cx);
+        };
+        match act {
+            MenuAct::Open => {
+                for path in &paths {
+                    if let Err(e) = opener::open(path) {
+                        fail("open", path, &e, window, cx);
+                    }
+                }
+            }
+            MenuAct::Reveal => {
+                for path in &paths {
+                    if let Err(e) = opener::reveal(path) {
+                        fail("show", path, &e, window, cx);
+                    }
+                }
+            }
+            MenuAct::Terminal => {
+                if let Some(dir) = folder
+                    && let Err(e) = crate::entry_actions::open_terminal(&dir)
+                {
+                    window.push_notification(Notification::error(format!("Could not open a terminal: {e}")), cx);
+                }
+            }
+            MenuAct::CopyPath => {
+                let text = crate::entry_actions::paths_text(&self.engine.shared.index.read(), ids);
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                window.push_notification(
+                    Notification::info(if paths.len() > 1 {
+                        format!("Copied {} paths", paths.len())
+                    } else {
+                        "Copied path".to_owned()
+                    }),
+                    cx,
+                );
+            }
+            MenuAct::CopyNameSize => {
+                let Some(view) = self.engine.shared.view.lock().clone() else {
+                    return;
+                };
+                let text = crate::entry_actions::names_and_sizes_text(&self.engine.shared.index.read(), &view.filter, ids);
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                window.push_notification(Notification::info("Copied name and size"), cx);
+            }
+            MenuAct::ZoomIn => {
+                let folder = {
+                    let index = self.engine.shared.index.read();
+                    crate::engine::folder_of(&index, last)
+                };
+                self.scope(Some(folder), window, cx);
+            }
+            MenuAct::ZoomOut => {
+                if parent_scope.is_some() {
+                    self.scope(parent_scope, window, cx);
+                }
+            }
+            MenuAct::Sync => {
+                let folder = crate::engine::folder_of(&self.engine.shared.index.read(), last);
+                self.engine.sync_folder(folder);
+            }
+            MenuAct::Export => {
+                let Some(view) = self.engine.shared.view.lock().clone() else {
+                    return;
+                };
+                let (shared, categories) = (self.engine.shared.clone(), self.category_map.clone());
+                let mut ids = ids.to_vec();
+                {
+                    let index = shared.index.read();
+                    ids.sort_by_key(|&id| std::cmp::Reverse(view.filter.totals(&index, id).on_disk));
+                }
+                crate::export::save(window, cx, "view-everything-selection.csv", move |path| {
+                    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+                    ve_core::export::write_csv(&mut out, &shared.index.read(), &view.filter, &categories, &ids)?;
+                    std::io::Write::flush(&mut out)
+                });
+            }
+            MenuAct::Trash => self.ask_trash_selected(window, cx),
+        }
+    }
+
+    /// Drops the selection of the shown list, and its outline on the Treemap and Selection panel.
+    fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        if self.show_tree {
+            self.tree.update(cx, |t, _| t.delegate_mut().selection.clear());
+        } else {
+            self.table.update(cx, |t, _| t.delegate_mut().selection.clear());
+        }
+        self.treemap.update(cx, |t, cx| {
+            t.set_selected(None, cx);
+            t.set_also_selected(Vec::new(), cx);
+        });
+        self.selection_panel.update(cx, |p, cx| p.set_selected(None, cx));
+        cx.notify();
+    }
+
+    /// Selects every row of the shown list.
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        if self.show_tree {
+            self.tree.update(cx, |t, _| t.delegate_mut().select_all());
+        } else {
+            self.table.update(cx, |t, _| t.delegate_mut().select_all());
+        }
+        self.outline_selection(cx);
+        cx.notify();
     }
 
     fn ask_trash_selected(&self, window: &mut Window, cx: &mut App) {
@@ -1108,7 +1489,8 @@ impl Shell {
 
     /// Lets the lists' name columns take the width the panel gives them.
     fn fit_lists(&self, cx: &mut Context<Self>) {
-        let width = self.list_width.get();
+        // The measured box includes the list card's 12px side padding.
+        let width = (self.list_width.get() - 24.).max(0.);
         self.table.update(cx, |t, cx| {
             if t.delegate_mut().set_available(width) {
                 t.refresh(cx);
@@ -1121,7 +1503,7 @@ impl Shell {
         });
     }
 
-    fn nav_row(&self, id: &'static str, label: &'static str, icon: IconName, page: Page, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn nav_row(&self, id: &'static str, label: &'static str, icon: impl IntoElement, page: Page, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = palette(cx);
         let (muted, text, active) = (p.muted, p.text, p.active);
         let current = self.page == page;
@@ -1137,7 +1519,7 @@ impl Shell {
             .text_color(if current { text } else { muted })
             .when(current, |d| d.bg(active))
             .hover(move |s| s.text_color(text))
-            .child(Icon::new(icon).size(px(16.)))
+            .child(icon)
             .child(label)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.page = page;
@@ -1145,52 +1527,12 @@ impl Shell {
             }))
     }
 
-    /// Brand, scope switcher, pages, Locations; Settings and the user at the bottom.
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Brand, scope switcher, pages, Locations and Tasks; Settings and the user at the bottom.
+    fn sidebar(&self, locations: &[crate::locations::Row], scale: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let (muted, border, ground, accent) = (p.muted, p.border, p.ground, p.accent);
-        let (positive, avatar) = (p.positive, p.avatar);
-        let status = self.engine.shared.status.lock().clone();
-        let syncing: Vec<_> = match &status.phase {
-            Phase::Syncing { volumes, .. } => volumes.clone(),
-            _ => Vec::new(),
-        };
-        // Every Location in the Index: Offline Volumes too, with a grey dot.
-        let rows: Vec<(String, Hsla)> = self
-            .engine
-            .shared
-            .index
-            .read()
-            .volumes()
-            .map(|(_, v)| {
-                let name = match (v.remote(), self.volumes.iter().find(|m| m.identity == v.identity)) {
-                    (Some(remote), _) => remote.label(),
-                    (None, Some(m)) => volume_name(m),
-                    (None, None) => v.mount.display().to_string(),
-                };
-                let state = if !v.online {
-                    muted
-                } else if syncing.contains(&v.mount) {
-                    accent
-                } else {
-                    positive
-                };
-                (name, state)
-            })
-            .collect();
-        let count = rows.len();
-        let locations = rows.into_iter().enumerate().map(|(ix, (name, state))| {
-            h_flex()
-                .id(("location", ix))
-                .h(px(32.))
-                .my(px(1.))
-                .px(px(12.))
-                .gap(px(10.))
-                .items_center()
-                .text_color(muted)
-                .child(dot(state))
-                .child(div().min_w_0().truncate().child(name))
-        });
+        let (border, ground) = (p.border, p.ground);
+        let avatar = p.avatar;
+        let count = locations.len();
         let user = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_else(|_| "user".into());
@@ -1216,7 +1558,7 @@ impl Shell {
                     .items_center()
                     .text_size(px(15.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(img(APP_ICON.clone()).size(px(24.)).flex_none())
+                    .child(img(app_icon(24., scale)).size(px(24.)).flex_none())
                     .child(APP_NAME),
             )
             .child(
@@ -1233,17 +1575,66 @@ impl Shell {
                     .child(caption(format!("{count} Location{}", if count == 1 { "" } else { "s" }), cx)),
             )
             .child(
-                self.nav_row("nav-dashboard", "Dashboard", IconName::LayoutDashboard, Page::Dashboard, cx)
-                    .mt(px(12.)),
+                self.nav_row(
+                    "nav-dashboard",
+                    "Dashboard",
+                    Icon::new(IconName::LayoutDashboard).size(px(16.)),
+                    Page::Dashboard,
+                    cx,
+                )
+                .mt(px(12.)),
             )
-            .child(self.nav_row("nav-explorer", "Explorer", IconName::Folder, Page::Explorer, cx))
-            .child(self.nav_row("nav-cleaner", "Cleaner", IconName::Delete, Page::Cleaner, cx))
-            .child(div().mt(px(30.)).mb(px(8.)).px(px(12.)).child(caption("Locations", cx)))
-            .child(v_flex().id("locations").flex_1().min_h_0().overflow_y_scroll().children(locations))
+            .child(self.nav_row(
+                "nav-explorer",
+                "Explorer",
+                Icon::new(IconName::Folder).size(px(16.)),
+                Page::Explorer,
+                cx,
+            ))
+            // The same trash can as Move to Trash.
+            .child(self.nav_row(
+                "nav-cleaner",
+                "Cleaner",
+                Icon::empty().path("icons/trash.svg").size(px(16.)),
+                Page::Cleaner,
+                cx,
+            ))
+            .child(div().flex_1().min_h_0())
+            .child({
+                let (health, tip) = crate::locations::summary(locations, chrono::Utc::now().timestamp());
+                crate::locations::indicator_row(health, tip, self.locations_open, cx).on_click(cx.listener(|this, _, _, cx| {
+                    // The press that closed the panel (an outside click) must not reopen it.
+                    let just_closed = this
+                        .locations_closed
+                        .take()
+                        .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(300));
+                    this.locations_open = !this.locations_open && !just_closed;
+                    this.tasks_open = false;
+                    cx.notify();
+                }))
+            })
+            .child(
+                crate::tasks::indicator_row(&self.engine.shared.tasks, self.tasks_open, cx).on_click(cx.listener(|this, _, _, cx| {
+                    // The press that closed the panel (an outside click) must not reopen it.
+                    let just_closed = this
+                        .tasks_closed
+                        .take()
+                        .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(300));
+                    this.tasks_open = !this.tasks_open && !just_closed;
+                    this.locations_open = false;
+                    cx.notify();
+                })),
+            )
             .children(self.update_row(cx))
             .child(
-                self.nav_row("nav-settings", "Settings", IconName::Settings, Page::Settings, cx)
-                    .mt(px(16.)),
+                self.nav_row(
+                    "nav-settings",
+                    "Settings",
+                    Icon::new(IconName::Settings).size(px(16.)),
+                    Page::Settings,
+                    cx,
+                )
+                .mt(px(16.)),
             )
             .child(
                 h_flex()
@@ -1292,6 +1683,20 @@ impl Shell {
             .border_1()
             .border_color(p.border)
             .bg(p.surface)
+            // Capture, so Escape is ours before the input sees it: first drop the non-scope
+            // terms, then (nothing but the scope left, or nothing) clear it all.
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key != "escape" {
+                    return;
+                }
+                let text = this.query.read(cx).value().to_string();
+                if text.is_empty() {
+                    return;
+                }
+                let kept = crate::scope::keep_scope(&text);
+                this.set_query_text(if kept == text { "" } else { &kept }, window, cx);
+                cx.stop_propagation();
+            }))
             .child(Icon::new(IconName::Search).small().text_color(p.muted))
             .child(
                 div()
@@ -1299,6 +1704,16 @@ impl Shell {
                     .min_w_0()
                     .child(Input::new(&self.query).appearance(false).bordered(false)),
             )
+            .when(!self.query.read(cx).value().is_empty(), |d| {
+                d.child(
+                    div()
+                        .id("query-clear")
+                        .cursor_pointer()
+                        .tooltip(|window, cx| Tooltip::new("Clear the Query").build(window, cx))
+                        .child(Icon::new(IconName::Close).small().text_color(p.muted))
+                        .on_click(cx.listener(|this, _, window, cx| this.set_query_text("", window, cx))),
+                )
+            })
             .child(div().text_xs().text_color(p.muted).child("/"))
     }
 
@@ -1365,18 +1780,48 @@ impl Shell {
             format::size(total),
             if self.show_tree { tree_sort } else { "On-disk Size" }
         );
-        let selected = self.selected_entries(cx);
-        let blocked = self.trash.blocker_of(&selected, &self.volumes);
-        let selected_size = {
+        let (sel_version, sel_len) = {
+            let s = if self.show_tree {
+                &self.tree.read(cx).delegate().selection
+            } else {
+                &self.table.read(cx).delegate().selection
+            };
+            (s.version(), s.len())
+        };
+        let selected_size = if sel_len == 0 {
+            0
+        } else {
             let view = self.engine.shared.view.lock().clone();
             let index = self.engine.shared.index.read();
-            view.map_or(0, |v| {
-                selected
-                    .iter()
-                    .filter(|&&id| index.is_live(id))
-                    .map(|&id| v.filter.totals(&index, id).on_disk)
-                    .sum()
-            })
+            match view {
+                None => 0,
+                Some(v) => {
+                    // Recomputed only when the selection, the View or the Index changed.
+                    let key = (self.show_tree, sel_version, v.id, index.generation());
+                    match self.selected_size.get() {
+                        Some((k, size)) if k == key => size,
+                        _ => {
+                            let selected = if self.show_tree {
+                                self.tree.read(cx).delegate().selection.unordered()
+                            } else {
+                                self.table.read(cx).delegate().selection.unordered()
+                            };
+                            // A folder takes what is under it, and a hard-linked file counts once.
+                            let chosen: std::collections::HashSet<_> = selected.iter().copied().collect();
+                            let mut links = std::collections::HashSet::new();
+                            let size = selected
+                                .iter()
+                                .filter(|&&id| index.is_live(id))
+                                .filter(|&&id| !std::iter::successors(index.parent(id), |&p| index.parent(p)).any(|a| chosen.contains(&a)))
+                                .filter(|&&id| !index.is_hardlinked(id) || links.insert(index.key(id)))
+                                .map(|&id| v.filter.totals(&index, id).on_disk)
+                                .sum::<u64>();
+                            self.selected_size.set(Some((key, size)));
+                            size
+                        }
+                    }
+                }
+            }
         };
         let width = self.list_width.clone();
         let measure = canvas(move |b, _, _| width.set(f32::from(b.size.width)), |_, _, _, _| {})
@@ -1422,36 +1867,21 @@ impl Shell {
             comparing.map_or("Compare with".to_owned(), |d| format!("Compared with {d}")),
         )
         .small()
+        .busy(self.compare.read(cx).working())
         .selected(comparing.is_some())
         .build(
             cx,
             cx.listener(|this, _, window, cx| Compare::open_dialog(&this.compare, window, cx)),
         );
-        let why = if selected.is_empty() {
-            Some(SharedString::from("Select Entries to move to the Trash"))
-        } else {
-            blocked.map(SharedString::from)
-        };
-        let trash = pill("trash", "Move to Trash")
-            .icon("icons/trash.svg")
-            .kbd("Del")
-            .small()
-            .disabled(why)
-            .build(cx, cx.listener(|this, _, window, cx| this.ask_trash_selected(window, cx)));
         let export = pill("export", "Export CSV")
             .small()
             .build(cx, cx.listener(|this, _, window, cx| this.export_csv(window, cx)));
-        let selection = (!selected.is_empty()).then(|| {
+        let selection = (sel_len > 0).then(|| {
             h_flex()
                 .gap(px(4.))
                 .text_xs()
                 .text_color(muted)
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(text)
-                        .child(selected.len().to_string()),
-                )
+                .child(div().font_weight(FontWeight::MEDIUM).text_color(text).child(sel_len.to_string()))
                 .child(format!("selected · {}", format::size(selected_size)))
         });
         let list = if self.show_duplicates {
@@ -1471,10 +1901,24 @@ impl Shell {
                 .header_row_height(px(30.))
                 .into_any_element()
         };
-        let grow = |weight: f32| v_flex().min_w_0().h_full().gap(px(16.)).flex_grow(weight).flex_basis(relative(0.));
-        let left = grow(7.)
+        // The list takes the width its columns need (plus its padding), shrinking Name on narrow
+        // windows; the Treemap column takes everything else.
+        let natural = if self.show_tree || self.show_duplicates {
+            self.tree.read(cx).delegate().natural_width()
+        } else {
+            FlatList::natural_width()
+        } + 24.;
+        let left = v_flex()
+            .min_w(px(360.))
+            .h_full()
+            .gap(px(16.))
+            .flex_shrink(1.)
+            .flex_grow(0.)
+            .flex_basis(px(natural));
+        let left = left
             .child(
                 div()
+                    .id("explorer-list")
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -1488,11 +1932,17 @@ impl Shell {
                     .child(list),
             )
             .child(div().h(px(301.)).flex_none().child(self.categories.clone()));
-        let right = grow(5.).child(if self.show_filters {
-            self.filters.clone().into_any_element()
-        } else {
-            self.treemap.clone().into_any_element()
-        });
+        let right = v_flex()
+            .min_w(px(440.))
+            .h_full()
+            .gap(px(16.))
+            .flex_1()
+            .child(if self.show_filters {
+                crate::motion::slide_in(div().flex_1().min_h_0().child(self.filters.clone()), "filters-slide").into_any_element()
+            } else {
+                div().flex_1().min_h_0().child(self.treemap.clone()).into_any_element()
+            })
+            .when(!self.show_filters, |d| d.child(self.selection_panel.clone()));
         v_flex()
             .size_full()
             .child(
@@ -1512,6 +1962,35 @@ impl Shell {
                         }
                         match event.keystroke.key.as_str() {
                             "delete" => this.ask_trash_selected(window, cx),
+                            key @ ("up" | "down") if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
+                                let (down, extend) = (key == "down", event.keystroke.modifiers.shift);
+                                // Our Selection, not the Table's own index, says where the focus is.
+                                if this.show_tree {
+                                    this.tree.update(cx, |t, cx| {
+                                        let row = t.delegate_mut().step(down, extend);
+                                        if let Some(row) = row {
+                                            t.scroll_to_row(row, cx);
+                                        }
+                                        cx.notify();
+                                    });
+                                } else {
+                                    this.table.update(cx, |t, cx| {
+                                        if let Some(row) = t.delegate_mut().step(down, extend) {
+                                            t.scroll_to_row(row, cx);
+                                        }
+                                        cx.notify();
+                                    });
+                                }
+                                cx.stop_propagation();
+                            }
+                            "escape" => {
+                                this.clear_selection(cx);
+                                cx.stop_propagation();
+                            }
+                            "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
+                                this.select_all(cx);
+                                cx.stop_propagation();
+                            }
                             "/" => this.query.focus_handle(cx).focus(window, cx),
                             _ => {}
                         }
@@ -1533,8 +2012,7 @@ impl Shell {
                                     .child(saved)
                                     .when(self.show_tree && !self.show_duplicates, |d| d.child(compare))
                                     .child(filters)
-                                    .child(export)
-                                    .child(trash),
+                                    .child(export),
                             ),
                     )
                     .child(self.tabs(summary, cx))
@@ -1554,7 +2032,26 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // One read lock for the whole frame: the status bar and the Locations rows read the Index
+        // again (the lock is recursive), and no writer can slip in between them.
+        let _frame_index = self.engine.shared.index.read();
+        let now = chrono::Utc::now().timestamp();
+        let above = self.update_row_height();
+        // The Tasks list shows each running Task's elapsed time; nothing else repaints a Task that
+        // reports no progress, so tick once a second while it is open and Tasks run.
+        if self.tasks_open && !self.tasks_ticking && self.engine.shared.tasks.running_count() > 0 {
+            self.tasks_ticking = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.tasks_ticking = false;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        let rows = crate::locations::rows(&self.engine.shared, &self.volumes, self.settings_page.read(cx).settings(), now);
         let page = match self.page {
             Page::Dashboard => self.dashboard.clone().into_any_element(),
             Page::Explorer => self.explorer(cx).into_any_element(),
@@ -1567,11 +2064,60 @@ impl Render for Shell {
             self.page != Page::Explorer && (!self.startup_problems.is_empty() || !self.engine.shared.status.lock().problems.is_empty());
         h_flex()
             .size_full()
+            .relative()
             .bg(p.ground)
             .text_color(p.text)
             .font_features(tabular())
             .line_height(px(20.))
-            .child(self.sidebar(cx))
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if (this.tasks_open || this.locations_open) && event.keystroke.key == "escape" {
+                    this.tasks_open = false;
+                    this.locations_open = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .child(self.sidebar(&rows, window.scale_factor(), cx))
+            .when(self.tasks_open, |d| {
+                d.child(
+                    deferred(
+                        div()
+                            .absolute()
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                this.tasks_open = false;
+                                this.tasks_closed = Some(std::time::Instant::now());
+                                cx.notify();
+                            }))
+                            .left(px(232.))
+                            .bottom(px(60. + above))
+                            .child(crate::motion::slide_in(
+                                div().child(crate::tasks::list_panel(&self.engine.shared.tasks, cx)),
+                                "tasks-slide",
+                            )),
+                    )
+                    .with_priority(1),
+                )
+            })
+            .when(self.locations_open, |d| {
+                d.child(
+                    deferred(
+                        div()
+                            .absolute()
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                this.locations_open = false;
+                                this.locations_closed = Some(std::time::Instant::now());
+                                cx.notify();
+                            }))
+                            .left(px(232.))
+                            .bottom(px(94. + above))
+                            .child(crate::motion::slide_in(
+                                div().child(crate::locations::panel(rows, now, &self.engine, cx)),
+                                "locations-slide",
+                            )),
+                    )
+                    .with_priority(1),
+                )
+            })
             .child(
                 v_flex()
                     .flex_1()
@@ -1581,4 +2127,19 @@ impl Render for Shell {
                     .when(problems, |c| c.child(self.status_bar(cx))),
             )
     }
+}
+
+/// What a context-menu item does to the selection.
+#[derive(Clone, Copy)]
+enum MenuAct {
+    Open,
+    Reveal,
+    Terminal,
+    CopyPath,
+    CopyNameSize,
+    ZoomIn,
+    ZoomOut,
+    Sync,
+    Export,
+    Trash,
 }
