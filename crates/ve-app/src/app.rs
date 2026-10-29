@@ -396,6 +396,10 @@ impl Shell {
                 };
                 // A failed check keeps showing the row of an earlier one.
                 if let Ok(release) = found {
+                    // A staged or failed update belongs to the version it was for.
+                    if this.update.as_ref().map(|r| &r.version) != release.as_ref().map(|r| &r.version) {
+                        this.self_update = SelfUpdate::Link;
+                    }
                     this.update = release;
                     this.start_download(cx);
                 }
@@ -407,11 +411,12 @@ impl Shell {
         .detach();
     }
 
-    /// Downloads and verifies the update in the background when this install can update itself;
+    /// Downloads and verifies the update in the background when this install can update itself (a failure is
+    /// not retried until a newer version is out);
     /// otherwise (or on failure) the row keeps the release link.
     #[cfg(feature = "updater")]
     fn start_download(&mut self, cx: &mut Context<Self>) {
-        let (Some(release), SelfUpdate::Link | SelfUpdate::Failed(_)) = (self.update.clone(), &self.self_update) else {
+        let (Some(release), SelfUpdate::Link) = (self.update.clone(), &self.self_update) else {
             return;
         };
         let Some(kind) = crate::update::Kind::detect() else { return };

@@ -36,6 +36,9 @@ pub enum Kind {
 pub struct Staged {
     kind: Kind,
     path: PathBuf,
+    /// The signature and key of a staged file that is the signed asset itself (AppImage, msi), checked
+    /// again at the swap: it may have waited on disk for days, or in a temp dir other processes can write.
+    recheck: Option<(String, String)>,
 }
 
 impl Kind {
@@ -187,7 +190,13 @@ pub fn prepare(kind: &Kind, release: &Release, public_key: &str, tmp: &Path) -> 
             kind.staged_path()
         }
     };
-    Ok(Staged { kind: kind.clone(), path })
+    let signed_as_is = matches!(kind, Kind::AppImage(_) | Kind::Msi(_));
+    let recheck = signed_as_is.then(|| (public_key.to_owned(), signature));
+    Ok(Staged {
+        kind: kind.clone(),
+        path,
+        recheck,
+    })
 }
 
 fn make_executable(path: &Path) -> Result<(), String> {
@@ -248,6 +257,10 @@ fn bundle_from_dmg(dmg: &Path, dest: &Path) -> Result<(), String> {
 /// Replaces the current install with the staged update and starts it. The caller then quits.
 /// `save` runs once the swap is certain, before the new copy starts (the Index is saved there).
 pub fn apply(staged: &Staged, save: impl FnOnce()) -> Result<(), String> {
+    if let Some((key, signature)) = &staged.recheck {
+        let file = fs::read(&staged.path).map_err(|e| format!("could not read the update: {e}"))?;
+        verify(key, &file, signature)?;
+    }
     if let Kind::Msi(exe) = &staged.kind {
         save();
         return run_msi(&staged.path, exe);
@@ -465,6 +478,18 @@ mod tests {
     }
 
     #[test]
+    fn a_staged_file_changed_since_verification_is_not_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("View.AppImage");
+        fs::write(&app, "old").unwrap();
+        let (release, key) = release(b"new", APPIMAGE, false);
+        let staged = prepare(&Kind::AppImage(app.clone()), &release, &key, dir.path()).unwrap();
+        fs::write(&staged.path, "swapped by someone").unwrap();
+        assert!(apply(&staged, || panic!("must not save")).is_err());
+        assert_eq!(fs::read(&app).unwrap(), b"old");
+    }
+
+    #[test]
     fn bad_signature_aborts_and_leaves_the_appimage_alone() {
         let dir = tempfile::tempdir().unwrap();
         let app = dir.path().join("View.AppImage");
@@ -596,6 +621,7 @@ mod tests {
         let staged = Staged {
             path: kind.staged_path(),
             kind,
+            recheck: None,
         };
         fs::create_dir_all(staged.path.join("Contents")).unwrap();
         fs::write(staged.path.join("Contents/v"), "new").unwrap();
@@ -613,6 +639,7 @@ mod tests {
         let staged = Staged {
             kind: Kind::Portable(exe.clone()),
             path: dir.path().join("missing"),
+            recheck: None,
         };
         assert!(swap(&staged).is_err());
         assert_eq!(fs::read(&exe).unwrap(), b"old");
