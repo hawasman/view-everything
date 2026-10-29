@@ -79,8 +79,12 @@ enum Term {
 
 #[derive(Clone, Debug)]
 struct Text {
-    /// Lower-cased pattern, with `\` turned into `/` when matching paths.
+    /// Lower-cased pattern (as typed under `case:`), with `\` turned into `/` when matching paths.
     pattern: String,
+    /// `case:`: letters must match in case.
+    case_sensitive: bool,
+    /// `wholeword:`: the match must not touch a letter or digit on either side.
+    whole_word: bool,
     /// `*`/`?` present: the pattern must match the whole name (or path).
     wildcard: bool,
     /// The pattern contains a folder separator: match against the full path.
@@ -154,9 +158,16 @@ impl Term {
     }
 
     fn parse(word: &Word, categories: &Arc<CategoryMap>, context: &QueryContext) -> Result<Term, QueryError> {
+        let (case_sensitive, whole_word, word) = word.peel_flags();
         let Some((name, value)) = word.modifier() else {
-            return Ok(Term::Text(Text::new(&word.text)));
+            if (case_sensitive || whole_word) && word.text.is_empty() {
+                return Err(QueryError("`case:` and `wholeword:` need a term after them".into()));
+            }
+            return Ok(Term::Text(Text::new(&word.text, case_sensitive, whole_word)));
         };
+        if case_sensitive || whole_word {
+            return Err(QueryError(format!("`case:` and `wholeword:` apply to text, not `{name}:`")));
+        }
         let missing = || QueryError(format!("`{name}:` needs a value"));
         match name {
             "ext" => {
@@ -199,6 +210,8 @@ impl Term {
 }
 
 const MODIFIERS: &[&str] = &["ext", "type", "size", "dm", "regex"];
+/// Prefixes that change how the term after them matches; they chain (`case:wholeword:Foo`).
+const FLAGS: &[&str] = &["case", "wholeword"];
 
 /// A comparison value: `>x`, `>=x`, `<x`, `<=x`, `=x`, `a..b` or a bare `x`.
 enum Comparison<'a> {
@@ -324,15 +337,17 @@ fn local_midnight_nanos(date: NaiveDate) -> i64 {
 }
 
 impl Text {
-    fn new(raw: &str) -> Text {
+    fn new(raw: &str, case_sensitive: bool, whole_word: bool) -> Text {
         let on_path = raw.contains(['/', '\\']);
-        let mut pattern = raw.to_lowercase();
+        let mut pattern = if case_sensitive { raw.to_owned() } else { raw.to_lowercase() };
         if on_path {
             pattern = pattern.replace('\\', "/");
         }
         Text {
             wildcard: pattern.contains(['*', '?']),
             pattern,
+            case_sensitive,
+            whole_word,
             on_path,
         }
     }
@@ -343,12 +358,42 @@ impl Text {
         } else {
             candidate.name
         };
-        if self.wildcard {
-            wildcard_match(&self.pattern, &subject.to_lowercase())
-        } else {
-            contains_ignore_case(subject, &self.pattern)
+        if self.whole_word {
+            let lowered;
+            let subject = if self.case_sensitive {
+                subject
+            } else {
+                lowered = subject.to_lowercase();
+                &lowered
+            };
+            return whole_word_match(&self.pattern, subject, self.wildcard);
+        }
+        match (self.wildcard, self.case_sensitive) {
+            (true, true) => wildcard_match(&self.pattern, subject),
+            (true, false) => wildcard_match(&self.pattern, &subject.to_lowercase()),
+            (false, true) => subject.contains(&self.pattern),
+            (false, false) => contains_ignore_case(subject, &self.pattern),
         }
     }
+}
+
+/// Whether `pattern` matches a stretch of `subject` that no letter or digit touches (`_`, `-`,
+/// `.` and spaces all separate words). A wildcard pattern must cover the whole stretch.
+fn whole_word_match(pattern: &str, subject: &str, wildcard: bool) -> bool {
+    let apart = |at: usize, end: usize| {
+        !subject[..at].chars().next_back().is_some_and(char::is_alphanumeric)
+            && !subject[end..].chars().next().is_some_and(char::is_alphanumeric)
+    };
+    if !wildcard {
+        return subject.match_indices(pattern).any(|(at, m)| apart(at, at + m.len()));
+    }
+    // ponytail: tries every start/end pair, quadratic in the name length; names are short.
+    let cuts: Vec<usize> = subject.char_indices().map(|(i, _)| i).chain([subject.len()]).collect();
+    cuts.iter().enumerate().any(|(n, &at)| {
+        cuts[n + 1..]
+            .iter()
+            .any(|&end| apart(at, end) && wildcard_match(pattern, &subject[at..end]))
+    })
 }
 
 /// Case-insensitive substring search; `needle` is already lower-cased.
@@ -389,7 +434,7 @@ enum Token {
     Word(Word),
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Word {
     negated: bool,
     text: String,
@@ -401,6 +446,27 @@ struct Word {
 }
 
 impl Word {
+    /// Strips leading `case:` / `wholeword:` prefixes: `(case, whole word, the word that is left)`.
+    fn peel_flags(&self) -> (bool, bool, Word) {
+        let (mut case, mut whole) = (false, false);
+        let mut word = self.clone();
+        while let Some(colon) = word.text.find(':') {
+            if word.quoted_from.is_some_and(|q| q <= colon) {
+                break;
+            }
+            let Some(flag) = FLAGS.iter().find(|f| f.eq_ignore_ascii_case(&word.text[..colon])) else {
+                break;
+            };
+            match *flag {
+                "case" => case = true,
+                _ => whole = true,
+            }
+            word.text.drain(..=colon);
+            word.quoted_from = word.quoted_from.map(|q| q.saturating_sub(colon + 1));
+        }
+        (case, whole, word)
+    }
+
     /// `(modifier, value)` when the word starts with an unquoted known modifier such as `ext:`.
     fn modifier(&self) -> Option<(&'static str, &str)> {
         let colon = self.text.find(':')?;

@@ -17,6 +17,25 @@ never wait on a scan.
 The vocabulary used in the app and the code is defined in [CONTEXT.md](CONTEXT.md); design
 decisions are recorded in [docs/adr](docs/adr).
 
+## Query language
+
+Every panel in the Explorer follows one Query. Terms separated by spaces must all match; `a|b`
+matches either; `!term` excludes; `"quotes"` keep spaces; `*` and `?` match the whole name; a term
+containing `/` or `\` matches the full path. Text ignores case unless told otherwise.
+
+| Modifier | Matches |
+| --- | --- |
+| `ext:mp4;mkv` | files with one of the extensions |
+| `type:video` | files of a Category |
+| `size:>1gb`, `size:1mb..5mb` | files by Logical Size |
+| `dm:2025-01`, `dm:>=yesterday` | files by modification date |
+| `regex:^IMG_\d+` | names matching a regular expression |
+| `case:Report` | the term, matching letters in exactly that case |
+| `wholeword:cat` | the term only as a whole word: `cat` in `a-cat.txt`, not in `category`. Only letters and digits join a word, so `_`, `-`, `.` and spaces separate words. With wildcards (`wholeword:re*t`) the pattern must cover a whole run of words |
+
+`case:` and `wholeword:` prefix a plain or wildcard term, chain (`case:wholeword:Cat`), and combine
+with `!` and `|` (`!wholeword:tmp`, `case:Foo|case:Bar`).
+
 ## Install
 
 Download the latest build from the [Releases](../../releases) page:
