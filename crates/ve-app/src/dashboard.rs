@@ -874,7 +874,9 @@ impl DashboardPage {
         let online: Vec<&Location> = locations.iter().filter(|l| l.online).collect();
         let target = oldest(&online.iter().map(|l| l.last_synced).collect::<Vec<_>>()).map(|i| online[i]);
         let refresh_why = target.is_none().then_some("There is nothing to refresh");
-        let label = target.map_or("Refresh".to_owned(), |l| format!("Refresh {}", l.name));
+        let label = target.map_or("Refresh".to_owned(), |l| {
+            format!("Refresh {}", shortened(&l.name, REFRESH_NAME_CHARS))
+        });
         let refresh_ids: Vec<String> = target
             .map(|l| l.members.iter().map(|m| m.identity.clone()).collect())
             .unwrap_or_default();
@@ -893,6 +895,9 @@ impl DashboardPage {
         v_flex()
             .flex_grow(3.)
             .flex_basis(relative(0.))
+            // A long label must not widen the column (and squeeze the Locations beside it).
+            .min_w_0()
+            .overflow_hidden()
             .gap(px(16.))
             .child(trash)
             .child(synced)
@@ -1149,5 +1154,28 @@ mod bench {
             }
         })
         .detach();
+    }
+}
+
+/// The most of a Remote's or Volume's name the Refresh button shows.
+const REFRESH_NAME_CHARS: usize = 18;
+
+/// `text` cut to `max` characters, ending in `…` when it was longer.
+fn shortened(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    text.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shortened;
+
+    #[test]
+    fn long_names_are_cut_with_an_ellipsis() {
+        assert_eq!(shortened("nas", 18), "nas");
+        assert_eq!(shortened("a-very-long-remote-name-indeed", 10), "a-very-lo…");
+        assert_eq!(shortened("日本語日本語", 4), "日本語…");
     }
 }
