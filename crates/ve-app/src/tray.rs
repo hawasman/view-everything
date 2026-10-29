@@ -303,7 +303,7 @@ mod platform {
             return std::ptr::null_mut();
         };
         // The icon wants BGRA; its AND mask is ignored for 32-bit colour but must be present.
-        let bgra: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], p[3]]).collect();
+        let bgra: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[2], p[1], p[0], p[3]]).collect();
         let mask = vec![0u8; (SIZE * SIZE / 8) as usize];
         // SAFETY: both buffers hold the SIZE x SIZE pixels the call reads.
         unsafe { CreateIcon(std::ptr::null_mut(), SIZE as i32, SIZE as i32, 1, 32, mask.as_ptr(), bgra.as_ptr()) }
