@@ -46,6 +46,10 @@ pub struct Settings {
     /// When the last update check ran, in Unix seconds.
     #[serde(default)]
     pub last_update_check: Option<i64>,
+    /// Linux: follow file changes live with the `fanotify` helper, started with pkexec while the
+    /// app runs (ADR-0009). Off until the user asks.
+    #[serde(default)]
+    pub live_helper: bool,
     /// Queries the user saved under a name, in the order saved.
     #[serde(default)]
     pub saved_queries: Vec<SavedQuery>,
@@ -104,6 +108,7 @@ impl Default for Settings {
             remotes: Vec::new(),
             recent_query: None,
             update_checks: true,
+            live_helper: false,
             last_update_check: None,
             saved_queries: Vec::new(),
             cleaner_temp_days: default_temp_days(),

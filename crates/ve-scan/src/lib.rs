@@ -8,6 +8,7 @@ pub mod azure;
 mod capacity;
 pub mod duplicates;
 pub mod ftp;
+pub mod live;
 pub mod ntfs;
 mod platform;
 mod reconcile;

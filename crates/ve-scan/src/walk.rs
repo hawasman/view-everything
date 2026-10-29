@@ -69,6 +69,29 @@ pub(crate) fn sync_folder(index: &SharedIndex, dir: EntryId, path: &Path, progre
     Ok(())
 }
 
+/// Re-lists only the folder `dir` (at `path`): what it holds is made to match the filesystem.
+/// A subfolder the Index did not know yet is walked in full; known ones are left to their own
+/// changes.
+pub(crate) fn sync_dir(index: &SharedIndex, dir: EntryId, path: &Path, progress: &Progress) -> io::Result<()> {
+    let metadata = fs::metadata(path)?;
+    index.write().update(dir, entry_meta(&metadata, || path.to_path_buf()));
+    let walk = Walk {
+        index,
+        progress,
+        device: device(&metadata),
+    };
+    let Some(listing) = walk.list(path) else {
+        return Ok(());
+    };
+    let subfolders = apply(&mut index.write(), dir, listing);
+    for (id, os_name) in subfolders {
+        if index.read().children(id).is_empty() {
+            rayon::scope(|scope| walk.visit(scope, id, path.join(os_name)));
+        }
+    }
+    Ok(())
+}
+
 struct Walk<'a> {
     index: &'a SharedIndex,
     progress: &'a Progress,

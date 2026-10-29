@@ -355,6 +355,7 @@ pub struct Changed {
     pub indexed: Vec<VolumeInfo>,
     pub remotes: Vec<Remote>,
     pub intervals: Intervals,
+    pub live_helper: bool,
 }
 
 /// The user asked to Refresh the Remote with this identity now.
@@ -701,6 +702,7 @@ impl SettingsPage {
             mounted: self.volumes.clone(),
             remotes: self.settings.remotes.clone(),
             intervals: self.settings.intervals(&indexed),
+            live_helper: self.settings.live_helper,
             indexed,
         });
         cx.notify();
@@ -935,6 +937,25 @@ impl SettingsPage {
                     }))
             }))
             .into_any_element()
+    }
+
+    /// The Linux section: the switch that starts the `fanotify` helper (ADR-0009).
+    #[cfg(target_os = "linux")]
+    fn live_updates(&self, cx: &mut Context<Self>) -> Div {
+        panel(cx).child(
+            h_flex()
+                .gap(px(12.))
+                .items_center()
+                .child(
+                    Switch::new("live-helper")
+                        .checked(self.settings.live_helper)
+                        .on_click(cx.listener(|this, on: &bool, _, cx| {
+                            this.settings.live_helper = *on;
+                            this.commit(cx);
+                        })),
+                )
+                .child("Follow file changes live (asks for administrator authentication)"),
+        )
     }
 
     /// The Updates section: the daily-check switch, Check now and what the last check found.
@@ -1448,6 +1469,16 @@ impl Render for SettingsPage {
                 panel(cx).child(self.cleaner_limits(cx)),
                 cx,
             ));
+        #[cfg(target_os = "linux")]
+        {
+            let live = self.live_updates(cx);
+            column = column.child(div().h(px(1.)).bg(border)).child(section(
+                "Live updates",
+                "Without it, changes are found when a Volume is re-walked. With it, they reach the Index within seconds. Asks for your password each time the app starts; the helper runs only while the app does and only reports which files changed.",
+                live,
+                cx,
+            ));
+        }
         #[cfg(feature = "updater")]
         {
             let updates = self.updates(cx);
