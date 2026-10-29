@@ -117,14 +117,14 @@ impl Shell {
                 trash.clone(),
                 categories.clone(),
                 &settings,
-                repaint,
+                repaint.clone(),
                 window,
                 cx,
             );
             page.set_context(&settings, volumes.clone(), cx);
             page
         });
-        let cleaner = cx.new(|_| CleanerPage::new(engine.shared.clone(), volumes.clone()));
+        let cleaner = cx.new(|_| CleanerPage::new(engine.shared.clone(), repaint.clone(), volumes.clone()));
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
         cx.subscribe_in(&dashboard, window, |this, _, act: &Act, window, cx| {
             this.dashboard_act(act, window, cx)

@@ -1,7 +1,7 @@
 //! The Cleaner: Cleanables found from the Index by a Cleanup Rule, reviewed as a Cleanup Plan
 //! and removed permanently by Clean (ADR-0008).
 
-use crate::engine::Shared;
+use crate::engine::{Repaint, Shared};
 use crate::format;
 use crate::theme::palette;
 use crate::trash::{subtree_on_disk, volume_blocker};
@@ -112,6 +112,7 @@ pub fn clean(paths: &[PathBuf]) -> Outcome {
 
 pub struct CleanerPage {
     shared: Arc<Shared>,
+    repaint: Repaint,
     volumes: Vec<VolumeInfo>,
     /// Index generation `cleanables` was found in.
     seen: Option<u64>,
@@ -121,9 +122,10 @@ pub struct CleanerPage {
 }
 
 impl CleanerPage {
-    pub fn new(shared: Arc<Shared>, volumes: Vec<VolumeInfo>) -> Self {
+    pub fn new(shared: Arc<Shared>, repaint: Repaint, volumes: Vec<VolumeInfo>) -> Self {
         Self {
             shared,
+            repaint,
             volumes,
             seen: None,
             cleanables: Vec::new(),
@@ -189,20 +191,27 @@ impl CleanerPage {
                 async move |cx| {
                     let outcome = cx.background_executor().spawn(async move { clean(&paths) }).await;
                     cx.update(|window, cx| {
-                        let shared = this.read(cx).shared.clone();
+                        let (shared, repaint) = {
+                            let page = this.read(cx);
+                            (page.shared.clone(), page.repaint.clone())
+                        };
                         {
                             let mut index = shared.index.write();
                             // Whatever left the disk leaves the Index, skipped-because-vanished included.
-                            for path in outcome
-                                .removed
-                                .iter()
-                                .chain(outcome.skipped.iter().filter(|(p, _)| !p.exists()).map(|(p, _)| p))
-                            {
+                            for path in outcome.removed.iter().chain(
+                                outcome
+                                    .skipped
+                                    .iter()
+                                    .filter(|(p, _)| std::fs::symlink_metadata(p).is_err())
+                                    .map(|(p, _)| p),
+                            ) {
                                 if let Some(id) = index.find_path(path) {
                                     index.remove(id);
                                 }
                             }
                         }
+                        // Wakes the Dashboard and status bar, which read the changed Index.
+                        repaint();
                         this.update(cx, |page, cx| {
                             page.ticked.clear();
                             cx.notify();
@@ -420,6 +429,18 @@ mod tests {
         // A marker that vanished since the Index was built skips the folder too.
         std::fs::remove_file(fake_tag.join("CACHEDIR.TAG")).unwrap();
         assert!(recheck(&fake_tag).is_err());
+        // A symlinked Cargo.toml is no marker, and a symlinked target is never removed.
+        #[cfg(unix)]
+        {
+            let linked = make("linked", false, None);
+            std::os::unix::fs::symlink(base.join("unmarked").join("target"), base.join("linked").join("Cargo.toml")).unwrap();
+            assert!(recheck(&linked).is_err());
+            let alias = base.join("alias").join("target");
+            std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
+            std::fs::write(alias.parent().unwrap().join("Cargo.toml"), "").unwrap();
+            std::os::unix::fs::symlink(&unmarked, &alias).unwrap();
+            assert!(recheck(&alias).is_err());
+        }
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

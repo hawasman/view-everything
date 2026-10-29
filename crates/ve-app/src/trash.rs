@@ -549,15 +549,11 @@ pub fn volume_blocker(volume: &ve_core::Volume, volumes: &[VolumeInfo]) -> Optio
         return Some("Remote Locations are read-only".into());
     }
     if !volume.online {
-        return Some("Offline Volume: it is not mounted, so nothing on it can go to the Trash.".into());
+        return Some("Offline Volume: it is not mounted, so nothing on it can be changed.".into());
     }
     let info = volumes.iter().find(|v| v.mount == volume.mount)?;
-    info.read_only.then(|| {
-        format!(
-            "{} is mounted read-only, so nothing on it can go to the Trash.",
-            info.mount.display()
-        )
-    })
+    info.read_only
+        .then(|| format!("{} is mounted read-only, so nothing on it can be changed.", info.mount.display()))
 }
 
 /// Why `id` can't go to the Trash, if it can't.
