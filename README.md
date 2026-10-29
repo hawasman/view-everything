@@ -63,18 +63,6 @@ warnings denied, and the test suite):
 git config core.hooksPath .githooks
 ```
 
-## Releasing
-
-Bump `version` in the root `Cargo.toml`, commit, then push a matching tag:
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The `release` workflow builds every platform and publishes a GitHub Release with the files and a
-`SHA256SUMS` list. It refuses a tag that does not match the Cargo version.
-
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT)

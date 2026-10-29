@@ -365,7 +365,7 @@ pub fn parse_record(number: u64, buf: &mut [u8], strict: bool, keep_runs: bool) 
                     if namespace != NAMESPACE_DOS
                         && let Some(raw) = value.get(0x42..0x42 + chars * 2)
                     {
-                        let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                        let units: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).collect();
                         parsed
                             .names
                             .push((record_number(u64_at(value, 0)), String::from_utf16_lossy(&units)));
