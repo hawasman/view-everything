@@ -82,7 +82,8 @@ mod tests {
         write_csv(&mut out, &index, &Filter::compute(&index, None), &CategoryMap::builtin(), &[f, g]).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains(",2026-10-10T15:33:33Z,"), "{text}");
-        assert!(text.contains("/w/unknown,unknown,0,0,,"), "{text}");
+        let unknown = index.path(g);
+        assert!(text.contains(&format!("{},unknown,0,0,,", unknown.display())), "{text}");
     }
 
     fn row(fields: &[&str]) -> String {

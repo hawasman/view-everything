@@ -1,6 +1,6 @@
 //! Self-update (ADR-0007): download the asset for this install, verify its minisign signature, stage it
-//! beside what it replaces, and, on "Restart to update", swap it in and relaunch. Nothing is replaced
-//! unless the signature checks out, and nothing here asks for admin rights except the msi's `msiexec`.
+//! beside what it replaces, and, on "Restart to update", verify the staged asset again, swap it in and
+//! relaunch. Nothing is replaced unless the signature checks out on the bytes being installed, and nothing here asks for admin rights except the msi's `msiexec`.
 
 use super::{Release, verify};
 use std::ffi::OsStr;
@@ -35,10 +35,14 @@ pub enum Kind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Staged {
     kind: Kind,
+    /// What the swap installs: the signed asset itself (AppImage, msi), or what is made from it at the
+    /// swap (the exe of the portable zip, the `.app` of the dmg).
     path: PathBuf,
-    /// The signature and key of a staged file that is the signed asset itself (AppImage, msi), checked
-    /// again at the swap: it may have waited on disk for days, or in a temp dir other processes can write.
-    recheck: Option<(String, String)>,
+    /// The signed asset as downloaded, read and verified again at the swap: it may have waited on disk
+    /// for days, or in a folder other processes can write.
+    asset: PathBuf,
+    public_key: String,
+    signature: String,
 }
 
 impl Kind {
@@ -164,38 +168,25 @@ pub fn prepare(kind: &Kind, release: &Release, public_key: &str, tmp: &Path) -> 
     let file = get(&file_url)?;
     verify(public_key, &file, &signature)?;
 
-    let path = match kind {
-        Kind::AppImage(_) => {
-            let path = kind.staged_path();
-            write_atomic(&path, &file)?;
-            make_executable(&path)?;
-            path
-        }
-        Kind::Portable(_) => {
-            let path = kind.staged_path();
-            write_atomic(&path, &exe_from_zip(&file)?)?;
-            path
-        }
+    let (asset, path) = match kind {
+        Kind::AppImage(_) => (kind.staged_path(), kind.staged_path()),
         Kind::Msi(_) => {
             let path = tmp.join(format!("{STAGED}.msi"));
-            write_atomic(&path, &file)?;
-            path
+            (path.clone(), path)
         }
-        Kind::MacApp(_) => {
-            let dmg = tmp.join(format!("{STAGED}.dmg"));
-            write_atomic(&dmg, &file)?;
-            let result = bundle_from_dmg(&dmg, &kind.staged_path());
-            let _ = fs::remove_file(&dmg);
-            result?;
-            kind.staged_path()
-        }
+        Kind::Portable(_) => (kind.dir().join(format!("{STAGED}.zip")), kind.staged_path()),
+        Kind::MacApp(_) => (tmp.join(format!("{STAGED}.dmg")), kind.staged_path()),
     };
-    let signed_as_is = matches!(kind, Kind::AppImage(_) | Kind::Msi(_));
-    let recheck = signed_as_is.then(|| (public_key.to_owned(), signature));
+    write_atomic(&asset, &file)?;
+    if matches!(kind, Kind::AppImage(_)) {
+        make_executable(&asset)?;
+    }
     Ok(Staged {
         kind: kind.clone(),
         path,
-        recheck,
+        asset,
+        public_key: public_key.to_owned(),
+        signature,
     })
 }
 
@@ -257,10 +248,7 @@ fn bundle_from_dmg(dmg: &Path, dest: &Path) -> Result<(), String> {
 /// Replaces the current install with the staged update and starts it. The caller then quits.
 /// `save` runs once the swap is certain, before the new copy starts (the Index is saved there).
 pub fn apply(staged: &Staged, save: impl FnOnce()) -> Result<(), String> {
-    if let Some((key, signature)) = &staged.recheck {
-        let file = fs::read(&staged.path).map_err(|e| format!("could not read the update: {e}"))?;
-        verify(key, &file, signature)?;
-    }
+    install_verified(staged)?;
     if let Kind::Msi(exe) = &staged.kind {
         save();
         return run_msi(&staged.path, exe);
@@ -268,6 +256,23 @@ pub fn apply(staged: &Staged, save: impl FnOnce()) -> Result<(), String> {
     swap(staged)?;
     save();
     relaunch(&staged.kind)
+}
+
+/// Verifies the staged asset and readies what the swap installs from those same bytes: the portable
+/// exe is cut out of the verified zip and the `.app` copied out of the verified dmg, so nothing
+/// unverified is installed. (`hdiutil` reads the dmg from disk: it is written afresh from the
+/// verified bytes just before.)
+fn install_verified(staged: &Staged) -> Result<(), String> {
+    let bytes = fs::read(&staged.asset).map_err(|e| format!("could not read the update: {e}"))?;
+    verify(&staged.public_key, &bytes, &staged.signature)?;
+    match &staged.kind {
+        Kind::Portable(_) => write_atomic(&staged.path, &exe_from_zip(&bytes)?),
+        Kind::MacApp(_) => {
+            write_atomic(&staged.asset, &bytes)?;
+            bundle_from_dmg(&staged.asset, &staged.path)
+        }
+        Kind::AppImage(_) | Kind::Msi(_) => Ok(()),
+    }
 }
 
 /// The swap itself; the running copy keeps working while its file or bundle is replaced.
@@ -347,7 +352,9 @@ fn run_msi(msi: &Path, exe: &Path) -> Result<(), String> {
 
 /// At startup: removes what an earlier update left (the renamed-aside exe, a staged file never applied).
 pub fn cleanup() {
-    let _ = fs::remove_file(std::env::temp_dir().join(format!("{STAGED}.msi")));
+    for ext in ["msi", "dmg"] {
+        let _ = fs::remove_file(std::env::temp_dir().join(format!("{STAGED}.{ext}")));
+    }
     let Some(kind) = Kind::detect() else { return };
     if let Kind::Portable(exe) = &kind {
         let _ = fs::remove_file(old_exe(exe));
@@ -574,6 +581,7 @@ mod tests {
         let (release, key) = release(&zip_with_exe(b"new"), PORTABLE, false);
         let staged = prepare(&Kind::Portable(exe.clone()), &release, &key, dir.path()).unwrap();
         assert_eq!(fs::read(&exe).unwrap(), b"old");
+        install_verified(&staged).unwrap();
         swap(&staged).unwrap();
         assert_eq!(fs::read(&exe).unwrap(), b"new");
         assert_eq!(fs::read(old_exe(&exe)).unwrap(), b"old");
@@ -582,6 +590,46 @@ mod tests {
         swap(&staged).unwrap();
         assert_eq!(fs::read(&exe).unwrap(), b"newer");
         assert_eq!(fs::read(old_exe(&exe)).unwrap(), b"new");
+    }
+
+    #[test]
+    fn portable_zip_changed_since_verification_is_not_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("view-everything.exe");
+        fs::write(&exe, "old").unwrap();
+        let (release, key) = release(&zip_with_exe(b"new"), PORTABLE, false);
+        let staged = prepare(&Kind::Portable(exe.clone()), &release, &key, dir.path()).unwrap();
+        fs::write(&staged.asset, zip_with_exe(b"evil")).unwrap();
+        assert!(apply(&staged, || panic!("must not save")).is_err());
+        assert_eq!(fs::read(&exe).unwrap(), b"old");
+        assert!(!old_exe(&exe).exists());
+    }
+
+    #[test]
+    fn portable_installs_the_exe_cut_from_the_verified_zip_not_a_planted_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("view-everything.exe");
+        fs::write(&exe, "old").unwrap();
+        let (release, key) = release(&zip_with_exe(b"new"), PORTABLE, false);
+        let staged = prepare(&Kind::Portable(exe.clone()), &release, &key, dir.path()).unwrap();
+        fs::write(&staged.path, "planted").unwrap();
+        install_verified(&staged).unwrap();
+        swap(&staged).unwrap();
+        assert_eq!(fs::read(&exe).unwrap(), b"new");
+    }
+
+    #[test]
+    fn mac_dmg_changed_since_verification_is_not_installed() {
+        let (dir, tmp) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let bundle = dir.path().join("View Everything.app");
+        fs::create_dir_all(&bundle).unwrap();
+        let (release, key) = release(b"dmg bytes", DMG, false);
+        let staged = prepare(&Kind::MacApp(bundle.clone()), &release, &key, tmp.path()).unwrap();
+        assert_eq!(fs::read(&staged.asset).unwrap(), b"dmg bytes");
+        assert!(!staged.path.exists(), "the bundle is only made at the swap");
+        fs::write(&staged.asset, "evil").unwrap();
+        assert!(apply(&staged, || panic!("must not save")).is_err());
+        assert_eq!(names(dir.path()), ["View Everything.app"]);
     }
 
     #[test]
@@ -620,8 +668,10 @@ mod tests {
         let kind = Kind::MacApp(bundle.clone());
         let staged = Staged {
             path: kind.staged_path(),
+            asset: PathBuf::new(),
+            public_key: String::new(),
+            signature: String::new(),
             kind,
-            recheck: None,
         };
         fs::create_dir_all(staged.path.join("Contents")).unwrap();
         fs::write(staged.path.join("Contents/v"), "new").unwrap();
@@ -639,7 +689,9 @@ mod tests {
         let staged = Staged {
             kind: Kind::Portable(exe.clone()),
             path: dir.path().join("missing"),
-            recheck: None,
+            asset: PathBuf::new(),
+            public_key: String::new(),
+            signature: String::new(),
         };
         assert!(swap(&staged).is_err());
         assert_eq!(fs::read(&exe).unwrap(), b"old");

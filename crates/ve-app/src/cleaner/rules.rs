@@ -425,7 +425,8 @@ fn marker_on_disk(path: &Path, marker: &str) -> bool {
 }
 
 /// Checks `path` on disk against the rule again: an absolute path that is not a link and has no
-/// link among its ancestor folders, with no Volume mounted on or inside it, that the rule's Query
+/// link among its ancestor folders below the Volume it is on (the Volume's own mount path is
+/// trusted, whatever links lead to it), with no Volume mounted on or inside it, that the rule's Query
 /// still selects, with a marker present. With `min_age_days` (the Cleanable was ticked for being
 /// old) nothing in its project may have changed within that many days.
 pub fn recheck(rule: &Rule, path: &Path, volumes: &[VolumeInfo], min_age_days: Option<u64>) -> Result<(), String> {
@@ -440,10 +441,17 @@ pub fn recheck(rule: &Rule, path: &Path, volumes: &[VolumeInfo], min_age_days: O
     if is_link(&meta) {
         return Err("it is now a link".into());
     }
-    // Removal through a linked ancestor would reach wherever the link points.
+    // Removal through a linked ancestor would reach wherever the link points. Only the folders
+    // between the Volume's mount path and `path` count; with no Volume found, all of them do.
+    let root = volumes
+        .iter()
+        .map(|v| &v.mount)
+        .filter(|m| path.starts_with(m))
+        .max_by_key(|m| m.as_os_str().len());
     if let Some(link) = path
         .ancestors()
         .skip(1)
+        .take_while(|a| root.is_none_or(|r| a.starts_with(r) && *a != r.as_path()))
         .find(|a| std::fs::symlink_metadata(a).is_ok_and(|m| is_link(&m)))
     {
         return Err(format!("a folder above it ({}) is a link", link.display()));
@@ -584,6 +592,25 @@ mod tests {
 
     fn rule(name: &str) -> Arc<Rule> {
         builtin(OS).rules.iter().find(|r| r.name == name).unwrap().clone()
+    }
+
+    /// The temp folder as a Volume mount path would read: real, with no links (macOS keeps it under
+    /// the /var link) and no Windows `\\?\` prefix.
+    fn real_temp() -> PathBuf {
+        let real = std::env::temp_dir().canonicalize().unwrap();
+        PathBuf::from(real.to_string_lossy().trim_start_matches(r"\\?\"))
+    }
+
+    fn volume_at(mount: &Path) -> VolumeInfo {
+        VolumeInfo {
+            mount: mount.to_path_buf(),
+            identity: "uuid:m".into(),
+            fs_type: "ext4".into(),
+            label: String::new(),
+            removable: true,
+            network: false,
+            read_only: false,
+        }
     }
 
     fn dir() -> EntryMeta {
@@ -746,10 +773,11 @@ mod tests {
     #[test]
     fn location_rules_list_what_is_in_the_folder_and_ages_decide_ticking() {
         let tmp = std::env::temp_dir();
+        let top = tmp.ancestors().last().unwrap();
         let mut index = Index::new();
-        let vol = index.add_volume(Path::new("/"), "ext4", "uuid:root", dir(), SyncState::Walk);
+        let vol = index.add_volume(top, "ext4", "uuid:root", dir(), SyncState::Walk);
         let mut parent = index.volume(vol).unwrap().root;
-        for part in tmp.components().skip(1) {
+        for part in tmp.strip_prefix(top).unwrap().components() {
             parent = index.insert(parent, part.as_os_str().to_str().unwrap(), dir());
         }
         let day = 86_400 * 1_000_000_000i64;
@@ -794,7 +822,8 @@ mod tests {
 
     #[test]
     fn the_readme_example_is_a_valid_user_file() {
-        let readme = include_str!("../../../../README.md");
+        // A Windows checkout may have CRLF line ends.
+        let readme = include_str!("../../../../README.md").replace("\r\n", "\n");
         let start = readme.find("```toml\n[[rule]]").unwrap() + "```toml\n".len();
         let example = &readme[start..start + readme[start..].find("```").unwrap()];
         let rules = parse(example, "cleanup.toml", OS, &context());
@@ -810,7 +839,7 @@ mod tests {
 
     #[test]
     fn clean_rechecks_on_disk() {
-        let base = std::env::temp_dir().join(format!("ve-cleaner-test-{}", std::process::id()));
+        let base = real_temp().join(format!("ve-cleaner-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let make = |name: &str, cargo: bool, tag: Option<&str>| {
             let target = base.join(name).join("target");
@@ -825,7 +854,8 @@ mod tests {
             target
         };
         let rust = rule("Rust build artefacts");
-        let rc = |p: &Path| recheck(&rust, p, &[], None);
+        let vols = [volume_at(&real_temp())];
+        let rc = |p: &Path| recheck(&rust, p, &vols, None);
         let cargo = make("cargo", true, None);
         let tagged = make("tagged", false, Some(CACHEDIR_SIGNATURE));
         let fake_tag = make("faketag", false, Some("nope"));
@@ -836,7 +866,7 @@ mod tests {
             .iter()
             .map(|p| (rust.clone(), (*p).clone(), None))
             .collect();
-        let out = clean(&plan, &[]);
+        let out = clean(&plan, &vols);
         assert_eq!(out.removed, vec![cargo.clone(), tagged.clone()]);
         assert!(!cargo.exists() && !tagged.exists());
         assert!(fake_tag.exists() && unmarked.exists());
@@ -864,16 +894,7 @@ mod tests {
         }
         // A Volume mounted inside, a relative path and a symlinked CACHEDIR.TAG are all refused.
         let mounted = make("mounted", true, None);
-        let inside = VolumeInfo {
-            mount: mounted.join("deep"),
-            identity: "uuid:m".into(),
-            fs_type: "ext4".into(),
-            label: String::new(),
-            removable: true,
-            network: false,
-            read_only: false,
-        };
-        assert!(recheck(&rust, &mounted, &[inside], None).is_err());
+        assert!(recheck(&rust, &mounted, &[volume_at(&mounted.join("deep"))], None).is_err());
         assert!(rc(Path::new("target")).is_err());
         #[cfg(unix)]
         {
@@ -891,21 +912,26 @@ mod tests {
             std::os::unix::fs::symlink(real.parent().unwrap(), &via).unwrap();
             let err = rc(&via.join("target")).unwrap_err();
             assert!(err.contains("is a link"), "{err}");
+            // A link above the Volume's mount path is trusted: only what is below it counts.
+            assert!(recheck(&rust, &via.join("target"), &[volume_at(&via)], None).is_ok());
+            // With no Volume known, every ancestor counts.
+            assert!(recheck(&rust, &via.join("target"), &[], None).is_err());
         }
         let fresh = make("fresh", true, None);
-        assert!(recheck(&rust, &fresh, &[], Some(30)).unwrap_err().contains("changed within"));
-        assert!(recheck(&rust, &fresh, &[], Some(0)).is_ok());
+        assert!(recheck(&rust, &fresh, &vols, Some(30)).unwrap_err().contains("changed within"));
+        assert!(recheck(&rust, &fresh, &vols, Some(0)).is_ok());
         std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
     fn command_rules_run_without_a_shell_and_report_failures() {
-        let base = std::env::temp_dir().join(format!("ve-cleaner-cmd-{}", std::process::id()));
+        let base = real_temp().join(format!("ve-cleaner-cmd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let project = base.join("proj");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join("marker"), "").unwrap();
+        let vols = [volume_at(&real_temp())];
         let ctx = context();
         let mk = |command: &str| {
             let text = format!(
@@ -924,7 +950,7 @@ mod tests {
                 (bad, project.clone(), None),
                 (missing, project.clone(), None),
             ],
-            &[],
+            &vols,
         );
         assert_eq!(out.commands.len(), 3);
         assert!(!out.commands[0].succeeded());
@@ -938,7 +964,7 @@ mod tests {
         assert_eq!(mk(r#"["a", "b c"]"#).argv_text(), "a \"b c\"");
         // A command rule whose marker is gone does not run.
         std::fs::remove_file(project.join("marker")).unwrap();
-        let out = clean(&[(ok, project, None)], &[]);
+        let out = clean(&[(ok, project, None)], &vols);
         assert!(out.commands.is_empty() && out.skipped.len() == 1);
         std::fs::remove_dir_all(&base).unwrap();
     }
