@@ -1042,11 +1042,11 @@ mod tests {
     }
 
     #[test]
-    fn the_readme_example_is_a_valid_user_file() {
+    fn the_documented_example_is_a_valid_user_file() {
         // A Windows checkout may have CRLF line ends.
-        let readme = include_str!("../../../../README.md").replace("\r\n", "\n");
-        let start = readme.find("```toml\n[[rule]]").unwrap() + "```toml\n".len();
-        let example = &readme[start..start + readme[start..].find("```").unwrap()];
+        let doc = include_str!("../../../../docs/guide/cleanup-rules.md").replace("\r\n", "\n");
+        let start = doc.find("```toml\n[[rule]]").unwrap() + "```toml\n".len();
+        let example = &doc[start..start + doc[start..].find("```").unwrap()];
         let rules = parse(example, "cleanup.toml", OS, &context());
         assert!(rules.errors.is_empty(), "{:?}", rules.errors);
         assert_eq!(rules.rules.len(), 2);

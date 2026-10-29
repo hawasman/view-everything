@@ -22,6 +22,17 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # Links between the README and docs/ pages, and their #anchors. Offline: web links are not
+  # fetched, so a flaky site never fails CI.
+  links:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: --offline --include-fragments --no-progress README.md CONTEXT.md CHANGELOG.md 'docs/**/*.md'
+          fail: true
+
   build:
     strategy:
       fail-fast: false

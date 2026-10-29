@@ -18,6 +18,10 @@
 #
 # Each sandbox runs in its own systemd scope (ve-ui-sandbox-NAME.scope) with a memory cap, so a
 # runaway sandbox is throttled, then killed whole, instead of the kernel killing the user's apps.
+# VE_SANDBOX_VOLUME=DIR makes the app see DIR as the only Volume (an LD_PRELOAD shim feeds it a
+# one-line /proc/self/mountinfo), so the Index holds just that folder; screenshots of a demo tree
+# then show no real files; the app also sees DIR as the home folder /home/$VE_SANDBOX_USER
+# (default demo). VE_SANDBOX_USER=NAME sets that user name (greeting, home path). VE_SANDBOX_SETTINGS=FILE seeds the sandbox's settings.toml (e.g. theme).
 # VE_SANDBOX_MEMORY_HIGH (default 1536M), VE_SANDBOX_MEMORY_MAX (2G) and
 # VE_SANDBOX_SWAP_MAX (1G) override the caps.
 set -euo pipefail
@@ -53,12 +57,65 @@ start() {
     chmod 700 "$BASE" "$d"
     # Without this, XTEST input from xdotool waits on a permission dialog inside the sandbox.
     printf '[Xwayland]\nXwaylandEisNoPromptApps=xdotool\n' >"$d/xdg/config/kwinrc"
+    if [[ -n ${VE_SANDBOX_SETTINGS:-} ]]; then
+        mkdir -p "$d/xdg/config/view-everything"
+        cp "$VE_SANDBOX_SETTINGS" "$d/xdg/config/view-everything/settings.toml"
+    fi
+    local preload= wrap=
+    if [[ -n ${VE_SANDBOX_VOLUME:-} ]]; then
+        need cc
+        local vol; vol=$(realpath -e "$VE_SANDBOX_VOLUME") || die "VE_SANDBOX_VOLUME is not a folder"
+        # The app runs in a user+mount namespace where DIR is the whole home folder /home/USER, so
+        # paths on screen are neutral and the Cleaner finds the usual per-user caches.
+        local user=${VE_SANDBOX_USER:-demo}
+        printf '1 1 8:99 / /home/%s rw - ext4 /dev/ve-demo rw\n' "$user" >"$d/mountinfo"
+        # /home is replaced inside the namespace, so run a copy of the binary kept outside it.
+        cp "$bin" "$d/view-everything" && bin=$d/view-everything
+        wrap="unshare -Urm sh -c 'mount -t tmpfs tmpfs /home && mkdir /home/$user && mount --bind $(printf %q "$vol") /home/$user && exec \"\$0\"'"
+        preload="export HOME=/home/$user"
+        cat >"$d/mountinfo-shim.c" <<'CEOF'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include <string.h>
+static const char *swap(const char *p) { return p && !strcmp(p, "/proc/self/mountinfo") ? getenv("VE_FAKE_MOUNTINFO") : p; }
+#define SHIM(name, ...) \
+    static int (*real)(const char *, int, ...); \
+    if (!real) real = dlsym(RTLD_NEXT, name); \
+    mode_t mode = 0; \
+    if (flags & (O_CREAT | O_TMPFILE)) { va_list ap; va_start(ap, flags); mode = va_arg(ap, mode_t); va_end(ap); } \
+    return real(swap(path), flags, mode);
+int open(const char *path, int flags, ...) { SHIM("open") }
+int open64(const char *path, int flags, ...) { SHIM("open64") }
+int openat(int dir, const char *path, int flags, ...) {
+    static int (*real)(int, const char *, int, ...);
+    if (!real) real = dlsym(RTLD_NEXT, "openat");
+    mode_t mode = 0;
+    if (flags & (O_CREAT | O_TMPFILE)) { va_list ap; va_start(ap, flags); mode = va_arg(ap, mode_t); va_end(ap); }
+    return real(dir, swap(path), flags, mode);
+}
+int openat64(int dir, const char *path, int flags, ...) {
+    static int (*real)(int, const char *, int, ...);
+    if (!real) real = dlsym(RTLD_NEXT, "openat64");
+    mode_t mode = 0;
+    if (flags & (O_CREAT | O_TMPFILE)) { va_list ap; va_start(ap, flags); mode = va_arg(ap, mode_t); va_end(ap); }
+    return real(dir, swap(path), flags, mode);
+}
+CEOF
+        cc -shared -fPIC -O2 -o "$d/mountinfo-shim.so" "$d/mountinfo-shim.c" -ldl
+        preload="$preload; export LD_PRELOAD=$(printf %q "$d/mountinfo-shim.so") VE_FAKE_MOUNTINFO=$(printf %q "$d/mountinfo")"
+    fi
+    # The greeting and the sidebar show $USER; VE_SANDBOX_USER replaces it (for screenshots).
+    [[ -n ${VE_SANDBOX_USER:-} ]] && preload="$preload; export USER=$(printf %q "$VE_SANDBOX_USER")"
     cat >"$d/app.sh" <<EOF
 #!/bin/sh
+$preload
 echo "\$DBUS_SESSION_BUS_ADDRESS" > $(printf %q "$d/bus")
 echo "\$DISPLAY" > $(printf %q "$d/display.tmp") && mv $(printf %q "$d/display.tmp") $(printf %q "$d/display")
 unset WAYLAND_DISPLAY
-exec $(printf %q "$bin") > $(printf %q "$d/app.log") 2>&1
+exec $wrap $(printf %q "$bin") > $(printf %q "$d/app.log") 2>&1
 EOF
     chmod +x "$d/app.sh"
     echo "wayland-ve-$name" >"$d/socket"
