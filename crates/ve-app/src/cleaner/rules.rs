@@ -309,6 +309,7 @@ pub fn find(index: &Index, volumes: &[VolumeInfo], rules: &[Arc<Rule>]) -> Vec<C
             } else {
                 Vec::new()
             },
+            ..Candidate::default()
         };
         for rule in rules {
             if (is_dir || rule.files) && rule.query.matches(&candidate) && marker_in_index(index, rule, id) {
@@ -423,6 +424,7 @@ pub fn recheck(rule: &Rule, path: &Path, volumes: &[VolumeInfo]) -> Result<(), S
             .map_or(0, |d| d.as_nanos() as i64),
         depth: 0,
         children: children.iter().map(String::as_str).collect(),
+        ..Candidate::default()
     };
     if !rule.query.matches(&candidate) {
         return Err(format!("it no longer matches the rule `{}`", rule.name));
