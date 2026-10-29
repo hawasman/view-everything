@@ -12,7 +12,7 @@ use crate::settings::Settings;
 #[cfg(feature = "updater")]
 use crate::settings_page::CheckNow;
 use crate::settings_page::{Changed, Forget, Refresh, SettingsPage};
-use crate::theme::{palette, tabular};
+use crate::theme::{SERIF_FAMILY, palette, tabular};
 use crate::trash::{self, Trash};
 use crate::tree::TreeList;
 use crate::treemap::{Treemap, TreemapEvent};
@@ -70,6 +70,9 @@ pub struct Shell {
     show_tree: bool,
     filters: Entity<FiltersPanel>,
     show_filters: bool,
+    /// The name field of the Saved Queries dialog, and the saved Query it is renaming.
+    saved_name: Entity<InputState>,
+    renaming_saved: Option<usize>,
     settings_page: Entity<SettingsPage>,
     dashboard: Entity<DashboardPage>,
     cleaner: Entity<CleanerPage>,
@@ -333,6 +336,8 @@ impl Shell {
             show_tree: !cfg!(feature = "bench") || std::env::var_os("VE_BENCH").is_none(),
             filters,
             show_filters: false,
+            saved_name: cx.new(|cx| InputState::new(window, cx).placeholder("Name for the current Query")),
+            renaming_saved: None,
             settings_page,
             dashboard,
             cleaner,
@@ -598,16 +603,176 @@ impl Shell {
         cx.notify();
     }
 
+    /// Replaces the Query's text; every Explorer panel follows.
+    fn set_query_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.query.update(cx, |q, cx| {
+            q.set_value(text, window, cx);
+            // set_value is silent; Change recomputes the View.
+            cx.emit(InputEvent::Change);
+        });
+    }
+
+    /// The Saved Queries dialog: save the current Query under a name, and apply, rename or
+    /// delete the saved ones.
+    fn open_saved_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (shell, page, name_input, query) = (cx.entity(), self.settings_page.clone(), self.saved_name.clone(), self.query.clone());
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let p = palette(cx);
+            let (muted, border, text) = (p.muted, p.border, p.text);
+            let saved = page.read(cx).settings().saved_queries.clone();
+            let renaming = shell.read(cx).renaming_saved.filter(|&i| i < saved.len());
+            let done = {
+                let (shell, page, name_input, query) = (shell.clone(), page.clone(), name_input.clone(), query.clone());
+                move |window: &mut Window, cx: &mut App| {
+                    let name = name_input.read(cx).value().to_string();
+                    let current = query.read(cx).value().to_string();
+                    let mut outcome = Ok(());
+                    let renaming = shell.read(cx).renaming_saved;
+                    page.update(cx, |page, cx| {
+                        page.apply(
+                            |s| {
+                                outcome = match renaming {
+                                    Some(i) => s.rename_query(i, &name),
+                                    None => s.save_query(&name, &current),
+                                }
+                            },
+                            cx,
+                        )
+                    });
+                    match outcome {
+                        Ok(()) => {
+                            shell.update(cx, |s, _| s.renaming_saved = None);
+                            name_input.update(cx, |i, cx| i.set_value("", window, cx));
+                            window.refresh();
+                        }
+                        Err(why) => window.push_notification(Notification::error(why), cx),
+                    }
+                }
+            };
+            let rows = saved.iter().enumerate().map(|(i, q)| {
+                let (apply, rename, delete) = (
+                    {
+                        let (shell, text) = (shell.clone(), q.query.clone());
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            shell.update(cx, |s, cx| s.set_query_text(&text, window, cx));
+                            window.close_dialog(cx);
+                        }
+                    },
+                    {
+                        let (shell, name_input, name) = (shell.clone(), name_input.clone(), q.name.clone());
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            shell.update(cx, |s, _| s.renaming_saved = Some(i));
+                            name_input.update(cx, |input, cx| input.set_value(name.as_str(), window, cx));
+                            window.refresh();
+                        }
+                    },
+                    {
+                        let (shell, page) = (shell.clone(), page.clone());
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            shell.update(cx, |s, _| s.renaming_saved = None);
+                            page.update(cx, |page, cx| page.apply(|s| s.delete_query(i), cx));
+                            window.refresh();
+                        }
+                    },
+                );
+                h_flex()
+                    .gap(px(8.))
+                    .items_center()
+                    .py(px(8.))
+                    .border_b_1()
+                    .border_color(border)
+                    .child(
+                        v_flex()
+                            .id(("saved-apply", i))
+                            .flex_1()
+                            .min_w_0()
+                            .cursor_pointer()
+                            .on_click(apply)
+                            .child(div().font_weight(FontWeight::MEDIUM).truncate().child(q.name.clone()))
+                            .child(div().text_xs().text_color(muted).truncate().child(q.query.clone())),
+                    )
+                    .child(
+                        pill(("saved-rename", i), "Rename")
+                            .small()
+                            .selected(renaming == Some(i))
+                            .build(cx, rename),
+                    )
+                    .child(pill(("saved-delete", i), "Delete").small().build(cx, delete))
+            });
+            let list = if saved.is_empty() {
+                div().py(px(8.)).text_color(muted).child("Nothing saved yet.").into_any_element()
+            } else {
+                v_flex()
+                    .id("saved-list")
+                    .max_h(px(280.))
+                    .overflow_y_scroll()
+                    .children(rows)
+                    .into_any_element()
+            };
+            let done_click = {
+                let done = done.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| done(window, cx)
+            };
+            dialog
+                .w(px(480.))
+                .centered()
+                .p(px(24.))
+                .close_button(false)
+                .title(
+                    div()
+                        .font_family(SERIF_FAMILY)
+                        .text_size(px(28.))
+                        .line_height(px(32.))
+                        .font_weight(FontWeight::NORMAL)
+                        .child("Saved Queries"),
+                )
+                .child(
+                    v_flex()
+                        .gap(px(12.))
+                        .child(list)
+                        .child(
+                            h_flex()
+                                .gap(px(8.))
+                                .items_center()
+                                .child(
+                                    h_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .h(px(38.))
+                                        .px(px(6.))
+                                        .items_center()
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(p.control)
+                                        .bg(p.ground)
+                                        .child(Input::new(&name_input).appearance(false).bordered(false)),
+                                )
+                                .child(
+                                    pill("saved-save", if renaming.is_some() { "Rename" } else { "Save current" })
+                                        .primary()
+                                        .build(cx, done_click),
+                                ),
+                        )
+                        .child(div().text_xs().text_color(text).child(if renaming.is_some() {
+                            "Type the new name, then Rename."
+                        } else {
+                            "Saving under an existing name replaces that Query. Click a saved Query to apply it."
+                        })),
+                )
+                .footer(
+                    h_flex()
+                        .justify_end()
+                        .child(pill("saved-close", "Close").build(cx, |_, window, cx| window.close_dialog(cx))),
+                )
+        });
+    }
+
     /// What a click on the Dashboard asked for.
     fn dashboard_act(&mut self, act: &Act, window: &mut Window, cx: &mut Context<Self>) {
         match act {
             Act::Explore(query) => {
                 if let Some(text) = query {
-                    self.query.update(cx, |q, cx| {
-                        q.set_value(text.as_str(), window, cx);
-                        // set_value is silent; Change recomputes the View.
-                        cx.emit(InputEvent::Change);
-                    });
+                    self.set_query_text(text, window, cx);
                 }
                 self.page = Page::Explorer;
             }
@@ -1052,6 +1217,23 @@ impl Shell {
                     cx.notify();
                 }),
             );
+        let saved_count = self.settings_page.read(cx).settings().saved_queries.len();
+        let saved = pill(
+            "saved",
+            if saved_count > 0 {
+                format!("Saved · {saved_count}")
+            } else {
+                "Saved".into()
+            },
+        )
+        .small()
+        .build(
+            cx,
+            cx.listener(|this, _, window, cx| {
+                this.renaming_saved = None;
+                this.open_saved_dialog(window, cx);
+            }),
+        );
         let why = if selected.is_empty() {
             Some(SharedString::from("Select Entries to move to the Trash"))
         } else {
@@ -1150,6 +1332,7 @@ impl Shell {
                                     .gap(px(12.))
                                     .items_center()
                                     .children(selection)
+                                    .child(saved)
                                     .child(filters)
                                     .child(trash),
                             ),

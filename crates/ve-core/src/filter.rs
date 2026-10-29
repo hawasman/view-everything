@@ -167,6 +167,12 @@ fn candidate<'a>(index: &'a Index, query: &Query, id: EntryId, scratch: &'a mut 
         is_dir: index.is_dir(id),
         logical: index.logical(id),
         modified: index.modified(id),
+        depth: if query.needs_depth() { index.depth(id) } else { 0 },
+        children: if query.needs_children() && index.is_dir(id) {
+            index.children(id).iter().map(|&c| index.name(c)).collect()
+        } else {
+            Vec::new()
+        },
     }
 }
 

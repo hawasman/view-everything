@@ -45,10 +45,20 @@ pub struct Settings {
     /// When the last update check ran, in Unix seconds.
     #[serde(default)]
     pub last_update_check: Option<i64>,
+    /// Queries the user saved under a name, in the order saved.
+    #[serde(default)]
+    pub saved_queries: Vec<SavedQuery>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// A Query kept under a name, to apply again from the Explorer.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SavedQuery {
+    pub name: String,
+    pub query: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -80,6 +90,7 @@ impl Default for Settings {
             recent_query: None,
             update_checks: true,
             last_update_check: None,
+            saved_queries: Vec::new(),
         }
     }
 }
@@ -115,6 +126,51 @@ impl Settings {
             .filter(|q| !q.trim().is_empty())
             .cloned()
             .unwrap_or_else(default_recent_query)
+    }
+
+    /// Saves `query` as `name`; a name already in use (ignoring case) takes the new Query.
+    pub fn save_query(&mut self, name: &str, query: &str) -> Result<(), String> {
+        let (name, query) = (name.trim(), query.trim());
+        if name.is_empty() {
+            return Err("Name the Query first".into());
+        }
+        if query.is_empty() {
+            return Err("The Query is empty".into());
+        }
+        match self.saved_queries.iter_mut().find(|q| q.name.eq_ignore_ascii_case(name)) {
+            Some(saved) => saved.query = query.to_owned(),
+            None => self.saved_queries.push(SavedQuery {
+                name: name.to_owned(),
+                query: query.to_owned(),
+            }),
+        }
+        Ok(())
+    }
+
+    /// Gives the saved Query at `index` a new name, which no other may have (ignoring case).
+    pub fn rename_query(&mut self, index: usize, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Name the Query first".into());
+        }
+        if self
+            .saved_queries
+            .iter()
+            .enumerate()
+            .any(|(i, q)| i != index && q.name.eq_ignore_ascii_case(name))
+        {
+            return Err(format!("There is already a saved Query named {name}"));
+        }
+        if let Some(saved) = self.saved_queries.get_mut(index) {
+            saved.name = name.to_owned();
+        }
+        Ok(())
+    }
+
+    pub fn delete_query(&mut self, index: usize) {
+        if index < self.saved_queries.len() {
+            self.saved_queries.remove(index);
+        }
     }
 
     /// Records whether the user wants `volume` indexed.
@@ -517,6 +573,7 @@ mod tests {
                 is_dir: false,
                 logical: 0,
                 modified: 0,
+                ..Default::default()
             })
         };
         assert!(holds(&format!("{home}/Documents/a.pdf")));
@@ -539,5 +596,39 @@ mod tests {
             .recent_query_text(),
             default_recent_query()
         );
+    }
+
+    #[test]
+    fn saved_queries_are_saved_renamed_deleted_and_persist() {
+        let mut s = Settings::default();
+        assert!(s.save_query("  ", "type:video").is_err());
+        assert!(s.save_query("Videos", "  ").is_err());
+        s.save_query("Videos", "type:video").unwrap();
+        s.save_query(" Big ", "size:>1gb").unwrap();
+        // The same name (any case) takes the new Query instead of adding a second.
+        s.save_query("videos", "type:video size:>1gb").unwrap();
+        assert_eq!(s.saved_queries.len(), 2);
+        assert_eq!(s.saved_queries[0].query, "type:video size:>1gb");
+        assert_eq!(s.saved_queries[1].name, "Big");
+        // Rename keeps the Query, and refuses another saved Query's name.
+        assert!(s.rename_query(1, "VIDEOS").is_err());
+        s.rename_query(1, "Huge").unwrap();
+        s.rename_query(1, "huge").unwrap();
+        assert_eq!(
+            s.saved_queries[1],
+            SavedQuery {
+                name: "huge".into(),
+                query: "size:>1gb".into()
+            }
+        );
+        // They survive a restart: saved with the settings, read back, and absent in older files.
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back.saved_queries, s.saved_queries);
+        assert!(toml::from_str::<Settings>("").unwrap().saved_queries.is_empty());
+        let mut back = back;
+        back.delete_query(0);
+        back.delete_query(9);
+        assert_eq!(back.saved_queries.len(), 1);
+        assert_eq!(back.saved_queries[0].name, "huge");
     }
 }
