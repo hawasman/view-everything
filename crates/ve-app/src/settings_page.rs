@@ -280,7 +280,7 @@ impl AzureForm {
     fn new(window: &mut Window, cx: &mut Context<SettingsPage>) -> Self {
         let mut input = |hint: &'static str| cx.new(|cx| InputState::new(window, cx).placeholder(hint));
         let (account, container, prefix) = (input("mystorageaccount"), input("backups"), input("2024 (optional)"));
-        let endpoint = input("http://127.0.0.1:10000/devstoreaccount1 (optional)");
+        let endpoint = input("Azurite etc. (optional)");
         let secret = cx.new(|cx| InputState::new(window, cx).placeholder("stored in the OS keyring").masked(true));
         Self {
             account,
@@ -1180,8 +1180,8 @@ impl SettingsPage {
                         .child(div().flex_1().text_xs().text_color(muted).child(match shown_tab {
                             RemoteTab::S3 => "Keys left empty: AWS_* or ~/.aws",
                             RemoteTab::Ftp => "Passive mode, FTPS (AUTH TLS) by default",
-                            RemoteTab::Webdav => "Basic auth: use https:// off a trusted network",
-                            RemoteTab::Azure => "Account key or SAS token; Endpoint for Azurite",
+                            RemoteTab::Webdav => "Basic auth: prefer https",
+                            RemoteTab::Azure => "Account key or SAS token",
                             RemoteTab::Ssh => "Keys and ssh-agent only",
                         }))
                         .child(pill("remote-cancel", "Cancel").build(cx, |_, window, cx| window.close_dialog(cx)))
