@@ -32,6 +32,9 @@ pub struct View {
     pub categories: Vec<CategoryRow>,
     /// Filtered Size over every Indexed Volume.
     pub total: Totals,
+    /// The folder everything shown sits in, which the Treemap draws: the deepest folder of the
+    /// Volume with the most Filtered Size that still holds all of that Volume's shown Entries.
+    pub focus: Option<EntryId>,
     pub took: Duration,
 }
 
@@ -71,10 +74,29 @@ impl View {
             id: NEXT_VIEW_ID.fetch_add(1, Ordering::Relaxed),
             query: query_text.to_owned(),
             categories: breakdown(index, &filter, categories),
+            focus: focus(index, &filter),
             filter,
             flat,
             total,
             took: started.elapsed(),
+        }
+    }
+}
+
+/// See [`View::focus`]. The descent goes through folders shown only for what they contain and
+/// stops above one the Query matches itself, so a zoomed-in Query (`"/home/me/*"`, which matches
+/// what is inside the folder) lands on that folder.
+fn focus(index: &Index, filter: &Filter) -> Option<EntryId> {
+    let roots = || index.volumes().map(|(_, v)| v.root).filter(|&id| index.is_live(id));
+    let mut folder = roots()
+        .filter(|&id| filter.is_shown(id))
+        .max_by_key(|&id| filter.totals(index, id).on_disk)
+        .or_else(|| roots().next())?;
+    loop {
+        let mut shown = index.children(folder).iter().copied().filter(|&c| index.is_live(c) && filter.is_shown(c));
+        match (shown.next(), shown.next()) {
+            (Some(only), None) if index.is_dir(only) && !filter.is_matched(only) => folder = only,
+            _ => return Some(folder),
         }
     }
 }

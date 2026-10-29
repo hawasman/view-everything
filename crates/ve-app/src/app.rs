@@ -13,7 +13,7 @@ use crate::theme::{palette, tabular};
 use crate::ui::{caption, dot, pill};
 use crate::tree::TreeList;
 use crate::trash::{self, Trash};
-use crate::treemap::Treemap;
+use crate::treemap::{Treemap, TreemapEvent};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -156,32 +156,59 @@ impl Shell {
                 .select_on_modifier_click(false)
         });
 
-        // Keyboard moves select a single row; clicks go through the lists' own handlers.
-        cx.subscribe(&table, |_, table, event: &TableEvent, cx| {
-            if let TableEvent::SelectRow(row) = event {
-                table.update(cx, |t, _| {
+        // Keyboard moves select a single row; clicks go through the lists' own handlers. A
+        // double-click on a folder zooms the Query into it, as on the Treemap.
+        cx.subscribe_in(&table, window, |this, table, event: &TableEvent, window, cx| {
+            match event {
+                TableEvent::SelectRow(row) => table.update(cx, |t, _| {
                     if let Some(id) = t.delegate().entry_at(*row) {
                         t.delegate_mut().selection.only(*row, id);
                     }
-                });
+                }),
+                TableEvent::DoubleClickedRow(row) => {
+                    if let Some(id) = table.read(cx).delegate().entry_at(*row) {
+                        this.scope_to_folder(id, window, cx);
+                    }
+                }
+                _ => {}
             }
             cx.notify();
         })
         .detach();
-        cx.subscribe(&tree, |_, tree, event: &TableEvent, cx| {
-            if let TableEvent::SelectRow(row) = event {
-                tree.update(cx, |t, _| {
+        cx.subscribe_in(&tree, window, |this, tree, event: &TableEvent, window, cx| {
+            match event {
+                TableEvent::SelectRow(row) => tree.update(cx, |t, _| {
                     if let Some(id) = t.delegate().entry_at(*row) {
                         t.delegate_mut().selection.only(*row, id);
                     }
-                });
+                }),
+                TableEvent::DoubleClickedRow(row) => {
+                    if let Some(id) = tree.read(cx).delegate().entry_at(*row) {
+                        this.scope_to_folder(id, window, cx);
+                    }
+                }
+                _ => {}
             }
             cx.notify();
         })
         .detach();
-        // A modifier-click changes the selection without the tables knowing.
-        cx.observe(&table, |_, _, cx| cx.notify()).detach();
-        cx.observe(&tree, |_, _, cx| cx.notify()).detach();
+        // A modifier-click changes the selection without the tables knowing; whatever the
+        // shown list selects, the Treemap outlines.
+        cx.observe(&table, |this, _, cx| {
+            this.outline_selection(cx);
+            cx.notify();
+        })
+        .detach();
+        cx.observe(&tree, |this, _, cx| {
+            this.outline_selection(cx);
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe_in(&treemap, window, |this, _, event: &TreemapEvent, window, cx| match event {
+            TreemapEvent::Select(id) => this.reveal(*id, cx),
+            TreemapEvent::Scope(folder) => this.scope(*folder, window, cx),
+        })
+        .detach();
 
         #[cfg(feature = "bench")]
         if std::env::var_os("VE_BENCH").is_some() {
@@ -331,6 +358,55 @@ impl Shell {
         });
     }
 
+    /// Zooms the Query into `id` if it is a folder; files have nothing to zoom into.
+    fn scope_to_folder(&mut self, id: ve_core::EntryId, window: &mut Window, cx: &mut Context<Self>) {
+        let is_dir = {
+            let index = self.engine.shared.index.read();
+            index.is_live(id) && index.is_dir(id)
+        };
+        if is_dir {
+            self.scope(Some(id), window, cx);
+        }
+    }
+
+    /// Puts `folder`'s scope clause in the Query in place of any other, or takes it out, so every
+    /// Explorer panel follows and the rest of the Query still applies.
+    fn scope(&mut self, folder: Option<ve_core::EntryId>, window: &mut Window, cx: &mut Context<Self>) {
+        let term = folder.and_then(|id| crate::scope::term(&self.engine.shared.index.read(), id));
+        let text = crate::scope::set(&self.query.read(cx).value(), term.as_deref());
+        self.query.update(cx, |q, cx| {
+            q.set_value(text.as_str(), window, cx);
+            // set_value is silent; Change recomputes the View.
+            cx.emit(InputEvent::Change);
+        });
+    }
+
+    /// Selects what was clicked on the Treemap in both lists, opening the tree down to it.
+    fn reveal(&mut self, id: ve_core::EntryId, cx: &mut Context<Self>) {
+        self.tree.update(cx, |t, cx| {
+            let row = t.delegate_mut().reveal(id);
+            t.refresh(cx);
+            if let Some(row) = row {
+                t.scroll_to_row(row, cx);
+            }
+        });
+        self.table.update(cx, |t, cx| {
+            if let Some(row) = t.delegate_mut().reveal(id) {
+                t.scroll_to_row(row, cx);
+            }
+            cx.notify();
+        });
+    }
+
+    /// Outlines on the Treemap the one Entry the shown list selects. A list that cannot show
+    /// what the Treemap selected leaves its outline alone.
+    fn outline_selection(&self, cx: &mut Context<Self>) {
+        if let [id] = self.selected_entries(cx).as_slice() {
+            let id = *id;
+            self.treemap.update(cx, |t, cx| t.set_selected(Some(id), cx));
+        }
+    }
+
     /// Picks up what the Engine's threads changed since the last look.
     fn poll(&mut self, cx: &mut Context<Self>) {
         let latest = self.engine.shared.view.lock().clone();
@@ -345,6 +421,10 @@ impl Shell {
             if table.delegate_mut().set_view(latest.clone()) {
                 table.refresh(cx);
                 table.clear_selection(cx);
+            }
+            // A new Query opened the tree at the Treemap's folder; bring it into sight.
+            if let Some(row) = table.delegate_mut().take_focus_row() {
+                table.scroll_to_row(row, cx);
             }
         });
         #[cfg(feature = "bench")]

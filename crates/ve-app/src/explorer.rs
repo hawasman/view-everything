@@ -88,6 +88,16 @@ impl FlatList {
         }
         true
     }
+
+    /// Selects the row of `id`; None (and no selection) when the Query does not match it.
+    pub fn reveal(&mut self, id: EntryId) -> Option<usize> {
+        let row = self.view.as_ref()?.flat.iter().position(|&e| e == id);
+        match row {
+            Some(row) => self.selection.only(row, id),
+            None => self.selection.clear(),
+        }
+        row
+    }
 }
 
 impl TableDelegate for FlatList {

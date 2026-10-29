@@ -336,19 +336,29 @@ fn folder_of(index: &Index, id: EntryId) -> Option<EntryId> {
     }
 }
 
+/// What a click on the Treemap asks of the rest of the Explorer.
+pub enum TreemapEvent {
+    /// A single click on a tile: select that Entry in the lists too.
+    Select(EntryId),
+    /// A double-click or a path crumb: zoom the Query into this folder, or out of any (None).
+    Scope(Option<EntryId>),
+}
+
+impl EventEmitter<TreemapEvent> for Treemap {}
+
 pub struct Treemap {
     shared: Arc<Shared>,
     categories: CategoryMap,
     layouter: Layouter,
     view: Option<Arc<View>>,
-    zoom: Option<EntryId>,
+    /// The Entry selected here or in a list; outlined on its tile or the nearest folder drawn.
     selected: Option<EntryId>,
     /// The newest finished tiles; may trail the current View by one layout.
     tiles: Rc<Vec<Tile>>,
     /// What `tiles` were laid out for; hit-testing is off while it trails the request.
     tiles_key: Option<LayoutKey>,
-    /// The View, zoom and size last turned into a layout request.
-    asked: Option<(Option<u64>, Option<EntryId>, [i32; 2])>,
+    /// The View and size last turned into a layout request.
+    asked: Option<(Option<u64>, [i32; 2])>,
     /// The drawing area in window coordinates, as of the last paint.
     bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The tile under the pointer, with the pointer's position inside the drawing area.
@@ -371,7 +381,6 @@ impl Treemap {
             shared,
             categories,
             view: None,
-            zoom: None,
             selected: None,
             tiles: Rc::new(Vec::new()),
             tiles_key: None,
@@ -381,11 +390,11 @@ impl Treemap {
         }
     }
 
-    /// The folder shown: the zoom target, else the Volume with the most Filtered Size.
+    /// The folder shown: the View's focus, else the Volume with the most Filtered Size.
     fn root(&self, index: &Index, view: &View) -> Option<EntryId> {
         let usable =
             |id: EntryId| index.is_live(id) && index.is_dir(id) && view.filter.is_shown(id);
-        self.zoom.filter(|&id| usable(id)).or_else(|| {
+        view.focus.filter(|&id| usable(id)).or_else(|| {
             index
                 .volumes()
                 .map(|(_, v)| v.root)
@@ -393,6 +402,14 @@ impl Treemap {
                 .max_by_key(|&id| view.filter.totals(index, id).on_disk)
                 .or_else(|| index.volumes().map(|(_, v)| v.root).next())
         })
+    }
+
+    /// Outlines `id`, selected in a list; None clears the outline.
+    pub fn set_selected(&mut self, id: Option<EntryId>, cx: &mut Context<Self>) {
+        if self.selected != id {
+            self.selected = id;
+            cx.notify();
+        }
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) {
@@ -404,7 +421,7 @@ impl Treemap {
         let size = self.bounds.get().size;
         let (w, h) = (f32::from(size.width), f32::from(size.height));
         // Looking up the root locks the Index, so only do it when something it depends on moved.
-        let asked = (self.view.as_ref().map(|v| v.id), self.zoom, [w.round() as i32, h.round() as i32]);
+        let asked = (self.view.as_ref().map(|v| v.id), [w.round() as i32, h.round() as i32]);
         if let Some(view) = &self.view
             && w > 0.0
             && h > 0.0
@@ -433,11 +450,10 @@ impl Treemap {
         }
     }
 
-    fn zoom_to(&mut self, id: EntryId, cx: &mut Context<Self>) {
-        self.zoom = Some(id);
-        self.selected = None;
+    /// Zooms the Query into `folder`, or out of any folder.
+    fn scope(&mut self, folder: Option<EntryId>, cx: &mut Context<Self>) {
         self.hovered = None;
-        cx.notify();
+        cx.emit(TreemapEvent::Scope(folder));
     }
 
     /// The tile at a window position, if it is over the drawing area.
@@ -456,21 +472,30 @@ impl Treemap {
         while let Some(parent) = index.parent(*chain.last().unwrap()) {
             chain.push(parent);
         }
+        // On a deep path the folders above the last shrink and truncate; the last one and the
+        // size always show.
         let crumb = |label: String, last: bool| {
             div()
-                .text_color(if last { text } else { muted })
-                .when(last, |d| d.font_weight(FontWeight::MEDIUM))
+                .whitespace_nowrap()
+                .when(last, |d| d.flex_none().text_color(text).font_weight(FontWeight::MEDIUM))
+                .when(!last, |d| d.min_w_0().truncate().text_color(muted))
                 .child(label)
         };
-        let mut row = h_flex().gap(px(6.)).items_center().text_xs().text_color(muted).mb(px(12.));
-        row = row.child(crumb("Index".into(), false));
+        let mut row = h_flex().gap(px(6.)).items_center().min_w_0().overflow_hidden().text_xs().text_color(muted).mb(px(12.));
+        row = row.child(
+            crumb("Index".into(), false)
+                .flex_none()
+                .id("crumb-index")
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.scope(None, cx))),
+        );
         let last = chain.len() - 1;
         for (i, &id) in chain.iter().rev().enumerate() {
             row = row.child("/").child(
                 crumb(index.name(id).to_owned(), i == last)
                     .id(("crumb", id.0 as usize))
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| this.zoom_to(id, cx))),
+                    .on_click(cx.listener(move |this, _, _, cx| this.scope(Some(id), cx))),
             );
         }
         let title = h_flex()
@@ -480,7 +505,7 @@ impl Treemap {
             .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child("Treemap"))
             .child(caption("Filtered Size · double-click a folder to zoom", cx));
         v_flex().child(title).child(
-            row.child(div().ml(px(6.)).child(format::size(view.filter.totals(index, root).on_disk))),
+            row.child(div().flex_none().ml(px(6.)).child(format::size(view.filter.totals(index, root).on_disk))),
         )
     }
 
@@ -560,7 +585,15 @@ impl Render for Treemap {
         };
 
         let tiles = self.tiles.clone();
-        let selected = self.selected;
+        // The selected Entry's own tile, else the nearest folder of it that is drawn.
+        let selected = self.selected.filter(|&id| index.is_live(id)).and_then(|id| {
+            let chain: Vec<EntryId> = std::iter::successors(Some(id), |&e| index.parent(e)).collect();
+            self.tiles
+                .iter()
+                .filter_map(|t| chain.iter().position(|&c| c == t.id).map(|depth| (depth, t.id)))
+                .min()
+                .map(|(_, tile)| tile)
+        });
         let bounds = self.bounds.clone();
 
         let surface = canvas(
@@ -674,11 +707,12 @@ impl Render for Treemap {
                         if e.click_count() >= 2 {
                             let shared = this.shared.clone();
                             let folder = folder_of(&shared.index.read(), id);
-                            if let Some(folder) = folder {
-                                this.zoom_to(folder, cx);
+                            if folder.is_some() {
+                                this.scope(folder, cx);
                             }
                         } else {
                             this.selected = Some(id);
+                            cx.emit(TreemapEvent::Select(id));
                             cx.notify();
                         }
                     })),

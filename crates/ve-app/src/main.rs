@@ -11,6 +11,7 @@ mod engine;
 mod explorer;
 mod filters;
 mod format;
+mod scope;
 mod settings;
 mod selection;
 mod settings_page;

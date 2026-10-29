@@ -70,6 +70,8 @@ pub struct TreeList {
     pub selection: Selection,
     /// Width the table has to fit in; 0 until first measured.
     available: f32,
+    /// A new Query opened its focus; the Explorer has yet to scroll to it.
+    scroll_to_focus: bool,
 }
 
 impl TreeList {
@@ -87,6 +89,7 @@ impl TreeList {
             cells: HashMap::new(),
             selection: Selection::default(),
             available: 0.,
+            scroll_to_focus: false,
         }
     }
 
@@ -109,12 +112,23 @@ impl TreeList {
         true
     }
 
-    /// Shows `view`; false when it already was the one shown.
+    /// Shows `view`; false when it already was the one shown. When the Query changed, its focus
+    /// (the folder the Treemap draws) is opened with its ancestors, so the tree shows what the
+    /// Treemap does; a View recomputed only because the Index grew leaves folders as they are.
     pub fn set_view(&mut self, view: Option<Arc<View>>) -> bool {
         if view::same(&self.view, &view) {
             return false;
         }
+        let old_query = self.view.as_ref().map(|v| v.query.clone());
         self.view = view;
+        if let Some(view) = self.view.clone()
+            && old_query.is_some_and(|q| q != view.query)
+            && let Some(focus) = view.focus
+        {
+            self.open_to(focus);
+            self.expanded.insert(focus);
+            self.scroll_to_focus = true;
+        }
         self.rebuild();
         // The Entries the new View no longer shows fall out of the selection.
         if let Some(view) = self.view.clone() {
@@ -123,6 +137,30 @@ impl TreeList {
             self.selection.clear();
         }
         true
+    }
+
+    /// The row of the focus a new Query opened, once; the Explorer scrolls to it.
+    pub fn take_focus_row(&mut self) -> Option<usize> {
+        if !std::mem::take(&mut self.scroll_to_focus) {
+            return None;
+        }
+        let focus = self.view.as_ref()?.focus?;
+        self.rows.iter().position(|r| r.id == focus)
+    }
+
+    /// Expands every folder above `id`.
+    fn open_to(&mut self, id: EntryId) {
+        let index = self.shared.index.read();
+        self.expanded.extend(std::iter::successors(index.parent(id), |&p| index.parent(p)));
+    }
+
+    /// Opens the folders above `id` and selects its row; None when the View does not show it.
+    pub fn reveal(&mut self, id: EntryId) -> Option<usize> {
+        self.open_to(id);
+        self.rebuild();
+        let row = self.rows.iter().position(|r| r.id == id)?;
+        self.selection.only(row, id);
+        Some(row)
     }
 
     /// Screenshots (VE_DEMO): opens the first folder and selects the row after it.

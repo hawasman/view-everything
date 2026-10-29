@@ -83,7 +83,7 @@ The search expression that selects which Entries count. Every panel in the Explo
 _Avoid_: search, filter, find
 
 **Treemap**:
-The panel that draws Filtered Sizes as nested rectangles coloured by Category.
+The panel that draws Filtered Sizes as nested rectangles coloured by Category. It draws the folder everything the Query shows sits in; zooming into a folder (on the Treemap or in a list) adds that folder to the Query, so the tree and flat list follow and the Query can still be refined.
 _Avoid_: size map, block view
 
 ### Changes
