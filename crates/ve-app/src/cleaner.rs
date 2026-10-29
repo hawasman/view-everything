@@ -3,25 +3,39 @@
 
 mod rules;
 
+use crate::categories::CategoryPanel;
 use crate::engine::{Repaint, Shared};
 use crate::format;
 use crate::settings::{Settings, cleanup_path};
 use crate::theme::palette;
 use crate::ui::{caption, panel, pill};
+use crate::view::{CategoryRow, EXTENSIONS_PER_CATEGORY};
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rules::{CAN_ELEVATE, Cleanable, CommandReport, Rule, Rules, admin_clean, admin_command, clean, foreign};
-use std::collections::HashSet;
+use rules::{CAN_ELEVATE, Cleanable, CommandReport, Group, Rule, Rules, admin_clean, admin_command, clean, foreign};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
+use ve_core::{Category, CategoryMap, Totals};
 use ve_scan::VolumeInfo;
 
 type Key = (String, PathBuf);
+
+/// Items per page the pager offers; the first is the default.
+const PAGE_SIZES: [usize; 3] = [25, 50, 100];
+
+/// What the list shows: one group of Cleanables, or the admin-only ones.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Group(Group),
+    Admin,
+}
 
 /// "Show in Explorer": the Query that selects one Cleanable (None: the Index has no folder to scope to).
 pub struct ShowInExplorer(pub Option<String>);
@@ -59,6 +73,42 @@ pub struct CleanerPage {
     /// What the commands of the last Clean said.
     report: Vec<CommandReport>,
     advanced: bool,
+    categories: CategoryMap,
+    breakdown: Entity<CategoryPanel>,
+    /// The Category breakdown covers the ticked Cleanup Plan instead of every Cleanable.
+    breakdown_plan: bool,
+    /// The tab shown; none yet means the first one with anything in it.
+    tab: Option<Tab>,
+    page: usize,
+    page_size: usize,
+}
+
+/// Category rows (largest first) and their total On-disk Size over what `items` hold.
+fn breakdown<'a>(items: impl Iterator<Item = &'a Cleanable>, map: &CategoryMap) -> (Vec<CategoryRow>, u64) {
+    let mut by_ext: HashMap<&str, Totals> = HashMap::new();
+    for (ext, totals) in items.flat_map(|c| &c.exts) {
+        by_ext.entry(ext).or_default().add(*totals);
+    }
+    let mut rows: HashMap<Category, CategoryRow> = HashMap::new();
+    for (ext, totals) in by_ext {
+        let category = map.of_extension(ext);
+        let row = rows.entry(category).or_insert_with(|| CategoryRow {
+            category,
+            totals: Totals::default(),
+            extensions: Vec::new(),
+        });
+        row.totals.add(totals);
+        row.extensions
+            .push((if ext.is_empty() { "(none)".to_owned() } else { ext.to_owned() }, totals));
+    }
+    let mut rows: Vec<CategoryRow> = rows.into_values().collect();
+    for row in &mut rows {
+        row.extensions.sort_unstable_by_key(|(_, t)| std::cmp::Reverse(t.on_disk));
+        row.extensions.truncate(EXTENSIONS_PER_CATEGORY);
+    }
+    rows.sort_unstable_by_key(|r| std::cmp::Reverse(r.totals.on_disk));
+    let whole = rows.iter().map(|r| r.totals.on_disk).sum();
+    (rows, whole)
 }
 
 /// Whatever left the disk leaves the Index, skipped-because-vanished included.
@@ -81,7 +131,14 @@ fn rules_stamp() -> Option<SystemTime> {
 }
 
 impl CleanerPage {
-    pub fn new(shared: Arc<Shared>, repaint: Repaint, volumes: Vec<VolumeInfo>, settings: &Settings) -> Self {
+    pub fn new(
+        shared: Arc<Shared>,
+        repaint: Repaint,
+        volumes: Vec<VolumeInfo>,
+        categories: CategoryMap,
+        settings: &Settings,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             shared,
             repaint,
@@ -101,7 +158,31 @@ impl CleanerPage {
             admin_report: Vec::new(),
             report: Vec::new(),
             advanced: false,
+            categories,
+            breakdown: cx.new(|_| CategoryPanel::new(None, "")),
+            breakdown_plan: false,
+            tab: None,
+            page: 0,
+            page_size: PAGE_SIZES[0],
         }
+    }
+
+    /// Sums the Category breakdown again for what it covers. The Entries inside each Cleanable
+    /// were read off the UI thread with the look; this only adds up their per-extension totals.
+    fn rebuild_breakdown(&self, cx: &mut Context<Self>) {
+        let all = self.cleanables.iter().chain(&self.admin);
+        let plan = self.plan().into_iter().chain(self.admin_plan());
+        let (rows, whole) = if self.breakdown_plan {
+            breakdown(plan, &self.categories)
+        } else {
+            breakdown(all, &self.categories)
+        };
+        let what = if self.breakdown_plan {
+            "Cleanup Plan (ticked)"
+        } else {
+            "all Cleanables"
+        };
+        self.breakdown.update(cx, |panel, cx| panel.set_rows(rows, whole, what, cx));
     }
 
     pub fn set_volumes(&mut self, volumes: Vec<VolumeInfo>, cx: &mut Context<Self>) {
@@ -167,6 +248,7 @@ impl CleanerPage {
                 // render that follows looks again.
                 if this.epoch == epoch {
                     this.apply(found.0, found.1, found.2);
+                    this.rebuild_breakdown(cx);
                 }
                 cx.notify();
             })
@@ -281,6 +363,7 @@ impl CleanerPage {
                         let ok = outcome.skipped.is_empty();
                         this.update(cx, |page, cx| {
                             page.admin_ticked.clear();
+                            page.rebuild_breakdown(cx);
                             page.admin_report = outcome.skipped;
                             cx.notify();
                         });
@@ -397,6 +480,7 @@ impl CleanerPage {
                         let ok = outcome.skipped.is_empty() && failed == 0;
                         this.update(cx, |page, cx| {
                             page.ticked.clear();
+                            page.rebuild_breakdown(cx);
                             page.report = outcome.commands;
                             cx.notify();
                         });
@@ -423,20 +507,13 @@ impl CleanerPage {
         )
     }
 
-    /// The admin-only Cleanables, each with the command that would remove it, and the admin step.
-    fn admin_panel(&self, cx: &mut Context<Self>) -> Option<Div> {
-        if self.admin.is_empty() && self.admin_report.is_empty() {
-            return None;
-        }
+    /// Rows of the admin-only Cleanables `range` of them, each with the command that would remove it.
+    fn admin_rows(&self, range: std::ops::Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let p = palette(cx);
         let mono = cx.theme().mono_font_family.clone();
-        let plan = self.admin_plan();
-        let total: u64 = plan.iter().map(|c| c.on_disk).sum();
-        let rows: Vec<AnyElement> = self
-            .admin
-            .iter()
-            .enumerate()
-            .map(|(ix, c)| {
+        range
+            .map(|ix| {
+                let c = &self.admin[ix];
                 let key = c.key();
                 let command = if c.rule.is_command() {
                     format!(
@@ -464,6 +541,7 @@ impl CleanerPage {
                                 } else {
                                     this.admin_ticked.remove(&key);
                                 }
+                                this.rebuild_breakdown(cx);
                                 cx.notify();
                             }))
                             .into_any_element()
@@ -480,41 +558,58 @@ impl CleanerPage {
                     .child(self.show_button(("admin-show", ix), c, cx))
                     .into_any_element()
             })
-            .collect();
-        let why = if !CAN_ELEVATE {
-            Some("This system cannot run the command elevated from here; run it yourself")
-        } else if plan.is_empty() {
-            Some("Tick what to clean first")
-        } else {
-            None
-        };
-        Some(
-            panel(cx).child(
-                v_flex()
-                    .gap_2()
-                    .child(div().font_weight(FontWeight::MEDIUM).child("Admin only"))
-                    .child(caption(
-                        "You do not own these (or something inside them), so the normal Clean never touches them. Each is removed only in this separate step, which shows the exact command first.",
-                        cx,
-                    ))
-                    .children(rows)
-                    .when(!self.admin_report.is_empty(), |d| {
-                        d.child(div().text_color(p.warning).child("Not removed by the last admin step:"))
-                            .children(self.admin_report.iter().map(|(path, why)| div().text_color(p.warning).child(format!("{} ({why})", path.display()))))
-                    })
+            .collect()
+    }
+
+    /// Rows of the Cleanables at `ixs` of `cleanables`.
+    fn rows(&self, ixs: &[usize], cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let rule = palette(cx).rule;
+        ixs.iter()
+            .map(|&ix| {
+                let c = &self.cleanables[ix];
+                let key = c.key();
+                let by = if c.rule.is_command() {
+                    format!("{}: runs {}", c.rule.name, c.rule.argv_text())
+                } else {
+                    c.rule.name.clone()
+                };
+                h_flex()
+                    .gap(px(12.))
+                    .py(px(6.))
+                    .border_b_1()
+                    .border_color(rule)
+                    .items_center()
                     .child(
-                        h_flex()
-                            .gap(px(8.))
-                            .items_center()
-                            .child(div().flex_1().child(format!("{} selected, {}", plan.len(), format::size(total))))
-                            .child(
-                                pill("admin-clean", "Clean as admin…")
-                                    .disabled(why)
-                                    .build(cx, cx.listener(|this, _, window, cx| this.ask_admin_clean(window, cx))),
-                            ),
-                    ),
-            ),
-        )
+                        Checkbox::new(("cleanable", ix))
+                            .checked(self.ticked.contains(&key))
+                            .on_click(cx.listener(move |this, on: &bool, _, cx| {
+                                if *on {
+                                    this.ticked.insert(key.clone());
+                                } else {
+                                    this.ticked.remove(&key);
+                                }
+                                this.rebuild_breakdown(cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().child(c.path.display().to_string()))
+                            .child(caption(by, cx)),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_none()
+                            .items_end()
+                            .child(format::size(c.on_disk))
+                            .when(c.rule.is_command(), |d| d.child(caption("Estimated", cx))),
+                    )
+                    .child(self.show_button(("show", ix), c, cx))
+                    .into_any_element()
+            })
+            .collect()
     }
 
     fn report_panel(&self, cx: &App) -> Option<Div> {
@@ -557,72 +652,44 @@ impl Render for CleanerPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh(cx);
         let p = palette(cx);
-        let (muted, rule, warning) = (p.muted, p.rule, p.warning);
+        let (muted, warning) = (p.muted, p.warning);
         let plan = self.plan();
         let (count, total) = (plan.len(), plan.iter().map(|c| c.on_disk).sum::<u64>());
-        let mut rows: Vec<AnyElement> = Vec::new();
-        let mut group = None;
-        for (ix, c) in self.cleanables.iter().enumerate() {
-            if group != Some(c.rule.group) {
-                group = Some(c.rule.group);
-                rows.push(
-                    div()
-                        .mt(px(if rows.is_empty() { 0. } else { 12. }))
-                        .pb(px(4.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(c.rule.group.title())
-                        .into_any_element(),
-                );
-            }
-            let key = c.key();
-            let by = if c.rule.is_command() {
-                format!("{}: runs {}", c.rule.name, c.rule.argv_text())
-            } else {
-                c.rule.name.clone()
-            };
-            rows.push(
-                h_flex()
-                    .gap(px(12.))
-                    .py(px(6.))
-                    .border_b_1()
-                    .border_color(rule)
-                    .items_center()
-                    .child(
-                        Checkbox::new(("cleanable", ix))
-                            .checked(self.ticked.contains(&key))
-                            .on_click(cx.listener(move |this, on: &bool, _, cx| {
-                                if *on {
-                                    this.ticked.insert(key.clone());
-                                } else {
-                                    this.ticked.remove(&key);
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().truncate().child(c.path.display().to_string()))
-                            .child(caption(by, cx)),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_none()
-                            .items_end()
-                            .child(format::size(c.on_disk))
-                            .when(c.rule.is_command(), |d| d.child(caption("Estimated", cx))),
-                    )
-                    .child(self.show_button(("show", ix), c, cx))
-                    .into_any_element(),
-            );
+        let admin_plan = self.admin_plan();
+        let (admin_count, admin_total) = (admin_plan.len(), admin_plan.iter().map(|c| c.on_disk).sum::<u64>());
+
+        // Tabs: a list per group, so each one reads on its own and pages within itself. Admin only
+        // is the last, and only when there is something in it.
+        let in_group = |g: Group| self.cleanables.iter().filter(|c| c.rule.group == g).count();
+        let mut tabs: Vec<(Tab, usize)> = Group::ALL.iter().map(|&g| (Tab::Group(g), in_group(g))).collect();
+        if !self.admin.is_empty() || !self.admin_report.is_empty() {
+            tabs.push((Tab::Admin, self.admin.len()));
         }
+        let tab = self
+            .tab
+            .filter(|t| tabs.iter().any(|(x, _)| x == t))
+            .or_else(|| tabs.iter().find(|(_, n)| *n > 0).map(|&(t, _)| t))
+            .unwrap_or(Tab::Group(Group::Temp));
+        let ixs: Vec<usize> = match tab {
+            Tab::Group(g) => (0..self.cleanables.len()).filter(|&i| self.cleanables[i].rule.group == g).collect(),
+            Tab::Admin => (0..self.admin.len()).collect(),
+        };
+        let pages = ixs.len().div_ceil(self.page_size).max(1);
+        let page = self.page.min(pages - 1);
+        let (from, to) = (page * self.page_size, ((page + 1) * self.page_size).min(ixs.len()));
+        let rows = match tab {
+            Tab::Group(_) => self.rows(&ixs[from..to], cx),
+            Tab::Admin => self.admin_rows(from..to, cx),
+        };
+
         let advanced = self.advanced.then(|| {
             let paths: Vec<_> = plan.iter().filter(|c| !c.rule.is_command()).collect();
             let commands: Vec<_> = plan.iter().filter(|c| c.rule.is_command()).collect();
             v_flex()
+                .id("advanced")
+                .max_h(px(200.))
+                .overflow_y_scrollbar()
                 .gap_1()
-                .mt(px(12.))
                 .p_2()
                 .rounded_md()
                 .bg(cx.theme().muted)
@@ -651,50 +718,219 @@ impl Render for CleanerPage {
                 .child("Some Cleanup Rules were not read; the others still work:")
                 .children(self.rules.errors.iter().map(|e| div().child(e.clone())))
         });
-        div().id("cleaner").size_full().overflow_y_scroll().child(
+        let admin_why = if !CAN_ELEVATE {
+            Some("This system cannot run the command elevated from here; run it yourself")
+        } else if admin_count == 0 {
+            Some("Tick something under Admin only first")
+        } else {
+            None
+        };
+        let mut summary = format!("Cleanup Plan: {count} selected, {}", format::size(total));
+        if !self.admin.is_empty() {
+            summary.push_str(&format!(" · Admin only: {admin_count} selected, {}", format::size(admin_total)));
+        }
+        // The plan and its buttons stay above the list, so they are never a scroll away.
+        let bar = panel(cx)
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(div().flex_1().child(summary))
+                    .child(pill("plan-advanced", "Advanced").small().selected(self.advanced).build(
+                        cx,
+                        cx.listener(|this, _, _, cx| {
+                            this.advanced = !this.advanced;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(
+                        pill("clean", "Clean")
+                            .primary()
+                            .disabled((count == 0).then_some("Tick what to clean first"))
+                            .build(cx, cx.listener(|this, _, window, cx| this.ask_clean(window, cx))),
+                    )
+                    .child(
+                        pill("admin-clean", "Clean as admin…")
+                            .disabled(admin_why)
+                            .build(cx, cx.listener(|this, _, window, cx| this.ask_admin_clean(window, cx))),
+                    ),
+            )
+            .children(advanced.map(|a| div().mt(px(12.)).child(a)));
+
+        let tab_bar = h_flex().gap(px(8.)).children(tabs.iter().enumerate().map(|(i, &(t, n))| {
+            let title = match t {
+                Tab::Group(g) => g.title(),
+                Tab::Admin => "Admin only",
+            };
+            pill(("tab", i), format!("{title} ({n})")).small().selected(t == tab).build(
+                cx,
+                cx.listener(move |this, _, _, cx| {
+                    this.tab = Some(t);
+                    this.page = 0;
+                    cx.notify();
+                }),
+            )
+        }));
+        let admin_intro = (tab == Tab::Admin).then(|| {
             v_flex()
-                .gap(px(16.))
-                .p(px(16.))
-                .child(div().text_size(px(24.)).line_height(px(32.)).child("Cleaner"))
-                .child(div().text_color(muted).child(format!(
-                    "Temporary files, caches and build artefacts, found in the Index and confirmed by Cleanup Rules (add your own in cleanup.toml). Pre-ticked: temporary files untouched for {} days and build artefacts whose project is untouched for {} days; the limits are in Settings.",
-                    self.temp_days, self.build_days
-                )))
-                .children(problems)
-                .child(
-                    panel(cx)
-                        .child(v_flex().children(rows))
-                        .when(self.cleanables.is_empty(), |d| {
-                            d.child(if self.looking() { "Looking for Cleanables…" } else { "Nothing to clean." })
-                        })
-                        .child(
-                            h_flex()
-                                .mt(px(12.))
-                                .gap(px(8.))
-                                .items_center()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .child(format!("Cleanup Plan: {count} selected, {}", format::size(total))),
-                                )
-                                .child(pill("plan-advanced", "Advanced").small().selected(self.advanced).build(
-                                    cx,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.advanced = !this.advanced;
-                                        cx.notify();
-                                    }),
-                                ))
-                                .child(
-                                    pill("clean", "Clean")
-                                        .primary()
-                                        .disabled((count == 0).then_some("Tick what to clean first"))
-                                        .build(cx, cx.listener(|this, _, window, cx| this.ask_clean(window, cx))),
-                                ),
+                .gap_1()
+                .child(caption(
+                    "You do not own these (or something inside them), so the normal Clean never touches them. Each is removed only by Clean as admin, which shows the exact command first.",
+                    cx,
+                ))
+                .when(!self.admin_report.is_empty(), |d| {
+                    d.child(div().text_color(warning).child("Not removed by the last admin step:"))
+                        .children(
+                            self.admin_report
+                                .iter()
+                                .map(|(path, why)| div().text_color(warning).child(format!("{} ({why})", path.display()))),
                         )
-                        .children(advanced),
+                })
+        });
+        let empty = ixs.is_empty().then(|| {
+            div().child(if self.looking() {
+                "Looking for Cleanables…"
+            } else {
+                "Nothing to clean here."
+            })
+        });
+        let size_pills = PAGE_SIZES.iter().map(|&n| {
+            pill(("page-size", n), n.to_string()).small().selected(n == self.page_size).build(
+                cx,
+                cx.listener(move |this, _, _, cx| {
+                    // Keep the first item on screen across a change of size.
+                    this.page = this.page * this.page_size / n;
+                    this.page_size = n;
+                    cx.notify();
+                }),
+            )
+        });
+        let pager = h_flex()
+            .gap(px(8.))
+            .items_center()
+            .child(
+                pill("page-prev", "‹ Previous")
+                    .small()
+                    .disabled((page == 0).then_some("This is the first page"))
+                    .build(
+                        cx,
+                        cx.listener(move |this, _, _, cx| {
+                            this.page = page - 1;
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(div().child(format!(
+                "Page {} of {pages} · {}–{} of {}",
+                page + 1,
+                if ixs.is_empty() { 0 } else { from + 1 },
+                to,
+                ixs.len()
+            )))
+            .child(
+                pill("page-next", "Next ›")
+                    .small()
+                    .disabled((page + 1 >= pages).then_some("This is the last page"))
+                    .build(
+                        cx,
+                        cx.listener(move |this, _, _, cx| {
+                            this.page = page + 1;
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(div().flex_1())
+            .child(caption("Per page", cx))
+            .children(size_pills);
+
+        let list = panel(cx)
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(tab_bar)
+            .children(admin_intro)
+            // The list scrolls inside the page, with a scrollbar, under the bar and above the pager.
+            .child(
+                v_flex()
+                    .id("cleanables")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .children(rows)
+                    .children(empty),
+            )
+            .child(pager);
+
+        let scope = |plan_only: bool, label: &'static str| {
+            pill(if plan_only { "scope-plan" } else { "scope-all" }, label)
+                .small()
+                .selected(self.breakdown_plan == plan_only)
+                .build(
+                    cx,
+                    cx.listener(move |this, _, _, cx| {
+                        this.breakdown_plan = plan_only;
+                        this.rebuild_breakdown(cx);
+                        cx.notify();
+                    }),
                 )
-                .children(self.admin_panel(cx))
-                .children(self.report_panel(cx)),
-        )
+        };
+        let side = v_flex()
+            .w(px(540.))
+            .flex_none()
+            .gap(px(8.))
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .child(scope(false, "All Cleanables"))
+                    .child(scope(true, "Cleanup Plan")),
+            )
+            .child(div().h(px(301.)).child(self.breakdown.clone()));
+
+        v_flex()
+            .id("cleaner")
+            .size_full()
+            .gap(px(12.))
+            .p(px(16.))
+            .child(div().text_size(px(24.)).line_height(px(32.)).child("Cleaner"))
+            .child(div().text_color(muted).child(format!(
+                "Temporary files, caches and build artefacts, found in the Index and confirmed by Cleanup Rules (add your own in cleanup.toml). Pre-ticked: temporary files untouched for {} days and build artefacts whose project is untouched for {} days; the limits are in Settings.",
+                self.temp_days, self.build_days
+            )))
+            .children(problems)
+            .child(bar)
+            .children(self.report_panel(cx).map(|r| div().id("report").max_h(px(160.)).overflow_y_scrollbar().child(r)))
+            .child(h_flex().flex_1().min_h_0().gap(px(12.)).items_start().child(list.h_full().flex_1().min_w_0()).child(side))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: the glob would bring gpui's own `test` attribute into scope.
+    use super::{Category, CategoryMap, Cleanable, Totals, breakdown, rules};
+
+    #[test]
+    fn breakdown_sums_extensions_into_categories_largest_first() {
+        let t = |on_disk, files| Totals {
+            logical: on_disk,
+            on_disk,
+            files,
+        };
+        let rule = rules::load(None).rules[0].clone();
+        let cleanable = |exts| Cleanable {
+            rule: rule.clone(),
+            path: "/x".into(),
+            on_disk: 0,
+            exts,
+            newest: 0,
+        };
+        let a = cleanable(vec![("rs".into(), t(10, 2)), ("mp4".into(), t(50, 1))]);
+        let b = cleanable(vec![("rs".into(), t(5, 1)), (String::new(), t(1, 1))]);
+        let (rows, whole) = breakdown([&a, &b].into_iter(), &CategoryMap::default());
+        assert_eq!(whole, 66);
+        assert_eq!(rows[0].category, Category::Video);
+        let code = rows.iter().find(|r| r.category == Category::Code).unwrap();
+        assert_eq!((code.totals.on_disk, code.totals.files), (15, 3));
     }
 }

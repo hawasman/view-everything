@@ -3,10 +3,11 @@
 use crate::format;
 use crate::theme::{RADIUS_CARD, palette};
 use crate::ui::swatch;
-use crate::view::View;
+use crate::view::{CategoryRow, View};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, IconName, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -19,31 +20,46 @@ const FILES: f32 = 80.;
 const SHARE: f32 = 64.;
 
 pub struct CategoryPanel {
-    query: Entity<InputState>,
+    /// The Query input a click adds a term to; none, and rows do not click (the Cleaner's).
+    query: Option<Entity<InputState>>,
+    subtitle: SharedString,
     view: Option<Arc<View>>,
+    /// The rows drawn (largest first) and the On-disk Size their shares are of.
+    rows: Option<(Vec<CategoryRow>, u64)>,
     open: HashSet<Category>,
 }
 
 impl CategoryPanel {
     /// `query` is the Query input that clicking a Category or extension adds a term to.
-    pub fn new(query: Entity<InputState>) -> Self {
+    pub fn new(query: Option<Entity<InputState>>, subtitle: impl Into<SharedString>) -> Self {
         Self {
             query,
+            subtitle: subtitle.into(),
             view: None,
+            rows: None,
             open: HashSet::new(),
         }
     }
 
     pub fn set_view(&mut self, view: Option<Arc<View>>, cx: &mut Context<Self>) {
         if !crate::view::same(&self.view, &view) {
+            self.rows = view.as_ref().map(|v| (v.categories.clone(), v.total.on_disk));
             self.view = view;
             cx.notify();
         }
     }
 
+    /// Shows `rows` (largest first) as shares of `whole`, an On-disk Size.
+    pub fn set_rows(&mut self, rows: Vec<CategoryRow>, whole: u64, subtitle: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.rows = Some((rows, whole));
+        self.subtitle = subtitle.into();
+        cx.notify();
+    }
+
     /// Adds `term` to the Query unless it is already there.
     fn add_to_query(&self, term: String, window: &mut Window, cx: &mut App) {
-        self.query.update(cx, |query, cx| {
+        let Some(query) = &self.query else { return };
+        query.update(cx, |query, cx| {
             let mut text = query.value().to_string();
             if text.split_whitespace().any(|t| t.eq_ignore_ascii_case(&term)) {
                 return;
@@ -77,17 +93,13 @@ impl Render for CategoryPanel {
             .justify_between()
             .items_baseline()
             .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child("Categories"))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child("All Locations · click a row to add type: to the Query"),
-            );
-        let Some(view) = self.view.clone() else {
+            .child(div().text_xs().text_color(muted).child(self.subtitle.clone()));
+        let Some((rows, whole)) = self.rows.clone() else {
             return panel.child(heading);
         };
-        let largest = view.categories.first().map_or(1, |r| r.totals.on_disk.max(1));
-        let whole = view.total.on_disk.max(1);
+        let clickable = self.query.is_some();
+        let largest = rows.first().map_or(1, |r| r.totals.on_disk.max(1));
+        let whole = whole.max(1);
         let cell = |w: f32| div().w(px(w)).flex_none().text_right().whitespace_nowrap();
         let header = h_flex()
             .h(px(30.))
@@ -101,7 +113,7 @@ impl Render for CategoryPanel {
             .child(cell(FILES).child("Files"))
             .child(cell(SHARE).child("Share"));
         let mut list = v_flex().id("categories").flex_1().min_h_0().overflow_y_scroll();
-        for row in &view.categories {
+        for row in &rows {
             let category = row.category;
             let open = self.open.contains(&category);
             let color = cats[category as usize];
@@ -132,15 +144,17 @@ impl Render for CategoryPanel {
                     .border_t_1()
                     .border_color(rule)
                     .text_size(px(13.))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(hover).rounded(px(8.)))
-                    .tooltip({
-                        let text = format!("{} files — show only this Category", format::count(row.totals.files));
-                        move |window, cx| Tooltip::new(text.clone()).build(window, cx)
+                    .when(clickable, |d| {
+                        d.cursor_pointer()
+                            .hover(move |s| s.bg(hover).rounded(px(8.)))
+                            .tooltip({
+                                let text = format!("{} files — show only this Category", format::count(row.totals.files));
+                                move |window, cx| Tooltip::new(text.clone()).build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.add_to_query(format!("type:{}", category.name().to_lowercase()), window, cx);
+                            }))
                     })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.add_to_query(format!("type:{}", category.name().to_lowercase()), window, cx);
-                    }))
                     .child(
                         h_flex()
                             .flex_1()
@@ -186,7 +200,7 @@ impl Render for CategoryPanel {
                                 .text_color(muted)
                                 .child(format!("{:.1}%", totals.on_disk as f64 * 100.0 / whole as f64)),
                         );
-                    if let Some(term) = term {
+                    if let Some(term) = term.filter(|_| clickable) {
                         item = item
                             .cursor_pointer()
                             .hover(move |s| s.bg(hover).text_color(text))

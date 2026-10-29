@@ -7,7 +7,7 @@ use ve_core::category::extension;
 use ve_core::{Category, CategoryMap, EntryId, Filter, Index, Query, Totals};
 
 /// Extensions listed under each Category in the breakdown.
-const EXTENSIONS_PER_CATEGORY: usize = 12;
+pub const EXTENSIONS_PER_CATEGORY: usize = 12;
 
 static NEXT_VIEW_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -38,6 +38,7 @@ pub struct View {
     pub took: Duration,
 }
 
+#[derive(Clone)]
 pub struct CategoryRow {
     pub category: Category,
     pub totals: Totals,

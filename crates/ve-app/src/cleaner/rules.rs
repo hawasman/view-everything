@@ -2,13 +2,14 @@
 //! `cleanup.toml`, finding Cleanables from the Index, checking them again on disk and removing
 //! them (ADR-0008).
 
-use crate::trash::{subtree_on_disk, volume_blocker};
+use crate::trash::volume_blocker;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use ve_core::{Candidate, CategoryMap, EntryId, Index, Query, QueryContext};
+use ve_core::category::extension;
+use ve_core::{Candidate, CategoryMap, EntryId, Index, Query, QueryContext, Totals};
 use ve_scan::VolumeInfo;
 
 /// What a `CACHEDIR.TAG` must start with (https://bford.info/cachedir/).
@@ -235,6 +236,8 @@ pub struct Cleanable {
     pub path: PathBuf,
     /// On-disk Size; for a command rule only an estimate.
     pub on_disk: u64,
+    /// Files under it by lower-cased extension (empty: none), for the Category breakdown.
+    pub exts: Vec<(String, Totals)>,
     /// Modification time of the newest file in the project, in nanoseconds since the Unix epoch.
     pub newest: i64,
 }
@@ -361,9 +364,11 @@ pub fn find(index: &Index, volumes: &[VolumeInfo], rules: &[Arc<Rule>]) -> Vec<C
             } else {
                 id
             };
+            let (on_disk, exts) = subtree_sizes(index, sized);
             Cleanable {
                 path: index.path(id),
-                on_disk: subtree_on_disk(index, sized),
+                on_disk,
+                exts,
                 newest: newest_file(index, project),
                 rule,
             }
@@ -380,6 +385,31 @@ pub fn find(index: &Index, volumes: &[VolumeInfo], rules: &[Arc<Rule>]) -> Vec<C
             .then_with(|| a.path.cmp(&b.path))
     });
     out
+}
+
+/// On-disk Size of `id` and everything beneath it, and its files' totals per lower-cased extension.
+fn subtree_sizes(index: &Index, id: EntryId) -> (u64, Vec<(String, Totals)>) {
+    let (mut total, mut by_ext) = (0, HashMap::<String, Totals>::new());
+    let mut stack = vec![id];
+    while let Some(current) = stack.pop() {
+        let on_disk = index.on_disk(current);
+        total += on_disk;
+        if index.is_dir(current) {
+            stack.extend_from_slice(index.children(current));
+        } else {
+            let ext = extension(index.name(current)).unwrap_or("");
+            let totals = match by_ext.get_mut(ext) {
+                Some(t) => t,
+                None => by_ext.entry(ext.to_ascii_lowercase()).or_default(),
+            };
+            totals.add(Totals {
+                logical: index.logical(current),
+                on_disk,
+                files: 1,
+            });
+        }
+    }
+    (total, by_ext.into_iter().collect())
 }
 
 /// A symbolic link, or on Windows also a junction or any other reparse point.
@@ -755,6 +785,21 @@ mod tests {
     }
 
     #[test]
+    fn subtree_sizes_split_files_by_lowercased_extension() {
+        let mut index = Index::new();
+        let vol = index.add_volume(Path::new("/"), "ext4", "uuid:root", dir(), SyncState::Walk);
+        let root = index.volume(vol).unwrap().root;
+        let sub = index.insert(root, "target", dir());
+        index.insert(sub, "a.RS", file(10));
+        index.insert(sub, "b.rs", file(5));
+        index.insert(sub, "Makefile", file(1));
+        let (total, exts) = subtree_sizes(&index, sub);
+        let get = |e: &str| exts.iter().find(|(x, _)| x == e).map(|(_, t)| (t.on_disk, t.files));
+        assert_eq!(total, 16);
+        assert_eq!((get("rs"), get("")), (Some((15, 2)), Some((1, 1))));
+    }
+
+    #[test]
     fn builtin_rules_parse_on_every_platform_with_a_marker_or_location_test() {
         for os in ["linux", "macos", "windows"] {
             let rules = builtin(os);
@@ -938,6 +983,7 @@ mod tests {
             rule: rule(name),
             path: "/x".into(),
             on_disk: 0,
+            exts: Vec::new(),
             newest,
         };
         assert!(c("Rust build artefacts", now - 31 * day).pre_ticked(now, 7, 30));

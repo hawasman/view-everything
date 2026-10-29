@@ -143,7 +143,16 @@ impl Shell {
 
         let trash = Trash::new(engine.shared.clone(), repaint.clone());
 
-        let cleaner = cx.new(|_| CleanerPage::new(engine.shared.clone(), repaint.clone(), volumes.clone(), &settings));
+        let cleaner = cx.new(|cx| {
+            CleanerPage::new(
+                engine.shared.clone(),
+                repaint.clone(),
+                volumes.clone(),
+                categories.clone(),
+                &settings,
+                cx,
+            )
+        });
         let dashboard = cx.new(|cx| {
             let mut page = DashboardPage::new(
                 engine.shared.clone(),
@@ -217,7 +226,7 @@ impl Shell {
                 .select_on_modifier_click(false)
         });
         let treemap = cx.new(|cx| Treemap::new(engine.shared.clone(), categories.clone(), cx));
-        let category_panel = cx.new(|_| CategoryPanel::new(query.clone()));
+        let category_panel = cx.new(|_| CategoryPanel::new(Some(query.clone()), "All Locations · click a row to add type: to the Query"));
 
         let tree = cx.new(|cx| {
             TableState::new(TreeList::new(engine.shared.clone(), categories.clone()), window, cx)
