@@ -683,7 +683,7 @@ impl Render for CleanerPage {
         };
 
         let advanced = self.advanced.then(|| {
-            let paths: Vec<_> = plan.iter().filter(|c| !c.rule.is_command()).collect();
+            let paths: Vec<_> = plan.iter().chain(&admin_plan).filter(|c| !c.rule.is_command()).collect();
             let commands: Vec<_> = plan.iter().filter(|c| c.rule.is_command()).collect();
             v_flex()
                 .id("advanced")
@@ -709,7 +709,7 @@ impl Render for CleanerPage {
                             .child(caption(format!("in {}", c.path.display()), cx))
                     }))
                 })
-                .when(count == 0, |d| d.child(caption("Nothing ticked.", cx)))
+                .when(count + admin_count == 0, |d| d.child(caption("Nothing ticked.", cx)))
         });
         let problems = (!self.rules.errors.is_empty()).then(|| {
             v_flex()
@@ -721,7 +721,11 @@ impl Render for CleanerPage {
         let admin_why = if !CAN_ELEVATE {
             Some("This system cannot run the command elevated from here; run it yourself")
         } else if admin_count == 0 {
-            Some("Tick something under Admin only first")
+            Some(if self.admin.is_empty() {
+                "Nothing here needs admin rights"
+            } else {
+                "Tick something under Admin only first"
+            })
         } else {
             None
         };
