@@ -845,7 +845,7 @@ impl Shell {
             }
             Phase::Idle => {}
         }
-        if self.engine.is_hashing() {
+        if shared.hashing_now() {
             let hashing = &shared.hash_progress;
             let (stage, done, total) = (
                 hashing.stage.load(Ordering::Relaxed),

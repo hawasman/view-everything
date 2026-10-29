@@ -188,7 +188,10 @@ pub fn find(
     }
 
     // Refresh the cache: drop what this run did not see on the scanned Volumes.
-    cache.entries.retain(|(volume, _), _| !scanned.contains(volume));
+    // A cancelled run saw only part of them: keep the cache as it was.
+    if !cancel.load(Ordering::Relaxed) {
+        cache.entries.retain(|(volume, _), _| !scanned.contains(volume));
+    }
     for file in files.iter().chain(&survivors) {
         if let Some(cached) = &file.cached {
             cache.entries.insert((file.volume.clone(), file.key), cached.clone());

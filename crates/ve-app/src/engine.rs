@@ -161,10 +161,6 @@ impl Engine {
         }
     }
 
-    pub fn is_hashing(&self) -> bool {
-        self.shared.hashing.load(Ordering::Relaxed)
-    }
-
     pub fn set_query(&self, text: String) {
         let _ = self.queries.send(text);
     }

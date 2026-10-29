@@ -15,8 +15,8 @@ use std::sync::atomic::Ordering;
 use ve_core::EntryId;
 use ve_scan::VolumeInfo;
 
-/// Groups drawn at once; the rest are a scroll-free summary line.
-const MAX_GROUPS: usize = 100;
+/// Groups drawn at once; the rest are a summary line.
+const MAX_GROUPS: usize = 500;
 
 pub struct DuplicatesPanel {
     shared: Arc<Shared>,
@@ -73,6 +73,8 @@ impl Render for DuplicatesPanel {
                 .filter(|g| g.copies.len() > 1)
                 .collect()
         };
+        let mut shown = shown;
+        shown.sort_by_key(|g| std::cmp::Reverse(g.wasted()));
         let wasted: u64 = shown.iter().map(Shown::wasted).sum();
         let progress = &self.shared.hash_progress;
         let status = if hashing {
