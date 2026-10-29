@@ -71,7 +71,14 @@ The AppImage also carries update information, so AppImageUpdate, Shelly and Gear
 
 The app asks GitHub Releases for a newer version at most once a day. When there is one, a row above
 Settings shows the version and a **What's new** link to the release notes. Settings has a switch for
-the daily check and a **Check now** button; a failed check only shows a status there. Builds another
+the daily check and a **Check now** button; a failed check only shows a status there.
+
+Where the app can replace itself without admin rights, the update is downloaded in the background, its
+minisign signature is checked against the key built into the app, and the row offers **Restart to update**;
+nothing is replaced unless the signature matches. This works for the AppImage (when its folder is
+writable), the Windows msi (one UAC prompt, then `msiexec` upgrades in place) and portable zip (the exe is
+swapped, the old one removed on the next start), and the macOS `.app` (when its folder is writable).
+Anywhere else, and when a download fails, the row keeps the **What's new** link. Builds another
 tool manages (the AUR package) are compiled without the updater: `cargo build --no-default-features`.
 
 SSH Remotes use your system `ssh` with keys or ssh-agent (no password prompts). S3 and FTP
