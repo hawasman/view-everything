@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use ve_core::snapshot::{self, Snapshot};
 use ve_core::{BitSet, CategoryMap, Index, Query, QueryContext, Remote, SyncState, VolumeId};
 use ve_scan::duplicates::{self, Group, HashCache, HashProgress};
 use ve_scan::{Progress, SharedIndex, VolumeInfo};
@@ -52,6 +53,8 @@ pub struct Shared {
     hashing: AtomicBool,
     /// Held while the Index is written to disk, so two saves never share the temporary file.
     saving: Mutex<()>,
+    /// Set while a Snapshot is being captured and written.
+    snapshotting: AtomicBool,
     /// Called from the background threads whenever something the GUI shows has changed.
     repaint: Repaint,
 }
@@ -134,6 +137,7 @@ impl Engine {
             hash_progress: HashProgress::default(),
             hashing: AtomicBool::new(false),
             saving: Mutex::new(()),
+            snapshotting: AtomicBool::new(false),
             repaint,
         });
         let (commands, command_rx) = mpsc::channel();
@@ -245,7 +249,7 @@ impl Shared {
 }
 
 fn run_indexer(
-    shared: &Shared,
+    shared: &Arc<Shared>,
     mut mounted: Vec<VolumeInfo>,
     mut wanted: Vec<VolumeInfo>,
     mut remotes: Vec<Remote>,
@@ -506,7 +510,7 @@ fn sync_volumes(shared: &Shared, volumes: &[VolumeId], quiet: bool) {
 }
 
 /// Saves the Index if an Entry changed since the last save, or always when `force`.
-fn save_if_changed(shared: &Shared, path: Option<&Path>, saved_generation: &mut u64, force: bool) {
+fn save_if_changed(shared: &Arc<Shared>, path: Option<&Path>, saved_generation: &mut u64, force: bool) {
     let Some(path) = path else { return };
     let _saving = shared.saving.lock();
     let index = shared.index.read();
@@ -517,8 +521,41 @@ fn save_if_changed(shared: &Shared, path: Option<&Path>, saved_generation: &mut 
         Ok(()) => {
             *saved_generation = index.generation();
             shared.resolve("save");
+            snapshot_first_save_of_day(shared, path);
         }
         Err(e) => shared.report("save", format!("Could not save the Index to {}: {e}", path.display())),
+    }
+}
+
+/// The folder of Snapshots, beside the Index.
+pub fn snapshots_dir() -> Option<PathBuf> {
+    Some(settings::index_path()?.with_file_name("snapshots"))
+}
+
+/// After the first Index save of a day, stores that day's Snapshot on a thread of its own, so
+/// neither the save nor the GUI waits for it, then drops the Snapshots retention no longer keeps.
+fn snapshot_first_save_of_day(shared: &Arc<Shared>, index_path: &Path) {
+    let dir = index_path.with_file_name("snapshots");
+    let today = Local::now().date_naive();
+    let file = snapshot::path_for(&dir, today);
+    if file.exists() || shared.snapshotting.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let shared = shared.clone();
+    let spawned = thread::Builder::new().name("ve-snapshot".into()).spawn({
+        let shared = shared.clone();
+        move || {
+            // The Index stays locked only while the folders are read, not while they are written.
+            let taken = Snapshot::capture(&shared.index.read());
+            match taken.save(&file) {
+                Ok(()) => snapshot::prune(&dir, today),
+                Err(e) => eprintln!("Could not save the Snapshot to {}: {e}", file.display()),
+            }
+            shared.snapshotting.store(false, Ordering::Release);
+        }
+    });
+    if spawned.is_err() {
+        shared.snapshotting.store(false, Ordering::Release);
     }
 }
 
@@ -672,6 +709,7 @@ mod tests {
             hash_progress: HashProgress::default(),
             hashing: AtomicBool::new(false),
             saving: Mutex::new(()),
+            snapshotting: AtomicBool::new(false),
             repaint: Arc::new(|| {}),
         }
     }

@@ -3,6 +3,7 @@
 
 use crate::categories::CategoryPanel;
 use crate::cleaner::{CleanerPage, ShowInExplorer};
+use crate::compare::{Compare, CompareEvent};
 use crate::dashboard::{Act, DashboardPage};
 use crate::duplicates::DuplicatesPanel;
 use crate::engine::{Engine, Phase, Repaint, last_synced_label};
@@ -79,6 +80,8 @@ pub struct Shell {
     query: Entity<InputState>,
     table: Entity<TableState<FlatList>>,
     tree: Entity<TableState<TreeList>>,
+    /// The Snapshot the tree's Change column compares with.
+    compare: Entity<Compare>,
     /// Whether the Explorer shows the tree rather than the flat list.
     show_tree: bool,
     /// Whether the Explorer shows the Duplicates panel instead of a list.
@@ -219,6 +222,19 @@ impl Shell {
                 .col_resizable(false)
                 .select_on_modifier_click(false)
         });
+
+        let compare = cx.new(|_| Compare::new(engine.shared.clone()));
+        cx.subscribe_in(&compare, window, |this, _, event: &CompareEvent, window, cx| {
+            match event {
+                CompareEvent::Result(result) => this.tree.update(cx, |t, cx| {
+                    t.delegate_mut().set_comparison(result.clone());
+                    t.refresh(cx);
+                }),
+                CompareEvent::Failed(why) => window.push_notification(Notification::error(why.clone()), cx),
+            }
+            cx.notify();
+        })
+        .detach();
 
         // Keyboard moves select a single row; clicks go through the lists' own handlers. A
         // double-click on a folder zooms the Query into it, as on the Treemap.
@@ -361,6 +377,7 @@ impl Shell {
             query,
             table,
             tree,
+            compare,
             // The 10M-Entry measurement scrolls the flat list, so it must be the one on screen.
             show_tree: !cfg!(feature = "bench") || std::env::var_os("VE_BENCH").is_none(),
             filters,
@@ -655,6 +672,7 @@ impl Shell {
 
     /// Picks up what the Engine's threads changed since the last look.
     fn poll(&mut self, cx: &mut Context<Self>) {
+        self.compare.update(cx, |c, cx| c.refresh_if_stale(cx));
         let latest = self.engine.shared.view.lock().clone();
         self.table.update(cx, |table, cx| {
             if table.delegate_mut().set_view(latest.clone()) {
@@ -1387,6 +1405,17 @@ impl Shell {
                 this.open_saved_dialog(window, cx);
             }),
         );
+        let comparing = self.compare.read(cx).active();
+        let compare = pill(
+            "compare",
+            comparing.map_or("Compare with".to_owned(), |d| format!("Compared with {d}")),
+        )
+        .small()
+        .selected(comparing.is_some())
+        .build(
+            cx,
+            cx.listener(|this, _, window, cx| Compare::open_dialog(&this.compare, window, cx)),
+        );
         let why = if selected.is_empty() {
             Some(SharedString::from("Select Entries to move to the Trash"))
         } else {
@@ -1491,6 +1520,7 @@ impl Shell {
                                     .items_center()
                                     .children(selection)
                                     .child(saved)
+                                    .when(self.show_tree && !self.show_duplicates, |d| d.child(compare))
                                     .child(filters)
                                     .child(export)
                                     .child(trash),

@@ -7428,6 +7428,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "chrono",
+ "flate2",
  "rayon",
  "regex",
  "serde",

@@ -8,6 +8,7 @@ never wait on a scan.
   modified files, and when the Index was last synced.
 - **Explorer**: a tree and a flat list beside a Treemap, all driven by one Query. Double-click a
   folder anywhere to zoom into it; the zoom is part of the Query, so you can keep refining it.
+- **Compare with**: the Index saves a Snapshot (the Folder Size of every folder, by path) on its first save each day, in a `snapshots/` folder beside `index.bin`; the last 30 days are kept, then the first Snapshot of each month. **Compare with** in the Explorer tree picks one of those dates and adds a sortable **Change** column (the growth or shrinkage of each folder; a folder that did not exist then reads as new, and one that is gone is listed under its parent as removed). The comparison runs in the background.
 - **Export**: Export CSV writes what the flat list shows (every Entry matching the Query, so a zoomed folder is included) with the columns path, name, Logical Size, On-disk Size, modified (UTC) and Category. Export PNG on the Treemap saves the tiles as drawn, at 2x, in the current theme's colours (without the text labels). Both ask where to save, or use the Downloads folder where there is no save dialog.
 - **Locations**: local Volumes are indexed by default. Removable disks stay searchable as Offline
   Volumes after you unplug them, mounted network shares are opt-in, and read-only Remotes can be
