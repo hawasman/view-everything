@@ -10,7 +10,7 @@ never wait on a scan.
   folder anywhere to zoom into it; the zoom is part of the Query, so you can keep refining it.
 - **Locations**: local Volumes are indexed by default. Removable disks stay searchable as Offline
   Volumes after you unplug them, mounted network shares are opt-in, and read-only Remotes can be
-  indexed over SSH/SFTP, S3 and FTP. Test a Remote's details before you add it, and edit it later
+  indexed over SSH/SFTP, S3, FTP, WebDAV and Azure Blob. Test a Remote's details before you add it, and edit it later
   from Settings.
 - **Trash**: Move to Trash and Empty Trash with confirmation.
 - **Cleaner**: lists Rust `target/` folders found in the Index (a sibling `Cargo.toml` or a `CACHEDIR.TAG` inside confirms them) with their On-disk Size. Tick them to form a Cleanup Plan, review the exact paths under Advanced, and Clean removes them permanently (not via the Trash) after re-checking each on disk. Remotes, Offline Volumes and read-only mounts are never offered.
@@ -74,8 +74,15 @@ Settings shows the version and a **What's new** link to the release notes. Setti
 the daily check and a **Check now** button; a failed check only shows a status there. Builds another
 tool manages (the AUR package) are compiled without the updater: `cargo build --no-default-features`.
 
-SSH Remotes use your system `ssh` with keys or ssh-agent (no password prompts). S3 and FTP
-secrets are kept in the operating system's keyring, never in the settings file.
+SSH Remotes use your system `ssh` with keys or ssh-agent (no password prompts). S3, FTP, WebDAV
+and Azure Blob secrets are kept in the operating system's keyring, never in the settings file.
+
+WebDAV Remotes take a folder URL and a user (Basic authentication; leave the user empty for a
+server that needs none) and are read folder by folder with `PROPFIND Depth: 1`, which servers that
+refuse `Depth: infinity` accept. Use `https://` anywhere you do not trust the network: Basic
+authentication sends the password without encryption over `http://`. Azure Blob Remotes take a storage account, a container
+(and optionally a prefix) and either the account key or a SAS token (it needs list permission) as
+the secret; fill Endpoint for Azurite or a sovereign cloud. A container is listed flat, like S3.
 
 ## Build from source
 

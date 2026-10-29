@@ -4,6 +4,7 @@
 //! `ssh` ([`crate::sftp`]). `BatchMode` means keys and the agent only: a password-only host reports an error
 //! instead of prompting.
 
+pub use crate::s3::{read_secret, store_secret};
 use crate::{Progress, SharedIndex, sftp};
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -122,6 +123,8 @@ pub fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -> io::R
     match state {
         Some(SyncState::S3(_)) => crate::s3::sync(index, volume, progress),
         Some(SyncState::Ftp(_)) => crate::ftp::sync(index, volume, progress),
+        Some(SyncState::Webdav(_)) => crate::webdav::sync(index, volume, progress),
+        Some(SyncState::Azure(_)) => crate::azure::sync(index, volume, progress),
         _ => sync_with("ssh", index, volume, progress),
     }
 }
@@ -134,6 +137,8 @@ pub fn check(remote: &Remote, secret: Option<&str>) -> io::Result<()> {
         Remote::Ssh(r) => check_with("ssh", r),
         Remote::S3(r) => crate::s3::check_remote(r, secret),
         Remote::Ftp(r) => crate::ftp::check_remote(r, secret),
+        Remote::Webdav(r) => crate::webdav::check_remote(r, secret),
+        Remote::Azure(r) => crate::azure::check_remote(r, secret),
     }
 }
 
@@ -142,6 +147,8 @@ pub fn forget_secret(remote: &Remote) {
     match remote {
         Remote::S3(r) if r.access_key.is_some() => crate::s3::forget_secret(&r.identity()),
         Remote::Ftp(r) => crate::ftp::forget_password(r),
+        Remote::Webdav(r) => crate::webdav::forget_password(r),
+        Remote::Azure(r) => crate::azure::forget(r),
         _ => {}
     }
 }

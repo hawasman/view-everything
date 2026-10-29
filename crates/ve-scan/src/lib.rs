@@ -4,6 +4,7 @@
 //! [`Index`] up to date with the filesystem, starting from whatever the Index already holds.
 //! A freshly added Volume holds only its root, so its first sync is a full scan.
 
+pub mod azure;
 mod capacity;
 pub mod ftp;
 pub mod ntfs;
@@ -15,6 +16,8 @@ mod sftp;
 mod volumes;
 mod walk;
 pub mod watch;
+pub mod webdav;
+mod xml;
 
 pub use capacity::capacity;
 #[cfg(windows)]

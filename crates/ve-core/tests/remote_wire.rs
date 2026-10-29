@@ -1,6 +1,6 @@
 //! The saved shapes of Remote (settings) and SyncState (Index) from v0.1.0 must keep loading.
 use std::path::Path;
-use ve_core::{EntryMeta, FtpRemote, FtpTls, Index, Remote, S3Remote, SyncState};
+use ve_core::{AzureRemote, EntryMeta, FtpRemote, FtpTls, Index, Remote, S3Remote, SyncState, WebdavRemote};
 
 #[derive(serde::Deserialize)]
 struct Settings {
@@ -53,6 +53,9 @@ fn a_saved_index_keeps_every_sync_state_and_their_variant_order() {
             S3Remote::new("b", "p", "minio.lan:9000", "us-east-1", false, "work", "AKIA").unwrap(),
         ),
         SyncState::Ftp(FtpRemote::new("h", 21, "u", "/", FtpTls::Explicit).unwrap()),
+        SyncState::Webdav(WebdavRemote::new("https://h/dav", "u").unwrap()),
+        // `endpoint: None` too: unlike S3's skipped fields it must round-trip through bincode.
+        SyncState::Azure(AzureRemote::new("acct", "c", "p", "", true).unwrap()),
     ];
     // bincode writes the variant index first: this order is the v0.1.0 wire format.
     for (i, s) in states.iter().enumerate() {
@@ -72,4 +75,48 @@ fn a_saved_index_keeps_every_sync_state_and_their_variant_order() {
     let back = Index::load(&path).unwrap();
     let loaded: Vec<_> = back.volumes().map(|(_, v)| v.sync.clone()).collect();
     assert_eq!(loaded, states);
+}
+
+#[test]
+fn webdav_and_azure_remotes_round_trip_settings_and_are_told_apart() {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Settings {
+        remotes: Vec<Remote>,
+    }
+    let remotes = vec![
+        Remote::Webdav(WebdavRemote::new("https://h:8443/dav/", "me").unwrap()),
+        Remote::Azure(AzureRemote::new("acct", "c", "p/q", "", false).unwrap()),
+        Remote::Azure(AzureRemote::new("devstoreaccount1", "c", "", "http://127.0.0.1:10000/devstoreaccount1", true).unwrap()),
+        Remote::new("me@box", "/srv").unwrap(),
+    ];
+    let text = toml::to_string(&Settings { remotes: remotes.clone() }).unwrap();
+    let back: Settings = toml::from_str(&text).unwrap();
+    assert_eq!(back.remotes, remotes);
+}
+
+#[test]
+fn webdav_and_azure_remotes_are_validated_and_identified() {
+    let dav = WebdavRemote::new(" https://h/dav// ", " me ").unwrap();
+    assert_eq!(
+        (dav.url.as_str(), dav.identity().as_str()),
+        ("https://h/dav", "webdav:me@https://h/dav")
+    );
+    assert_eq!(WebdavRemote::new("http://h", "").unwrap().identity(), "webdav:http://h");
+    for bad in [
+        "h/dav",
+        "ftp://h",
+        "https://",
+        "https://me@h/dav",
+        "https://h/a b",
+        "https://h/?x=1",
+    ] {
+        assert!(WebdavRemote::new(bad, "").is_err(), "{bad}");
+    }
+    assert!(WebdavRemote::new("https://h", "a:b").is_err());
+    let az = AzureRemote::new("acct", "c", "/p/", "", false).unwrap();
+    assert_eq!(az.identity(), "azure:acct.blob.core.windows.net/c/p");
+    let azurite = AzureRemote::new("devstoreaccount1", "c", "", "127.0.0.1:10000/devstoreaccount1/", false).unwrap();
+    assert_eq!(azurite.identity(), "azure:127.0.0.1:10000/devstoreaccount1/c/");
+    assert!(AzureRemote::new("a_b", "c", "", "", false).is_err());
+    assert!(AzureRemote::new("a", "c/d", "", "", false).is_err());
 }

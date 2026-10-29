@@ -213,6 +213,116 @@ impl FtpRemote {
     }
 }
 
+/// A WebDAV Remote: a folder on a WebDAV server, walked one folder at a time. It holds no
+/// password: that is in the OS keyring, under the Remote's identity.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WebdavRemote {
+    /// `https://host[:port]/path` of the folder, without a trailing `/`.
+    pub url: String,
+    /// Basic-auth user; empty for a server that needs none.
+    #[serde(default)]
+    pub user: String,
+}
+
+impl WebdavRemote {
+    /// A Remote from what the user typed. The user is typed apart from the URL, never inside it.
+    pub fn new(url: &str, user: &str) -> Result<WebdavRemote, String> {
+        let (url, user) = (url.trim().trim_end_matches('/'), user.trim());
+        let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"));
+        let host = rest.map_or("", |r| r.split('/').next().unwrap_or(""));
+        if host.is_empty() || url.contains(|c: char| c.is_whitespace() || "?#".contains(c)) {
+            return Err("URL must be a folder such as https://host/dav (no query)".into());
+        }
+        if host.contains('@') {
+            return Err("Type the user in User, not in the URL".into());
+        }
+        if user.contains(|c: char| c.is_whitespace() || c == ':') {
+            return Err("User must not contain spaces or a colon".into());
+        }
+        Ok(WebdavRemote {
+            url: url.into(),
+            user: user.into(),
+        })
+    }
+
+    /// `webdav:user@https://host/path`: the same Location wherever it is listed.
+    pub fn identity(&self) -> String {
+        match self.user.is_empty() {
+            true => format!("webdav:{}", self.url),
+            false => format!("webdav:{}@{}", self.user, self.url),
+        }
+    }
+}
+
+/// An Azure Blob Remote: a container, or a prefix in one, listed flat like S3. It holds no
+/// secret: the account key or SAS token is in the OS keyring, under the Remote's identity.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AzureRemote {
+    pub account: String,
+    pub container: String,
+    /// Folder-like prefix without leading or trailing `/`; empty for the whole container.
+    #[serde(default)]
+    pub prefix: String,
+    /// `https://host[:port][/account]` of a custom endpoint (Azurite, sovereign clouds); `None` is
+    /// `https://<account>.blob.core.windows.net`.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// The secret is a SAS token rather than an account key.
+    #[serde(default)]
+    pub sas: bool,
+}
+
+impl AzureRemote {
+    /// A Remote from what the user typed. `endpoint` may omit the scheme (https is assumed).
+    pub fn new(account: &str, container: &str, prefix: &str, endpoint: &str, sas: bool) -> Result<AzureRemote, String> {
+        let (account, container) = (account.trim(), container.trim());
+        if account.is_empty() || account.contains(|c: char| !c.is_ascii_alphanumeric()) {
+            return Err("Account must be the storage account name, letters and digits only".into());
+        }
+        if container.is_empty() || container.contains(|c: char| c == '/' || c.is_whitespace()) {
+            return Err("Container must be a container name, without slashes".into());
+        }
+        let endpoint = endpoint.trim().trim_end_matches('/');
+        let endpoint = match endpoint {
+            "" => None,
+            e if e.contains(|c: char| c.is_whitespace() || "?#".contains(c)) => return Err("Endpoint must be a URL or host name".into()),
+            e if e.starts_with("http://") || e.starts_with("https://") => Some(e.to_owned()),
+            e if e.contains("://") => return Err("Endpoint must be http:// or https://".into()),
+            e => Some(format!("https://{e}")),
+        };
+        Ok(AzureRemote {
+            account: account.into(),
+            container: container.into(),
+            prefix: prefix.trim().trim_matches('/').into(),
+            endpoint,
+            sas,
+        })
+    }
+
+    /// The service URL: the custom endpoint, or the account's Blob endpoint.
+    pub fn base_url(&self) -> String {
+        self.endpoint
+            .clone()
+            .unwrap_or_else(|| format!("https://{}.blob.core.windows.net", self.account))
+    }
+
+    /// `azure:<service host and path>/<container>/<prefix>`: the same Location wherever it is listed.
+    pub fn identity(&self) -> String {
+        let base = self.base_url();
+        let base = base.split_once("://").map_or(base.as_str(), |(_, rest)| rest);
+        format!("azure:{base}/{}/{}", self.container, self.prefix)
+    }
+
+    /// `azure://account/container/prefix`, with the host of a custom endpoint, for display.
+    pub fn label(&self) -> String {
+        let name = format!("azure://{}/{}/{}", self.account, self.container, self.prefix);
+        match &self.endpoint {
+            Some(e) => format!("{name} ({})", e.split_once("://").map_or(e.as_str(), |(_, rest)| rest)),
+            None => name,
+        }
+    }
+}
+
 /// A Remote Location: storage reached over a network protocol, read-only.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -221,6 +331,9 @@ pub enum Remote {
     Ftp(FtpRemote),
     Ssh(SshRemote),
     S3(S3Remote),
+    // Last: their fields (`url`, `account`) are their own, so no other kind matches them.
+    Webdav(WebdavRemote),
+    Azure(AzureRemote),
 }
 
 impl Remote {
@@ -247,6 +360,8 @@ impl Remote {
             Remote::Ssh(r) => r,
             Remote::S3(r) => r,
             Remote::Ftp(r) => r,
+            Remote::Webdav(r) => r,
+            Remote::Azure(r) => r,
         }
     }
 
@@ -283,6 +398,8 @@ impl Remote {
             Remote::Ssh(r) => ("ssh", SyncState::Ssh(r.clone())),
             Remote::S3(r) => ("s3", SyncState::S3(r.clone())),
             Remote::Ftp(r) => ("ftp", SyncState::Ftp(r.clone())),
+            Remote::Webdav(r) => ("webdav", SyncState::Webdav(r.clone())),
+            Remote::Azure(r) => ("azure", SyncState::Azure(r.clone())),
         }
     }
 }
@@ -348,6 +465,42 @@ impl RemoteKind for FtpRemote {
     }
 }
 
+impl RemoteKind for WebdavRemote {
+    fn identity(&self) -> String {
+        WebdavRemote::identity(self)
+    }
+    fn label(&self) -> String {
+        self.url.clone()
+    }
+    fn kind(&self) -> &'static str {
+        "WebDAV"
+    }
+    fn has_secret(&self) -> bool {
+        true
+    }
+    fn needs_secret(&self) -> bool {
+        !self.user.is_empty()
+    }
+}
+
+impl RemoteKind for AzureRemote {
+    fn identity(&self) -> String {
+        AzureRemote::identity(self)
+    }
+    fn label(&self) -> String {
+        AzureRemote::label(self)
+    }
+    fn kind(&self) -> &'static str {
+        "Azure Blob"
+    }
+    fn has_secret(&self) -> bool {
+        true
+    }
+    fn needs_secret(&self) -> bool {
+        true
+    }
+}
+
 /// Refresh interval meaning Manual: too long to ever come due.
 pub const MANUAL_REFRESH: Duration = Duration::from_secs(u32::MAX as u64);
 
@@ -364,6 +517,10 @@ pub enum SyncState {
     S3(S3Remote),
     /// A Remote: list the FTP server's folders again and apply differences. Last, as above.
     Ftp(FtpRemote),
+    /// A Remote: walk the WebDAV folders again and apply differences. Last, as above.
+    Webdav(WebdavRemote),
+    /// A Remote: list the container again and apply differences. Last, as above.
+    Azure(AzureRemote),
 }
 
 impl SyncState {
@@ -373,6 +530,8 @@ impl SyncState {
             SyncState::Ssh(r) => Some(Remote::Ssh(r.clone())),
             SyncState::S3(r) => Some(Remote::S3(r.clone())),
             SyncState::Ftp(r) => Some(Remote::Ftp(r.clone())),
+            SyncState::Webdav(r) => Some(Remote::Webdav(r.clone())),
+            SyncState::Azure(r) => Some(Remote::Azure(r.clone())),
             SyncState::Walk | SyncState::Ntfs { .. } => None,
         }
     }
@@ -413,7 +572,7 @@ impl Volume {
 
     /// A read-only Remote rather than a mounted Volume.
     pub fn is_remote(&self) -> bool {
-        matches!(self.sync, SyncState::Ssh(_) | SyncState::S3(_) | SyncState::Ftp(_))
+        !matches!(self.sync, SyncState::Walk | SyncState::Ntfs { .. })
     }
 
     /// Whether Catch-up should run at `now` (seconds since the Unix epoch): the Last Synced is
