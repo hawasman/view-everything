@@ -21,6 +21,7 @@ webpki-roots = "1"
 [dev-dependencies]
 tempfile = "3.27.0"
 flate2 = "1.1"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"

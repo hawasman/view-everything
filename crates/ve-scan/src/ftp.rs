@@ -202,13 +202,17 @@ pub fn parse_mlsd_line(line: &str) -> Line {
 
 // ---- the session -----------------------------------------------------------------------------
 
+fn handshake_failure(host: &str, why: &str) -> io::Error {
+    io::Error::other(format!("FTPS handshake with {host} failed: {why} (servers with a private CA or a self-signed certificate are not supported)"))
+}
+
 fn failure(remote: &FtpRemote, e: FtpError) -> io::Error {
     let host = format!("{}:{}", remote.host, remote.port);
     match e {
+        FtpError::SecureError(e) => handshake_failure(&host, &e),
+        // The handshake runs inside a socket read, so rustls's complaint arrives as an I/O error.
+        FtpError::ConnectionError(e) if e.get_ref().is_some_and(|inner| inner.is::<rustls::Error>()) => handshake_failure(&host, &e.to_string()),
         FtpError::ConnectionError(e) => io::Error::new(e.kind(), format!("FTP {host}: {e}")),
-        FtpError::SecureError(e) => io::Error::other(format!(
-            "FTPS handshake with {host} failed: {e} (servers with a private CA or a self-signed certificate are not supported)"
-        )),
         FtpError::UnexpectedResponse(r) if r.status.code() == 530 => {
             io::Error::new(io::ErrorKind::PermissionDenied, format!("{host} rejected the login: check the user and password"))
         }
@@ -236,13 +240,21 @@ pub fn client_config(roots: RootCertStore) -> Arc<ClientConfig> {
 /// Connects, secures (unless plain FTP was chosen on purpose) and logs in.
 fn connect(remote: &FtpRemote, password: &str, tls: Arc<ClientConfig>) -> io::Result<RustlsFtpStream> {
     let host = format!("{}:{}", remote.host, remote.port);
-    let addr = (remote.host.as_str(), remote.port)
-        .to_socket_addrs()
-        .map_err(|e| io::Error::new(e.kind(), format!("{host}: {e}")))?
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{host} has no address")))?;
     let fail = |e| failure(remote, e);
-    let mut ftp = RustlsFtpStream::connect_timeout(addr, Duration::from_secs(15)).map_err(fail)?;
+    let addrs = (remote.host.as_str(), remote.port).to_socket_addrs().map_err(|e| io::Error::new(e.kind(), format!("{host}: {e}")))?;
+    // Every address the name has, in order: `localhost` may be ::1 first on a server bound to IPv4.
+    let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{host} has no address"));
+    let mut ftp = None;
+    for addr in addrs {
+        match RustlsFtpStream::connect_timeout(addr, Duration::from_secs(15)) {
+            Ok(stream) => {
+                ftp = Some(stream);
+                break;
+            }
+            Err(e) => last = failure(remote, e),
+        }
+    }
+    let mut ftp = ftp.ok_or(last)?;
     ftp.get_ref().set_read_timeout(Some(TIMEOUT))?;
     ftp.get_ref().set_write_timeout(Some(TIMEOUT))?;
     // Passive mode (the default), reaching the data port on the address we dialled: servers behind
