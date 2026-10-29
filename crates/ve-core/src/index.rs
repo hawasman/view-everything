@@ -134,10 +134,67 @@ impl S3Remote {
     }
 }
 
+/// How an FTP Remote secures the connection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FtpTls {
+    /// Explicit FTPS (`AUTH TLS`): a server that will not secure the connection is refused.
+    #[default]
+    Explicit,
+    /// Plain FTP, chosen on purpose: the password crosses the network in clear text.
+    Plain,
+}
+
+/// An FTP Remote: a folder on an FTP server, listed in passive mode. It holds no password: that
+/// is in the OS keyring, under the Remote's identity.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FtpRemote {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    /// Absolute folder on the server.
+    pub path: String,
+    #[serde(default)]
+    pub tls: FtpTls,
+}
+
+impl FtpRemote {
+    /// A Remote from what the user typed. An empty path is the server's root.
+    pub fn new(host: &str, port: u16, user: &str, path: &str, tls: FtpTls) -> Result<FtpRemote, String> {
+        let (host, user, path) = (host.trim(), user.trim(), path.trim());
+        if host.is_empty() || host.contains(|c: char| c.is_whitespace() || "/@".contains(c)) {
+            return Err("Host must be a host name or address, such as ftp.example.com".into());
+        }
+        if port == 0 {
+            return Err("Port must be 1 to 65535 (FTP is usually 21)".into());
+        }
+        if user.is_empty() || user.contains(|c: char| c.is_whitespace() || "/@:".contains(c)) {
+            return Err("User is required (anonymous for a public server)".into());
+        }
+        if !path.is_empty() && !path.starts_with('/') {
+            return Err("Path must be an absolute folder, such as /pub".into());
+        }
+        let path = path.trim_end_matches('/');
+        Ok(FtpRemote { host: host.into(), port, user: user.into(), path: if path.is_empty() { "/".into() } else { path.into() }, tls })
+    }
+
+    /// A public server: it needs no password in the keyring.
+    pub fn is_anonymous(&self) -> bool {
+        matches!(self.user.as_str(), "anonymous" | "ftp")
+    }
+
+    /// `ftp://user@host:port/path`: the same Location wherever it is listed.
+    pub fn identity(&self) -> String {
+        format!("ftp://{}@{}:{}{}", self.user, self.host, self.port, self.path)
+    }
+}
+
 /// A Remote Location: storage reached over a network protocol, read-only.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Remote {
+    // First: an SSH Remote's `host` and `path` alone would also match this one's fields.
+    Ftp(FtpRemote),
     Ssh(SshRemote),
     S3(S3Remote),
 }
@@ -157,12 +214,13 @@ impl Remote {
         Ok(Remote::Ssh(SshRemote { host: host.into(), path: if path.is_empty() { "/".into() } else { path.into() } }))
     }
 
-    /// What makes this Remote the same Location wherever it is listed: `ssh:user@host:/path` or
-    /// `s3:host/bucket/prefix`.
+    /// What makes this Remote the same Location wherever it is listed: `ssh:user@host:/path`,
+    /// `s3:host/bucket/prefix` or `ftp://user@host:port/path`.
     pub fn identity(&self) -> String {
         match self {
             Remote::Ssh(r) => format!("ssh:{}:{}", r.host, r.path),
             Remote::S3(r) => r.identity(),
+            Remote::Ftp(r) => r.identity(),
         }
     }
 
@@ -171,6 +229,7 @@ impl Remote {
         match self {
             Remote::Ssh(r) => format!("{}:{}", r.host, r.path),
             Remote::S3(r) => r.label(),
+            Remote::Ftp(r) => r.identity(),
         }
     }
 
@@ -179,6 +238,7 @@ impl Remote {
         match self {
             Remote::Ssh(_) => "SSH",
             Remote::S3(_) => "S3",
+            Remote::Ftp(_) => "FTP",
         }
     }
 }
@@ -197,6 +257,8 @@ pub enum SyncState {
     Ntfs { journal_id: u64, next_usn: i64 },
     /// A Remote: list the bucket again and apply differences. Last, to keep older Indexes readable.
     S3(S3Remote),
+    /// A Remote: list the FTP server's folders again and apply differences. Last, as above.
+    Ftp(FtpRemote),
 }
 
 /// A Volume's total and free bytes, as measured at a sync.
@@ -232,13 +294,14 @@ impl Volume {
         match &self.sync {
             SyncState::Ssh(remote) => Some(Remote::Ssh(remote.clone())),
             SyncState::S3(remote) => Some(Remote::S3(remote.clone())),
+            SyncState::Ftp(remote) => Some(Remote::Ftp(remote.clone())),
             _ => None,
         }
     }
 
     /// A read-only Remote rather than a mounted Volume.
     pub fn is_remote(&self) -> bool {
-        matches!(self.sync, SyncState::Ssh(_) | SyncState::S3(_))
+        matches!(self.sync, SyncState::Ssh(_) | SyncState::S3(_) | SyncState::Ftp(_))
     }
 
     /// Whether Catch-up should run at `now` (seconds since the Unix epoch): the Last Synced is
@@ -347,14 +410,15 @@ impl Index {
     }
 
     /// Adds a Remote as a Location with only its root, ready for a sync. It is always online;
-    /// its root Entry is named by its identity, so paths read `ssh:user@host:/path/...` or
-    /// `s3:host/bucket/prefix/...`.
+    /// its root Entry is named by its identity, so paths read `ssh:user@host:/path/...`,
+    /// `s3:host/bucket/prefix/...` or `ftp://user@host:port/path/...`.
     pub fn add_remote(&mut self, remote: &Remote) -> VolumeId {
         let identity = remote.identity();
         let meta = EntryMeta { is_dir: true, ..EntryMeta::default() };
         let (fs_type, sync) = match remote {
             Remote::Ssh(r) => ("ssh", SyncState::Ssh(r.clone())),
             Remote::S3(r) => ("s3", SyncState::S3(r.clone())),
+            Remote::Ftp(r) => ("ftp", SyncState::Ftp(r.clone())),
         };
         self.add_volume(Path::new(&identity), fs_type, &identity, meta, sync)
     }
