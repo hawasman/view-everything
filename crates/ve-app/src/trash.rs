@@ -542,29 +542,34 @@ fn top_level(index: &Index, ids: &[EntryId]) -> Vec<EntryId> {
         .collect()
 }
 
-/// Why `id` can't go to the Trash, if it can't.
-fn blocker(index: &Index, volumes: &[VolumeInfo], id: EntryId) -> Option<String> {
-    let volume = index.volume(index.volume_of(id)?)?;
+/// Why nothing on `volume` can be changed right now, if so: a Remote, an Offline Volume or a
+/// read-only mount.
+pub fn volume_blocker(volume: &ve_core::Volume, volumes: &[VolumeInfo]) -> Option<String> {
     if volume.is_remote() {
         return Some("Remote Locations are read-only".into());
     }
-    if index.parent(id).is_none() {
-        return Some("A whole Volume can't be moved to the Trash.".into());
-    }
     if !volume.online {
-        return Some("Offline Volume: it is not mounted, so nothing on it can go to the Trash.".into());
+        return Some("Offline Volume: it is not mounted, so nothing on it can be changed.".into());
     }
     let info = volumes.iter().find(|v| v.mount == volume.mount)?;
-    info.read_only.then(|| {
-        format!(
-            "{} is mounted read-only, so nothing on it can go to the Trash.",
-            info.mount.display()
-        )
-    })
+    info.read_only
+        .then(|| format!("{} is mounted read-only, so nothing on it can be changed.", info.mount.display()))
+}
+
+/// Why `id` can't go to the Trash, if it can't.
+fn blocker(index: &Index, volumes: &[VolumeInfo], id: EntryId) -> Option<String> {
+    let volume = index.volume(index.volume_of(id)?)?;
+    if let Some(reason) = volume_blocker(volume, volumes) {
+        return Some(reason);
+    }
+    index
+        .parent(id)
+        .is_none()
+        .then(|| "A whole Volume can't be moved to the Trash.".into())
 }
 
 /// On-disk Size of an Entry and everything beneath it, regardless of the Query.
-fn subtree_on_disk(index: &Index, id: EntryId) -> u64 {
+pub fn subtree_on_disk(index: &Index, id: EntryId) -> u64 {
     let mut total = 0;
     let mut stack = vec![id];
     while let Some(current) = stack.pop() {

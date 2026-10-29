@@ -2,6 +2,7 @@
 //! Settings) and the status bar.
 
 use crate::categories::CategoryPanel;
+use crate::cleaner::CleanerPage;
 use crate::dashboard::{Act, DashboardPage};
 use crate::engine::{Engine, Phase, Repaint, last_synced_label};
 use crate::explorer::FlatList;
@@ -55,6 +56,7 @@ pub fn volume_name(v: &VolumeInfo) -> String {
 enum Page {
     Dashboard,
     Explorer,
+    Cleaner,
     Settings,
 }
 
@@ -70,6 +72,7 @@ pub struct Shell {
     show_filters: bool,
     settings_page: Entity<SettingsPage>,
     dashboard: Entity<DashboardPage>,
+    cleaner: Entity<CleanerPage>,
     trash: Trash,
     treemap: Entity<Treemap>,
     categories: Entity<CategoryPanel>,
@@ -119,13 +122,14 @@ impl Shell {
                 trash.clone(),
                 categories.clone(),
                 &settings,
-                repaint,
+                repaint.clone(),
                 window,
                 cx,
             );
             page.set_context(&settings, volumes.clone(), cx);
             page
         });
+        let cleaner = cx.new(|_| CleanerPage::new(engine.shared.clone(), repaint.clone(), volumes.clone()));
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
         cx.subscribe_in(&dashboard, window, |this, _, act: &Act, window, cx| {
             this.dashboard_act(act, window, cx)
@@ -249,6 +253,7 @@ impl Shell {
         let page = match std::env::var("VE_PAGE").as_deref() {
             Ok("settings") => Page::Settings,
             Ok("explorer") => Page::Explorer,
+            Ok("cleaner") => Page::Cleaner,
             Ok("dashboard") => Page::Dashboard,
             // The scroll measurement needs the Explorer's list on screen.
             _ if std::env::var_os("VE_BENCH").is_some() => Page::Explorer,
@@ -330,6 +335,7 @@ impl Shell {
             show_filters: false,
             settings_page,
             dashboard,
+            cleaner,
             trash,
             treemap,
             categories: category_panel,
@@ -421,6 +427,7 @@ impl Shell {
     /// removable Volume never seen before is offered for indexing.
     fn mounts_changed(&mut self, now: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) {
         let before = std::mem::replace(&mut self.volumes, now.clone());
+        self.cleaner.update(cx, |c, cx| c.set_volumes(now.clone(), cx));
         // An unmounted Volume's 'Index this?' no longer applies; a replug asks again.
         let gone: Vec<String> = self
             .offered
@@ -893,6 +900,7 @@ impl Shell {
                     .mt(px(12.)),
             )
             .child(self.nav_row("nav-explorer", "Explorer", IconName::Folder, Page::Explorer, cx))
+            .child(self.nav_row("nav-cleaner", "Cleaner", IconName::Delete, Page::Cleaner, cx))
             .child(div().mt(px(30.)).mb(px(8.)).px(px(12.)).child(caption("Locations", cx)))
             .child(v_flex().id("locations").flex_1().min_h_0().overflow_y_scroll().children(locations))
             .children(self.update_row(cx))
@@ -1167,6 +1175,7 @@ impl Render for Shell {
         let page = match self.page {
             Page::Dashboard => self.dashboard.clone().into_any_element(),
             Page::Explorer => self.explorer(cx).into_any_element(),
+            Page::Cleaner => self.cleaner.clone().into_any_element(),
             Page::Settings => self.settings_page.clone().into_any_element(),
         };
         let p = palette(cx);
