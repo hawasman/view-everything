@@ -62,6 +62,10 @@ _Avoid_: watching, monitoring, real-time sync
 The Folder Size of every folder in the Index at one moment, kept so two moments can be compared.
 _Avoid_: scan history, backup, version
 
+**Timeline**:
+Measurements recorded over time (performance, network), browsable by moment; a moment with no sample is a gap.
+_Avoid_: history, recording, log
+
 **Compare with**:
 The Explorer choice of a Snapshot date. The tree then gains a **Change** column: each folder's On-disk Size now minus its Size in the Snapshot, `new` for a folder the Snapshot lacked, and a muted `(removed)` row under the parent of a folder it had that is gone.
 
@@ -123,6 +127,10 @@ A Query kept under a name in the settings, to apply again from the Explorer. Sav
 **Treemap**:
 The panel that draws Filtered Sizes as nested rectangles coloured by Category. It draws the folder everything the Query shows sits in; zooming into a folder (on the Treemap or in a list) adds that folder to the Query, so the tree and flat list follow and the Query can still be refined. Folders down to the chosen **Depth** carry a header with their name and size.
 _Avoid_: size map, block view
+
+**Permission**:
+An approval the user granted for something beyond the app's core features, such as an elevated helper, the background service, start at login or an agent's access to a Module. Every Permission can be revoked.
+_Avoid_: consent, grant, access right
 
 ### Changes
 
