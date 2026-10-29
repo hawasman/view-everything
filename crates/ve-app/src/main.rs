@@ -6,6 +6,7 @@ mod app;
 mod bench;
 mod categories;
 mod cleaner;
+mod compare;
 mod dashboard;
 mod dashboard_summary;
 mod duplicates;

@@ -11,6 +11,7 @@ mod filter;
 mod index;
 pub mod paths;
 pub mod query;
+pub mod snapshot;
 
 pub use bits::BitSet;
 pub use category::{Category, CategoryMap};
