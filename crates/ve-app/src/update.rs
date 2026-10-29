@@ -70,6 +70,10 @@ pub fn check(url: &str, current: &str) -> Result<Option<Release>, String> {
     let body = response.body_mut().read_to_string().map_err(|e| e.to_string())?;
     let latest: Latest = serde_json::from_str(&body).map_err(|e| format!("unexpected reply: {e}"))?;
     let version = latest.tag_name.trim_start_matches('v').to_owned();
+    // A pre-release tag (`0.3.0-rc1`) is not an update, whatever the flag says.
+    if version.contains('-') {
+        return Ok(None);
+    }
     if parse(&version).is_none() {
         return Err(format!("unexpected version {}", latest.tag_name));
     }
@@ -180,6 +184,8 @@ mod tests {
         assert_eq!(check(&serve("200 OK", NEWER), "0.3.0").unwrap(), None);
         let pre = r#"{"tag_name":"v0.9.0","html_url":"https://example.test/x","prerelease":true}"#;
         assert_eq!(check(&serve("200 OK", pre), "0.1.0").unwrap(), None);
+        let rc = r#"{"tag_name":"v0.9.0-rc1","html_url":"https://example.test/x","prerelease":false}"#;
+        assert_eq!(check(&serve("200 OK", rc), "0.1.0").unwrap(), None);
     }
 
     #[test]
