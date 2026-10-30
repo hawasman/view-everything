@@ -5,7 +5,7 @@ use crate::categories::CategoryPanel;
 use crate::cleaner::{CleanerPage, ShowInExplorer};
 use crate::compare::{Compare, CompareEvent};
 use crate::dashboard::{Act, DashboardPage};
-use crate::duplicates::DuplicatesPanel;
+use crate::duplicates::{DuplicatesPanel, InspectGroup};
 use crate::engine::{Engine, Phase, last_synced_label};
 use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
@@ -117,6 +117,12 @@ enum SelfUpdate {
 /// How long typing in the Query pauses before the engine is asked.
 const QUERY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(120);
 
+/// Width of the Filters column on Browse.
+const FILTERS_WIDTH: f32 = 260.;
+
+/// Least width of the Treemap beside the open Filters column.
+const TREEMAP_MIN_WIDTH: f32 = 160.;
+
 /// How the Explorer looked when its window closed to the tray; a reopened window starts there.
 /// The Query itself is the Engine's ([`crate::engine::Shared::query`]).
 pub struct Remembered {
@@ -222,7 +228,12 @@ impl Shell {
             page.set_context(&settings, volumes.clone(), cx);
             page
         });
-        let duplicates = cx.new(|_| DuplicatesPanel::new(engine.shared.clone(), trash.clone(), volumes.clone()));
+        let duplicates = cx.new(|_| DuplicatesPanel::new(engine.shared.clone()));
+        cx.subscribe(&duplicates, |this, _, group: &InspectGroup, cx| {
+            this.inspected = Some(Inspected::Duplicates(group.0));
+            cx.notify();
+        })
+        .detach();
         let treemap_depth = settings.treemap_depth;
         let treemap_colour_by = settings.treemap_colour_by;
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
@@ -723,7 +734,6 @@ impl Shell {
     fn mounts_changed(&mut self, now: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) {
         let before = std::mem::replace(&mut self.volumes, now.clone());
         self.cleaner.update(cx, |c, cx| c.set_volumes(now.clone(), cx));
-        self.duplicates.update(cx, |d, cx| d.set_volumes(now.clone(), cx));
         // An unmounted Volume's 'Index this?' no longer applies; a replug asks again.
         let gone: Vec<String> = self
             .offered
@@ -1968,8 +1978,9 @@ impl Shell {
             FlatList::natural_width()
         } + 24.;
         let left = v_flex()
-            // Wide enough for the Categories' columns; the Treemap takes what is left.
-            .min_w(px(448.))
+            // Wide enough for the Categories' columns, a little less beside the open Filters so
+            // the Treemap keeps room; the Treemap takes what is left.
+            .min_w(px(if self.show_filters { 400. } else { 448. }))
             .h_full()
             .gap(px(GAP))
             .flex_shrink(1.)
@@ -1993,11 +2004,26 @@ impl Shell {
                     .child(list),
             )
             .child(div().h(px(301.)).flex_none().child(self.categories.clone()));
-        let right = v_flex().min_w(px(360.)).h_full().flex_1().child(if self.show_filters {
-            div().flex_1().min_h_0().child(self.filters.clone())
-        } else {
-            div().flex_1().min_h_0().child(self.treemap.clone())
-        });
+        // Filters is a column beside the Treemap, never in its place: the Treemap stays in view and
+        // re-lays out as the Query narrows. With Filters open the column asks for room for both, so
+        // the list gives up width too instead of squeezing the Treemap to its least.
+        let filters_column = self
+            .show_filters
+            .then(|| div().w(px(FILTERS_WIDTH)).h_full().flex_none().child(self.filters.clone()));
+        let right = h_flex()
+            .h_full()
+            .flex_1()
+            .gap(px(GAP))
+            .map(|d| {
+                if self.show_filters {
+                    d.min_w(px(FILTERS_WIDTH + GAP + TREEMAP_MIN_WIDTH))
+                        .flex_basis(px(FILTERS_WIDTH + GAP + 360.))
+                } else {
+                    d.min_w(px(360.))
+                }
+            })
+            .children(filters_column)
+            .child(div().flex_1().min_w(px(TREEMAP_MIN_WIDTH)).h_full().child(self.treemap.clone()));
         let me = cx.entity();
         let tabs = crate::ui::tabs(
             "browse-tab",
@@ -2077,9 +2103,17 @@ impl Shell {
             .child(h_flex().flex_1().min_h_0().gap(px(GAP)).pt(px(GAP)).child(left).child(right))
     }
 
-    /// The Duplicates page: title with the search's state, Rescan, and the groups.
+    /// The Duplicates page: title with the search's facts, Rescan, and the groups; a group opens
+    /// in the Inspector.
     fn duplicates_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (facts, hashing) = self.duplicates.update(cx, |d, _| d.facts());
+        let selected = match self.inspected {
+            Some(Inspected::Duplicates(first)) => Some(first),
+            _ => None,
+        };
+        let (facts, hashing) = self.duplicates.update(cx, |d, _| {
+            d.selected = selected;
+            d.facts()
+        });
         let duplicates = self.duplicates.clone();
         v_flex()
             .size_full()
@@ -2210,7 +2244,86 @@ impl Shell {
             Inspected::Entry(id) => self.entry_panel(*id, cx),
             Inspected::Location(identity) => self.location_panel(identity, rows, now, cx),
             Inspected::Task(id) => self.task_panel(*id, cx),
+            Inspected::Duplicates(first) => self.duplicates_panel(*first, cx),
         }
+    }
+
+    /// A Duplicate group: size, copies and wasted space; Open, Show in Browse and Trash others…
+    fn duplicates_panel(&mut self, first: ve_core::EntryId, cx: &mut Context<Self>) -> Option<Panel> {
+        let group = self.duplicates.update(cx, |d, _| d.group(first))?;
+        let (name, folder) = {
+            let index = self.engine.shared.index.read();
+            let kept = group.kept;
+            (index.display_name(kept).to_owned(), index.parent(kept))
+        };
+        let kept = group.kept;
+        let others = group.others();
+        let blocker = self.trash.blocker_of(&others, &self.volumes);
+        let fact = |l: &'static str, v: String| (SharedString::from(l), SharedString::from(v));
+        Some(Panel {
+            kind: "Duplicates",
+            tag: Some((SharedString::from(format!("{} copies", group.copies.len())), Tone::Neutral)),
+            title: name.into(),
+            subtitle: Some("Identical content, confirmed by hash".into()),
+            facts: vec![
+                fact("Size each", format::size(group.size)),
+                fact("Wasted", format::size(group.wasted())),
+            ],
+            actions: vec![
+                Item::new(
+                    "inspector-dupes-open",
+                    "Open",
+                    cx.listener(move |this, _, window, cx| this.menu_act(MenuAct::Open, &[kept], kept, window, cx)),
+                ),
+                Item::new(
+                    "inspector-dupes-browse",
+                    "Show in Browse",
+                    cx.listener(move |this, _, window, cx| {
+                        this.scope(folder, window, cx);
+                        this.page = Page::Browse;
+                        this.inspected = Some(Inspected::Entry(kept));
+                        cx.notify();
+                    }),
+                ),
+                Item::new(
+                    "inspector-dupes-trash",
+                    "Trash others…",
+                    cx.listener(move |this, _, window, cx| this.trash.ask_trash(&others, &this.volumes, window, cx)),
+                )
+                .kind(ButtonKind::Danger)
+                .disabled(blocker.as_deref()),
+            ],
+        })
+    }
+
+    /// The copies a Duplicate group lists in the Inspector, each a click away from being kept.
+    fn inspector_members(&mut self, what: &Inspected, cx: &mut Context<Self>) -> Vec<inspector::Member> {
+        let Inspected::Duplicates(first) = *what else {
+            return Vec::new();
+        };
+        let Some(group) = self.duplicates.update(cx, |d, _| d.group(first)) else {
+            return Vec::new();
+        };
+        let index = self.engine.shared.index.read();
+        group
+            .copies
+            .iter()
+            .map(|&id| inspector::Member {
+                name: index.display_name(id).to_owned().into(),
+                folder: index
+                    .parent(id)
+                    .map_or_else(String::new, |f| index.path(f).display().to_string())
+                    .into(),
+                keep: id == group.kept,
+                on_click: Box::new(cx.listener(move |this, _, _, cx| {
+                    this.duplicates.update(cx, |d, cx| {
+                        d.set_keep(first, id);
+                        cx.notify();
+                    });
+                    cx.notify();
+                })),
+            })
+            .collect()
     }
 
     /// An Entry: size, share, contents and last write; Open, Show in file manager, Sync this
@@ -2461,11 +2574,11 @@ impl Render for Shell {
             }));
         }
         let rows = locations::rows(&self.engine.shared, &self.volumes, self.settings_page.read(cx).settings(), now);
-        let inspector = self
-            .inspected
-            .clone()
-            .and_then(|what| self.inspector_panel(&what, &rows, now, cx))
-            .map(|panel| inspector::render(panel, cx));
+        let inspector = self.inspected.clone().and_then(|what| {
+            let members = self.inspector_members(&what, cx);
+            self.inspector_panel(&what, &rows, now, cx)
+                .map(|panel| inspector::render(panel, members, cx))
+        });
         let page = match self.page {
             Page::Overview => self.dashboard.clone().into_any_element(),
             Page::Browse => self.browse(cx).into_any_element(),

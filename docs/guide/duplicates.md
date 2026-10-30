@@ -1,14 +1,14 @@
 # Duplicates
 
-The Explorer's **Duplicates** tab groups files with identical content, largest wasted space first. In a Query, `dupe:` matches the same files.
+The **Duplicates** page under Files groups files with identical content, largest wasted space first. In a Query, `dupe:` matches the same files.
 
 ## Using it
 
-1. Open the Duplicates tab. The search runs in the background as a Task, with progress, and can be cancelled.
-2. In each group, pick the Duplicate to keep.
-3. **Trash others** moves the rest to the Trash after a confirmation. The Index and the groups update.
+1. Open Duplicates in the rail. The search runs in the background as a Task, with progress, and can be cancelled. The title row says how many groups and copies there are and how much space they waste.
+2. Click a group. The Inspector lists its copies; click one to keep it.
+3. **Trash others** in the Inspector moves the rest to the Trash after a confirmation. The Index and the groups update. **Open** opens the copy kept, and **Show in Browse** opens Browse at its folder.
 
-The panel follows the Query: a group shows if any of its copies matches. The list is virtualised, so any number of groups or copies stays light.
+The list follows the Query: a group shows if any of its copies matches. The list is virtualised, so any number of groups stays light.
 
 ## Duplicate Exclusions
 

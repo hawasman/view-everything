@@ -10,6 +10,9 @@
 - The Selection panel's facts and actions moved into the Inspector; the Treemap takes the whole right column.
 - One set of controls: buttons are flat and square-cornered (one dark primary per screen), tabs are underlined, choices are segmented; cards have a 1px edge and 8px corners; five type sizes; no serif. The chrome carries no colour; teal marks data only (used bars, progress, the Snapshot tick).
 - The Index box and the user block left the sidebar; Done Tasks are grey, not green.
+- The **Cleaner** shows every Cleanable of a group in one scrolling list; the pager and the per-page choice are gone. Only the rows in view are drawn, so hundreds of thousands of Cleanables scroll smoothly.
+- **Duplicates** lists one row per group under its title and facts (groups, copies, wasted space). Clicking a group opens it in the Inspector: its copies (click one to keep it), Open, Show in Browse and Trash others….
+- On Browse, **Filters** opens as a column beside the Treemap instead of replacing it, so the Treemap redraws as you narrow the Query.
 
 ### Owners
 - Every folder can now say which program, game, package or project it belongs to. That is its **Owner**, found at an **Owner root** (the game's install folder, the application's folder, the folder holding a project's marker files) and inherited by everything beneath it unless a nearer Owner root sits in between. An Owner has a **kind**: System, Program, Game or Project. Folders under no Owner root have no Owner.

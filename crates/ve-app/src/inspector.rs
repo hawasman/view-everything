@@ -18,6 +18,8 @@ pub enum Inspected {
     Location(String),
     /// A Task's id.
     Task(u64),
+    /// A group of Duplicates, by its first copy.
+    Duplicates(EntryId),
 }
 
 /// The width of the pane.
@@ -72,8 +74,17 @@ pub struct Panel {
     pub actions: Vec<Item>,
 }
 
-/// Draws the pane.
-pub fn render(panel: Panel, cx: &App) -> Stateful<Div> {
+/// One copy of a Duplicate group, listed under Copies; a click makes it the copy to keep.
+pub struct Member {
+    /// The copy's name, and the folder it sits in.
+    pub name: SharedString,
+    pub folder: SharedString,
+    pub keep: bool,
+    pub on_click: OnClick,
+}
+
+/// Draws the pane, with a Copies list between the facts and the actions when `members` holds any.
+pub fn render(panel: Panel, members: Vec<Member>, cx: &App) -> Stateful<Div> {
     let p = palette(cx);
     let facts = panel.facts.into_iter().enumerate().map(|(i, (label, value))| {
         h_flex()
@@ -85,6 +96,35 @@ pub fn render(panel: Panel, cx: &App) -> Stateful<Div> {
             .when(i > 0, |d| d.border_t_1().border_color(p.rule))
             .child(div().flex_none().text_color(p.muted).child(label))
             .child(div().min_w_0().truncate().text_color(p.text).child(value))
+    });
+    let has_members = !members.is_empty();
+    let members = members.into_iter().enumerate().map(|(i, m)| {
+        h_flex()
+            .id(("inspector-member", i))
+            .min_h(px(44.))
+            .py(px(4.))
+            .gap(px(8.))
+            .items_center()
+            .text_size(px(crate::theme::FS_BODY))
+            .cursor_pointer()
+            .when(i > 0, |d| d.border_t_1().border_color(p.rule))
+            .on_click(m.on_click)
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(if m.keep { p.accent } else { p.muted })
+                    .child(if m.keep { "●" } else { "○" }),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().truncate().text_color(p.text).child(m.name))
+                    .child(div().truncate().text_size(px(FS_SMALL)).text_color(p.muted).child(m.folder)),
+            )
+            .when(m.keep, |d| {
+                d.child(div().flex_none().text_size(px(FS_SMALL)).text_color(p.muted).child("keep"))
+            })
     });
     let has_actions = !panel.actions.is_empty();
     let actions = panel
@@ -135,6 +175,9 @@ pub fn render(panel: Panel, cx: &App) -> Stateful<Div> {
                         .map(|s| div().text_size(px(FS_SMALL)).text_color(p.muted).truncate().child(s)),
                 )
                 .child(v_flex().mt(px(12.)).children(facts))
+                .when(has_members, |d| {
+                    d.child(group_label("Copies", cx).px(px(0.))).child(v_flex().children(members))
+                })
                 .when(has_actions, |d| {
                     d.child(group_label("Actions", cx).px(px(0.)))
                         .child(v_flex().gap(px(8.)).children(actions))
