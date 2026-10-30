@@ -24,6 +24,10 @@ pub struct Candidate<'a> {
     pub children: Vec<&'a str>,
     /// The file has a Duplicate; set only when [`Query::needs_duplicates`].
     pub duplicate: bool,
+    /// The Entry is a Cleanable; set only when [`Query::needs_cleanables`].
+    pub cleanable: bool,
+    /// The Entry is on an Offline Volume; set only when [`Query::needs_offline`].
+    pub offline: bool,
     /// The Entry's Owner (kind and name); required only when [`Query::needs_owner`].
     pub owner: Option<(OwnerKind, &'a str)>,
 }
@@ -33,8 +37,11 @@ pub struct Candidate<'a> {
 pub struct QueryContext {
     pub categories: CategoryMap,
     pub now: DateTime<Local>,
-    /// Entries known to have a Duplicate, for `dupe:`; empty until hashing has found some.
+    /// Entries known to have a Duplicate, for `dupe:` and `is:duplicate`; empty until hashing has
+    /// found some.
     pub duplicates: Arc<BitSet>,
+    /// Entries the Cleaner last found as Cleanables, for `is:cleanable`; empty until it has looked.
+    pub cleanables: Arc<BitSet>,
 }
 
 impl QueryContext {
@@ -43,11 +50,17 @@ impl QueryContext {
             categories,
             now,
             duplicates: Arc::default(),
+            cleanables: Arc::default(),
         }
     }
 
     pub fn with_duplicates(mut self, duplicates: Arc<BitSet>) -> Self {
         self.duplicates = duplicates;
+        self
+    }
+
+    pub fn with_cleanables(mut self, cleanables: Arc<BitSet>) -> Self {
+        self.cleanables = cleanables;
         self
     }
 }
@@ -65,8 +78,9 @@ impl std::error::Error for QueryError {}
 
 /// A parsed search expression selecting which Entries count.
 ///
-/// `case:` and `wholeword:` before a term change how it matches; `parent:`, `depth:`, `child:` and
-/// `empty:` select by where an Entry sits in the folder tree; `dupe:` selects files with a Duplicate;
+/// `case:` and `wholeword:` before a term change how it matches; `parent:`, `at:`, `depth:`,
+/// `child:` and `empty:` select by where an Entry sits in the folder tree; `kind:` by file or
+/// folder; `since:` by recent change; `dupe:` and `is:` by what the app knows of an Entry;
 /// `owner:` and `ownerkind:` select by the Entry's Owner.
 ///
 /// Syntax (a subset of Everything's): terms separated by spaces must all match; `a|b` matches
@@ -80,8 +94,11 @@ pub struct Query {
     needs_depth: bool,
     needs_children: bool,
     needs_duplicates: bool,
+    needs_cleanables: bool,
+    needs_offline: bool,
     needs_owner: bool,
     duplicates: Arc<BitSet>,
+    cleanables: Arc<BitSet>,
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +142,16 @@ enum Term {
     Empty,
     /// Files with a Duplicate.
     Duplicate,
+    /// Entries the Cleaner found as Cleanables.
+    Cleanable,
+    /// Entries on an Offline Volume.
+    Offline,
+    /// `kind:`: folders when `true`, files when `false`.
+    IsDir(bool),
+    /// Lower-cased full path of a folder, without a trailing `/`: it and everything below it.
+    At(String),
+    /// Files modified at or after this instant, in nanoseconds since the Unix epoch.
+    Since(i64),
     /// Entries whose Owner's name contains the lower-cased text.
     Owner(String),
     /// Entries whose Owner is of the kind; `None` is Entries with no Owner.
@@ -167,10 +194,12 @@ impl Query {
             }
         }
         let any = |f: fn(&Term) -> bool| clauses.iter().flatten().any(|l| f(&l.term));
-        let needs_path = any(|t| matches!(t, Term::Text(t) if t.on_path) || matches!(t, Term::Parent(_)));
+        let needs_path = any(|t| matches!(t, Term::Text(t) if t.on_path) || matches!(t, Term::Parent(_) | Term::At(_)));
         let needs_depth = any(|t| matches!(t, Term::Depth { .. }));
         let needs_children = any(|t| matches!(t, Term::Child(_) | Term::Empty));
         let needs_duplicates = any(|t| matches!(t, Term::Duplicate));
+        let needs_cleanables = any(|t| matches!(t, Term::Cleanable));
+        let needs_offline = any(|t| matches!(t, Term::Offline));
         let needs_owner = any(|t| matches!(t, Term::Owner(_) | Term::OwnerKind(_)));
         Ok(Query {
             clauses,
@@ -178,8 +207,11 @@ impl Query {
             needs_depth,
             needs_children,
             needs_duplicates,
+            needs_cleanables,
+            needs_offline,
             needs_owner,
             duplicates: context.duplicates.clone(),
+            cleanables: context.cleanables.clone(),
         })
     }
 
@@ -198,9 +230,20 @@ impl Query {
         self.needs_children
     }
 
-    /// Whether `dupe:` is used, so candidates must say whether they have a Duplicate.
+    /// Whether `dupe:` or `is:duplicate` is used, so candidates must say whether they have a
+    /// Duplicate.
     pub fn needs_duplicates(&self) -> bool {
         self.needs_duplicates
+    }
+
+    /// Whether `is:cleanable` is used, so candidates must say whether they are a Cleanable.
+    pub fn needs_cleanables(&self) -> bool {
+        self.needs_cleanables
+    }
+
+    /// Whether `is:offline` is used, so candidates must say whether their Volume is offline.
+    pub fn needs_offline(&self) -> bool {
+        self.needs_offline
     }
 
     /// Whether `owner:` or `ownerkind:` is used, so candidates must carry their Owner.
@@ -211,6 +254,11 @@ impl Query {
     /// Whether the Entry at `index` is known to have a Duplicate.
     pub fn has_duplicate(&self, index: usize) -> bool {
         self.duplicates.contains(index)
+    }
+
+    /// Whether the Entry at `index` is a Cleanable the Cleaner last found.
+    pub fn is_cleanable(&self, index: usize) -> bool {
+        self.cleanables.contains(index)
     }
 
     pub fn matches(&self, candidate: &Candidate) -> bool {
@@ -253,6 +301,14 @@ impl Term {
                 .rsplit_once('/')
                 // A Location root's path ends in `/` (`/`, `C:/`): nothing follows it, so it has no parent.
                 .is_some_and(|(parent, leaf)| !leaf.is_empty() && eq_ignore_case(parent.trim_end_matches('/'), folder)),
+            Term::At(folder) => is_at(
+                candidate.path.expect("Query::needs_path requires candidates to carry their path"),
+                folder,
+            ),
+            Term::IsDir(is_dir) => candidate.is_dir == *is_dir,
+            Term::Since(from) => !candidate.is_dir && candidate.modified >= *from,
+            Term::Cleanable => candidate.cleanable,
+            Term::Offline => candidate.offline,
             Term::Depth { min, max } => (*min..=*max).contains(&candidate.depth),
             Term::Child(text) => {
                 candidate.is_dir
@@ -355,6 +411,42 @@ impl Term {
                 }
                 Ok(Term::Duplicate)
             }
+            "is" => match value.to_ascii_lowercase().as_str() {
+                "" => Err(missing()),
+                "cleanable" => Ok(Term::Cleanable),
+                "duplicate" => Ok(Term::Duplicate),
+                "offline" => Ok(Term::Offline),
+                _ => Err(QueryError(format!(
+                    "is: unknown value `{value}`; expected cleanable, duplicate or offline"
+                ))),
+            },
+            "kind" => match value.to_ascii_lowercase().as_str() {
+                "" => Err(missing()),
+                "file" => Ok(Term::IsDir(false)),
+                "folder" => Ok(Term::IsDir(true)),
+                _ => Err(QueryError(format!("kind: unknown value `{value}`; expected file or folder"))),
+            },
+            "at" => {
+                if value.is_empty() {
+                    return Err(missing());
+                }
+                let folder = value.replace('\\', "/");
+                // A full path starts at a root: `/`, a drive such as `C:/`, or a Remote's `s3://`.
+                let drive = folder
+                    .as_bytes()
+                    .get(..2)
+                    .is_some_and(|d| d[0].is_ascii_alphabetic() && d[1] == b':');
+                if !folder.starts_with('/') && !drive && !folder.contains("://") {
+                    return Err(QueryError(format!(
+                        "at: `{value}` is not a full path; start it with `/` or a drive such as `C:/`"
+                    )));
+                }
+                // `at:/` trims to empty, which every path starts with.
+                Ok(Term::At(folder.trim_end_matches('/').to_lowercase()))
+            }
+            "since" => since(value, context.now)
+                .map(Term::Since)
+                .map_err(|e| QueryError(format!("since: {e}"))),
             "owner" => {
                 if value.is_empty() {
                     return Err(missing());
@@ -388,6 +480,10 @@ const MODIFIERS: &[&str] = &[
     "child",
     "empty",
     "dupe",
+    "is",
+    "kind",
+    "at",
+    "since",
     "owner",
     "ownerkind",
 ];
@@ -521,6 +617,32 @@ fn date_span(text: &str, now: DateTime<Local>) -> Result<(i64, i64), String> {
     Ok((local_midnight_nanos(start), local_midnight_nanos(end)))
 }
 
+/// The instant `value` names, in Unix nanoseconds: a duration back from `now` (`30m`, `12h`,
+/// `7d`, `2w`) or the start of a date as `dm:` writes it (`2026-10-01`, `2026-10`, `yesterday`).
+fn since(value: &str, now: DateTime<Local>) -> Result<i64, String> {
+    if value.is_empty() {
+        return Err("needs a value".into());
+    }
+    let lower = value.to_ascii_lowercase();
+    let split = lower.find(|c: char| !c.is_ascii_digit()).unwrap_or(lower.len());
+    let (number, unit) = lower.split_at(split);
+    let seconds = match unit {
+        "m" | "min" => Some(60),
+        "h" => Some(60 * 60),
+        "d" => Some(24 * 60 * 60),
+        "w" => Some(7 * 24 * 60 * 60),
+        _ => None,
+    };
+    if let (Some(seconds), Ok(n)) = (seconds, number.parse::<i64>()) {
+        let back = n.checked_mul(seconds).and_then(chrono::Duration::try_seconds);
+        let from = back.and_then(|back| now.checked_sub_signed(back));
+        return Ok(from.map_or(i64::MIN, |from| from.timestamp_nanos_opt().unwrap_or(i64::MIN)));
+    }
+    date_span(value, now)
+        .map(|(start, _)| start)
+        .map_err(|_| format!("`{value}` is not a duration or date; use 30m, 12h, 7d, 2w, YYYY-MM-DD, today or yesterday"))
+}
+
 fn local_midnight_nanos(date: NaiveDate) -> i64 {
     let midnight = date.and_hms_opt(0, 0, 0).expect("midnight exists");
     // Midnight can be skipped by a daylight-saving change; take the first instant after it.
@@ -592,6 +714,20 @@ fn whole_word_match(pattern: &str, subject: &str, wildcard: bool) -> bool {
             .iter()
             .any(|&end| apart(at, end) && wildcard_match(pattern, &subject[at..end]))
     })
+}
+
+/// Whether `path` is the folder `lowered` (lower-cased, no trailing `/`) or lies below it,
+/// ignoring case.
+fn is_at(path: &str, lowered: &str) -> bool {
+    let ends_here = |rest: &[u8]| rest.first().is_none_or(|&c| c == b'/');
+    if path.is_ascii() {
+        let (head, rest) = path.as_bytes().split_at(lowered.len().min(path.len()));
+        head.len() == lowered.len() && head.eq_ignore_ascii_case(lowered.as_bytes()) && ends_here(rest)
+    } else {
+        path.to_lowercase()
+            .strip_prefix(lowered)
+            .is_some_and(|rest| ends_here(rest.as_bytes()))
+    }
 }
 
 /// Case-insensitive equality; `lowered` is already lower-cased.

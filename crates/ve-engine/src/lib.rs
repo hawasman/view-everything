@@ -79,6 +79,8 @@ pub struct Shared {
     busy: AtomicBool,
     /// Duplicates found by hashing, and how far a running search has got.
     pub duplicates: Mutex<DuplicateState>,
+    /// Entries the Cleaner last found as Cleanables, for `is:cleanable`.
+    pub cleanables: Mutex<CleanableSet>,
     pub hash_progress: HashProgress,
     /// The Duplicate Exclusions Query text, as set in Settings.
     pub duplicate_exclusions: Mutex<String>,
@@ -108,6 +110,14 @@ pub struct Shared {
     pub tasks: Tasks,
     /// Called from the background threads whenever something a client shows has changed.
     pub repaint: Repaint,
+}
+
+/// The Entries of the Cleaner's latest Cleanables; replaced whole when a look finishes.
+#[derive(Clone, Default)]
+pub struct CleanableSet {
+    pub set: Arc<BitSet>,
+    /// Bumped each time it is replaced.
+    pub version: u64,
 }
 
 /// The Duplicates found so far; replaced whole when a search finishes.
@@ -213,6 +223,7 @@ impl Engine {
             query_error: Mutex::new(None),
             busy: AtomicBool::new(true),
             duplicates: Mutex::new(DuplicateState::default()),
+            cleanables: Mutex::new(CleanableSet::default()),
             hash_progress: HashProgress::default(),
             duplicate_exclusions: Mutex::new(String::new()),
             remote_names: Mutex::new(HashMap::new()),
@@ -1266,10 +1277,11 @@ fn run_viewer(shared: &Arc<Shared>, queries: &Receiver<String>, newest: &AtomicU
     let mut seen_query = 0;
     let mut text = String::new();
     let mut query: Option<Query> = None;
-    let mut computed: Option<(String, u64, u64)> = None;
+    let mut computed: Option<(String, u64, (u64, u64))> = None;
     let mut last_compute = Instant::now() - VIEW_THROTTLE;
     let mut order = FileOrder::default();
     let mut seen_duplicates = 0;
+    let mut seen_cleanables = 0;
     loop {
         let received = match queries.recv_timeout(Duration::from_millis(200)) {
             Ok(latest) => {
@@ -1287,19 +1299,25 @@ fn run_viewer(shared: &Arc<Shared>, queries: &Receiver<String>, newest: &AtomicU
             }
             Err(RecvTimeoutError::Disconnected) => return,
         };
-        // `dupe:` needs the hashes.
-        if text.contains("dupe:") {
+        // `dupe:` and `is:duplicate` need the hashes.
+        let lower = text.to_lowercase();
+        if lower.contains("dupe:") || lower.contains("is:duplicate") {
             refresh_duplicates(shared);
         }
-        // A finished search changes what `dupe:` means: parse again with its result.
+        // A finished search or Cleaner look changes what `dupe:` and `is:` mean: parse again with
+        // its result.
         let duplicates = shared.duplicates.lock().clone();
-        if received || duplicates.version != seen_duplicates {
+        let cleanables = shared.cleanables.lock().clone();
+        if received || duplicates.version != seen_duplicates || cleanables.version != seen_cleanables {
             seen_duplicates = duplicates.version;
+            seen_cleanables = cleanables.version;
             {
                 let parsed = if text.trim().is_empty() {
                     Ok(None)
                 } else {
-                    let context = QueryContext::new(categories.clone(), Local::now()).with_duplicates(duplicates.set);
+                    let context = QueryContext::new(categories.clone(), Local::now())
+                        .with_duplicates(duplicates.set)
+                        .with_cleanables(cleanables.set);
                     Query::parse(&text, &context).map(Some)
                 };
                 match parsed {
@@ -1319,10 +1337,11 @@ fn run_viewer(shared: &Arc<Shared>, queries: &Receiver<String>, newest: &AtomicU
             continue;
         }
         let generation = shared.index.read().generation();
+        let sets = (seen_duplicates, seen_cleanables);
         let up_to_date = computed
             .as_ref()
-            .is_some_and(|(t, g, d)| *t == text && *g == generation && *d == seen_duplicates);
-        let only_index_moved = computed.as_ref().is_some_and(|(t, _, d)| *t == text && *d == seen_duplicates);
+            .is_some_and(|(t, g, d)| *t == text && *g == generation && *d == sets);
+        let only_index_moved = computed.as_ref().is_some_and(|(t, _, d)| *t == text && *d == sets);
         if up_to_date || (only_index_moved && last_compute.elapsed() < VIEW_THROTTLE) {
             continue;
         }
@@ -1338,7 +1357,7 @@ fn run_viewer(shared: &Arc<Shared>, queries: &Receiver<String>, newest: &AtomicU
         // Superseded mid-compute: the newer Query is in the channel; take it now.
         let Some(view) = view else { continue };
         *shared.view.lock() = Some(Arc::new(view));
-        computed = Some((text.clone(), generation, seen_duplicates));
+        computed = Some((text.clone(), generation, sets));
         last_compute = Instant::now();
         (shared.repaint)();
     }
@@ -1362,6 +1381,7 @@ mod tests {
             query_error: Mutex::new(None),
             busy: AtomicBool::new(false),
             duplicates: Mutex::new(DuplicateState::default()),
+            cleanables: Mutex::new(CleanableSet::default()),
             hash_progress: HashProgress::default(),
             duplicate_exclusions: Mutex::new(String::new()),
             remote_names: Mutex::new(HashMap::new()),

@@ -1675,9 +1675,11 @@ impl Shell {
             )
     }
 
-    /// The Query: wide enough to read whole. `/` focuses it from any page.
+    /// The Query: wide enough to read whole. `/` focuses it from any page. A Query that does not
+    /// parse says why inside the box.
     fn find_box(&self, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
+        let error = self.engine.shared.query_error.lock().clone();
         h_flex()
             .flex_1()
             .min_w_0()
@@ -1712,6 +1714,20 @@ impl Shell {
                     .min_w_0()
                     .child(Input::new(&self.query).appearance(false).bordered(false)),
             )
+            .children(error.map(|error| {
+                div()
+                    .id("query-error")
+                    .min_w_0()
+                    .max_w(relative(0.5))
+                    .truncate()
+                    .text_size(px(FS_SMALL))
+                    .text_color(p.warning)
+                    .tooltip({
+                        let error = error.clone();
+                        move |window, cx| Tooltip::new(error.clone()).build(window, cx)
+                    })
+                    .child(error)
+            }))
             .when(!self.query.read(cx).value().is_empty(), |d| {
                 d.child(
                     div()

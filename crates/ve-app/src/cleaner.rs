@@ -340,10 +340,21 @@ impl CleanerPage {
         .detach();
     }
 
+    /// Hands the Engine the Entries of every Cleanable, for `is:cleanable`.
+    fn publish_entries(&self) {
+        let all = self.cleanables.iter().chain(&self.admin);
+        let mut set = ve_core::BitSet::new(all.clone().map(|c| c.entry.index() + 1).max().unwrap_or(0));
+        all.for_each(|c| set.insert(c.entry.index()));
+        let mut published = self.shared.cleanables.lock();
+        published.set = Arc::new(set);
+        published.version += 1;
+    }
+
     fn apply(&mut self, generation: u64, own: Vec<Cleanable>, admin: Vec<Cleanable>) {
         self.cleanables = own;
         self.admin = admin;
         self.seen = Some(generation);
+        self.publish_entries();
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
         for c in &self.cleanables {
             if self.known.insert(c.key()) && c.pre_ticked(now, self.temp_days, self.build_days) {
@@ -1163,6 +1174,7 @@ mod tests {
         let cleanable = |exts| Cleanable {
             rule: rule.clone(),
             path: "/x".into(),
+            entry: ve_core::EntryId(0),
             on_disk: 0,
             exts,
             newest: 0,

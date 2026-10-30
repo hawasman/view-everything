@@ -44,4 +44,4 @@ The Index's Last Synced time goes to stderr, so pipes stay clean.
 | 1 | no match |
 | 2 | a bad argument or Query, or an unreadable Index |
 
-`dupe:` finds nothing from the command line, because it does not read `hashes.bin`.
+`dupe:`, `is:duplicate` and `is:cleanable` find nothing from the command line, because it neither reads `hashes.bin` nor runs the Cleaner. `is:offline` is a bad Query there: the command line does not know which Volumes are mounted.
