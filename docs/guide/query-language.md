@@ -56,6 +56,8 @@ For `wholeword:`, only letters and digits join a word, so `_`, `-`, `.` and spac
 | `depth:2`, `depth:>1`, `depth:1..3` | Entries by levels below the Location root (the root is 0) |
 | `child:.git`, `child:*.toml` | folders with a direct child whose name matches |
 | `empty:` | folders with no children |
+| `owner:steam`, `owner:"Program Files"` | Entries under an Owner whose name contains the text, folders as well as files; ignores case |
+| `ownerkind:game`, `ownerkind:none` | Entries under an Owner of that kind (`system`, `program`, `game`, `project`), or under none (see [Owners](owners.md)) |
 
 ## In the app
 

@@ -15,7 +15,7 @@ Usage:
   ve export [OPTIONS] [--] [QUERY]... CSV of a Query's results (everything without one; --json for JSON)
 
 Options:
-  --csv           CSV output (path, name, Logical Size, On-disk Size, modified, Category)
+  --csv           CSV output (path, name, Logical Size, On-disk Size, modified, Category, Owner, Owner kind)
   --json          JSON array output
   --path <PATH>   Only Entries under PATH
   --index <FILE>  Read this saved Index instead of the app's
@@ -216,6 +216,7 @@ fn write_entries(
                 .map(|&id| {
                     let totals = filter.totals(index, id);
                     let name = index.name(id);
+                    let owner = index.entry_owner(id);
                     serde_json::json!({
                         "path": index.path(id).to_string_lossy(),
                         "name": name,
@@ -224,6 +225,8 @@ fn write_entries(
                         "on_disk_size": totals.on_disk,
                         "modified_ns": index.modified(id),
                         "category": (!index.is_dir(id)).then(|| categories.of_name(name).name()),
+                        "owner": owner.map(|o| o.name.as_str()),
+                        "owner_kind": owner.map(|o| o.kind.name()),
                     })
                 })
                 .collect();
@@ -376,7 +379,7 @@ mod tests {
         let index = fixture(dir.path());
         let (_, csv, _) = run_line("find --csv =evil*", &index);
         assert!(
-            csv.starts_with("path,name,Logical Size,On-disk Size,modified,Category\r\n"),
+            csv.starts_with("path,name,Logical Size,On-disk Size,modified,Category,Owner,Owner kind\r\n"),
             "{csv}"
         );
         assert!(

@@ -519,6 +519,49 @@ fn dupe_matches_files_the_context_lists_as_having_a_duplicate() {
 }
 
 #[test]
+fn owner_and_ownerkind_follow_the_nearest_owner_root_for_files_and_folders() {
+    use std::path::Path;
+    use ve_core::{EntryMeta, Filter, Index, Owner, OwnerKind, SyncState};
+    let dir = EntryMeta {
+        is_dir: true,
+        ..EntryMeta::default()
+    };
+    let mut index = Index::new();
+    let vol = index.add_volume(Path::new("/m/loc"), "ext4", "loc", dir, SyncState::Walk);
+    let root = index.volume(vol).unwrap().root;
+    let game = index.insert(root, "System Shock", dir);
+    let save = index.insert(game, "save.dat", EntryMeta::default());
+    let mods = index.insert(game, "mods", dir);
+    let mod_src = index.insert(mods, "main.rs", EntryMeta::default());
+    let loose = index.insert(root, "loose.txt", EntryMeta::default());
+    index.set_owners(
+        root,
+        vec![
+            (game, Owner::new(OwnerKind::Game, "System Shock", "Steam")),
+            (mods, Owner::new(OwnerKind::Project, "mods", "Cargo.toml")),
+        ],
+    );
+    let all = [root, game, save, mods, mod_src, loose];
+    let matched = |q: &str| {
+        let query = Query::parse(q, &context()).unwrap();
+        let filter = Filter::compute(&index, Some(&query));
+        all.map(|id| filter.is_matched(id))
+    };
+    // Name substring, ignoring case; folders match too; the nearer root wins.
+    assert_eq!(matched("owner:shock"), [false, true, true, false, false, false]);
+    assert_eq!(matched("owner:\"system shock\""), [false, true, true, false, false, false]);
+    assert_eq!(matched("owner:mods"), [false, false, false, true, true, false]);
+    // The kind is a separate key, so a game called "System" is not the System kind.
+    assert_eq!(matched("ownerkind:system"), [false, false, false, false, false, false]);
+    assert_eq!(matched("ownerkind:game"), [false, true, true, false, false, false]);
+    assert_eq!(matched("ownerkind:Project"), [false, false, false, true, true, false]);
+    assert_eq!(matched("ownerkind:none"), [true, false, false, false, false, true]);
+    assert_eq!(matched("!ownerkind:none"), [false, true, true, true, true, false]);
+    assert!(Query::parse("owner:", &context()).is_err());
+    assert!(Query::parse("ownerkind:package", &context()).is_err());
+}
+
+#[test]
 fn dc_matches_like_dm_and_never_an_unknown_creation_time() {
     let created = |y, mo, d, h| {
         let created = Local.with_ymd_and_hms(y, mo, d, h, 0, 0).unwrap().timestamp_nanos_opt().unwrap();

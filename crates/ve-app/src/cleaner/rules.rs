@@ -187,6 +187,10 @@ fn check(raw: Raw, os: &str, context: &QueryContext) -> Result<Option<Rule>, Str
     if query.needs_depth() {
         return Err(format!("`{name}`: depth: is not supported in a Cleanup Rule"));
     }
+    // The recheck before a Clean reads the disk, where there is no Owner to compare against.
+    if query.needs_owner() {
+        return Err(format!("`{name}`: owner: and ownerkind: are not supported in a Cleanup Rule"));
+    }
     for m in &raw.markers {
         let p = Path::new(m);
         if m.is_empty() || p.is_absolute() || !p.components().all(|c| matches!(c, Component::Normal(_) | Component::ParentDir)) {

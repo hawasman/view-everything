@@ -1,4 +1,5 @@
 use crate::column::{Rank, Seq, SparseColumn, U64Column};
+use crate::owner::{Owner, OwnerId};
 use hashbrown::HashTable;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -631,8 +632,8 @@ const MAGIC: &[u8; 8] = b"VEINDEX\0";
 /// v2 adds Last Synced and capacity per Volume; v3 adds the Volume's identity; v4 adds Remotes; v5 adds creation time;
 /// v6 stores sizes and creation time (in seconds) in 4 bytes per Entry; v7 interns names, keeps
 /// modification time in seconds, stores children as id ranges and only the unpredictable
-/// On-disk Sizes and creation times.
-const FORMAT_VERSION: u32 = 7;
+/// On-disk Sizes and creation times; v8 adds Owners (ADR-0014).
+const FORMAT_VERSION: u32 = 8;
 
 /// A time as stored: whole seconds since the Unix epoch, as the bits of an `i64`.
 fn secs(nanos: i64) -> u64 {
@@ -742,8 +743,62 @@ pub struct Index {
     names: Names,
     volumes: Vec<Option<Volume>>,
     live: usize,
+    /// Owner number on Owner roots only, into `owners`.
+    owner: SparseColumn,
+    /// Every Owner referred to by `owner`, plus ones no longer referred to until the next save.
+    owners: Vec<Owner>,
     #[serde(skip)]
     generation: u64,
+    /// Loaded from a format without Owners: every Location needs detection.
+    #[serde(skip)]
+    owners_stale: bool,
+}
+
+/// The format 7 layout: format 8 without Owners. Its columns move over as they are.
+#[derive(Serialize, Deserialize)]
+struct IndexV7 {
+    parent: Vec<u32>,
+    name: Vec<u32>,
+    flags: Vec<u8>,
+    logical: U64Column,
+    on_disk: SparseColumn,
+    modified: U64Column,
+    created: SparseColumn,
+    key: U64Column,
+    dirs: Rank,
+    child_first: Vec<u32>,
+    child_count: Vec<u32>,
+    names: Names,
+    volumes: Vec<Option<Volume>>,
+    live: usize,
+}
+
+impl From<IndexV7> for Index {
+    fn from(old: IndexV7) -> Index {
+        let mut owner = SparseColumn::default();
+        (0..old.parent.len()).for_each(|_| owner.push(None));
+        Index {
+            parent: old.parent,
+            name: old.name,
+            flags: old.flags,
+            logical: old.logical,
+            on_disk: old.on_disk,
+            modified: old.modified,
+            created: old.created,
+            key: old.key,
+            dirs: old.dirs,
+            child_first: old.child_first,
+            child_count: old.child_count,
+            extra_children: HashMap::new(),
+            names: old.names,
+            volumes: old.volumes,
+            live: old.live,
+            owner,
+            owners: Vec::new(),
+            generation: 0,
+            owners_stale: true,
+        }
+    }
 }
 
 /// The format 5 layout, read once and converted.
@@ -1051,6 +1106,7 @@ impl Index {
         self.modified.push(modified);
         self.created.push((created != modified).then_some(created));
         self.key.push(key);
+        self.owner.push(None);
         self.dirs.push(is_dir);
         if is_dir {
             self.child_first.push(0);
@@ -1203,6 +1259,7 @@ impl Index {
             self.modified.shrink_to_fit();
             self.created.shrink_to_fit();
             self.key.shrink_to_fit();
+            self.owner.shrink_to_fit();
             self.dirs.shrink_to_fit();
             self.child_first.shrink_to_fit();
             self.child_count.shrink_to_fit();
@@ -1342,6 +1399,79 @@ impl Index {
         self.children(dir).find(|&c| self.name(c) == name)
     }
 
+    /// Replaces the Owners of the Location (or folder) `root`: every Owner root beneath it is
+    /// forgotten and `roots` become the Owner roots. Equal Owners share one [`OwnerId`].
+    /// Owners nothing refers to any more stay in the table until the next save.
+    pub fn set_owners(&mut self, root: EntryId, roots: Vec<(EntryId, Owner)>) {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            self.owner.set(id.index(), None);
+            if self.dirs.contains(id.index()) {
+                stack.extend(self.children(id));
+            }
+        }
+        let mut by_owner: HashMap<&Owner, u32> = self.owners.iter().enumerate().map(|(i, o)| (o, i as u32)).collect();
+        let mut added = Vec::new();
+        let mut marks = Vec::with_capacity(roots.len());
+        for (id, owner) in &roots {
+            let n = match by_owner.get(owner) {
+                Some(&n) => n,
+                None => {
+                    let n = (self.owners.len() + added.len()) as u32;
+                    added.push(owner.clone());
+                    by_owner.insert(owner, n);
+                    n
+                }
+            };
+            marks.push((*id, n));
+        }
+        drop(by_owner);
+        self.owners.extend(added);
+        for (id, n) in marks {
+            // A root found before a concurrent removal is simply not marked.
+            if self.is_live(id) {
+                self.owner.set(id.index(), Some(u64::from(n)));
+            }
+        }
+        self.owners_stale = false;
+        self.touch();
+    }
+
+    /// The Owner `id` is the Owner root of, if it is one.
+    #[inline]
+    pub fn owner_root_at(&self, id: EntryId) -> Option<OwnerId> {
+        self.owner.get(id.index()).map(|n| OwnerId(n as u32))
+    }
+
+    /// The Owner of an Entry (CONTEXT.md): that of the nearest Owner root at or above it, with
+    /// that root.
+    pub fn owner_of(&self, id: EntryId) -> Option<(EntryId, OwnerId)> {
+        std::iter::successors(Some(id), |&c| self.parent(c)).find_map(|c| self.owner_root_at(c).map(|o| (c, o)))
+    }
+
+    pub fn owner(&self, id: OwnerId) -> &Owner {
+        &self.owners[id.0 as usize]
+    }
+
+    /// The Owner of an Entry, for showing it: [`Index::owner_of`] without the root.
+    pub fn entry_owner(&self, id: EntryId) -> Option<&Owner> {
+        self.owner_of(id).map(|(_, o)| self.owner(o))
+    }
+
+    /// Every live Owner root with its Owner.
+    pub fn owner_roots(&self) -> impl Iterator<Item = (EntryId, OwnerId)> + '_ {
+        (0..self.capacity())
+            .map(|i| EntryId(i as u32))
+            .filter(|&id| self.is_live(id))
+            .filter_map(|id| self.owner_root_at(id).map(|o| (id, o)))
+    }
+
+    /// Whether the Index was loaded from a format without Owners, so every Location needs
+    /// detection before Owners mean anything. Cleared by the first [`Index::set_owners`].
+    pub fn owners_stale(&self) -> bool {
+        self.owners_stale
+    }
+
     /// Full path of an Entry. A Remote's paths are the server's, joined with `/` on every OS.
     pub fn path(&self, id: EntryId) -> PathBuf {
         let mut chain = vec![id];
@@ -1406,23 +1536,44 @@ impl Index {
     #[cfg(test)]
     fn compacted(&self) -> Index {
         let mut out = Index::new();
+        let mut roots: Vec<(EntryId, Owner)> = Vec::new();
+        let carry = |old: EntryId, new: EntryId, roots: &mut Vec<(EntryId, Owner)>| {
+            if let Some(o) = self.owner_root_at(old) {
+                roots.push((new, self.owner(o).clone()));
+            }
+        };
         for volume in self.volumes.iter() {
             let Some(volume) = volume else {
                 out.volumes.push(None);
                 continue;
             };
             let root = out.push(NO_PARENT, self.name(volume.root), self.meta(volume.root));
+            carry(volume.root, root, &mut roots);
             out.volumes.push(Some(Volume { root, ..volume.clone() }));
             let mut stack = vec![(volume.root, root)];
             while let Some((old, new)) = stack.pop() {
                 for child in self.children(old) {
                     let copy = out.insert(new, self.name(child), self.meta(child));
+                    carry(child, copy, &mut roots);
                     if self.is_dir(child) {
                         stack.push((child, copy));
                     }
                 }
             }
         }
+        for (id, owner) in roots {
+            let n = match out.owners.iter().position(|o| *o == owner) {
+                Some(n) => n,
+                None => {
+                    out.owners.push(owner);
+                    out.owners.len() - 1
+                }
+            };
+            out.owner.set(id.index(), Some(n as u64));
+        }
+        // Marks went to the column's overlay; a saved column has them in place.
+        let rows: Vec<u32> = (0..out.capacity() as u32).collect();
+        out.owner = out.owner.reordered(&rows);
         out
     }
 
@@ -1494,8 +1645,10 @@ impl Index {
         if &magic != MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "not a saved Index"));
         }
-        let mut index: Index = match u32::from_le_bytes(version) {
+        let version = u32::from_le_bytes(version);
+        let mut index: Index = match version {
             FORMAT_VERSION => bincode::deserialize_from(input),
+            7 => bincode::deserialize_from::<_, IndexV7>(input).map(Index::from),
             6 => bincode::deserialize_from::<_, IndexV6>(input).map(Index::from),
             5 => bincode::deserialize_from::<_, IndexV5>(input).map(|v5| Index::from(IndexV6::from(v5))),
             // Older layouts are not migrated: the Index is cheap to rebuild by a scan.
@@ -1513,6 +1666,7 @@ impl Index {
             }
         }
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        index.owners_stale = version < 8;
         index.touch();
         Ok(index)
     }
@@ -1596,7 +1750,22 @@ impl Serialize for SaveView<'_> {
             .map(|o| ix.children(EntryId(o as u32)).next().map_or(0, |c| self.new_id[c.index()]));
         let child_count = folders.clone().map(|o| ix.children(EntryId(o as u32)).count() as u32);
 
-        let mut s = serializer.serialize_struct("Index", 14)?;
+        // Owners are numbered in order of first use too; unreferenced ones are dropped.
+        let mut new_owner = vec![u32::MAX; ix.owners.len()];
+        let mut owners: Vec<&Owner> = Vec::new();
+        let mut owner = SparseColumn::default();
+        for o in rows.clone() {
+            owner.push(ix.owner.get(o).map(|old| {
+                let old = old as usize;
+                if new_owner[old] == u32::MAX {
+                    new_owner[old] = owners.len() as u32;
+                    owners.push(&ix.owners[old]);
+                }
+                u64::from(new_owner[old])
+            }));
+        }
+
+        let mut s = serializer.serialize_struct("Index", 16)?;
         s.serialize_field("parent", &Seq::new(n, parent))?;
         s.serialize_field("name", &Seq::new(n, name))?;
         s.serialize_field("flags", &Seq::new(n, rows.clone().map(|o| ix.flags[o] & (DIR | HARDLINK))))?;
@@ -1618,6 +1787,8 @@ impl Serialize for SaveView<'_> {
         )?;
         s.serialize_field("volumes", &self.volumes)?;
         s.serialize_field("live", &n)?;
+        s.serialize_field("owner", &owner)?;
+        s.serialize_field("owners", &owners)?;
         s.end()
     }
 }
@@ -1632,6 +1803,7 @@ struct NamesView<S, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::owner::OwnerKind;
 
     fn meta(is_dir: bool, size: u64) -> EntryMeta {
         EntryMeta {
@@ -1658,9 +1830,20 @@ mod tests {
         index.insert(a, "big", meta(false, 5 << 32));
         let c = index.insert(b, "c", meta(true, 6));
         index.insert(c, "file", meta(false, u64::MAX));
+        // An Owner root that is then removed: its Owner is kept in the table but not saved.
+        index.set_owners(root, vec![(gone, owner(OwnerKind::Project, "gone"))]);
         index.remove(gone);
         index.rename(c, a, "renamed");
         index.add_volume(Path::new("/w"), "ext4", "uuid2", meta(true, 0), SyncState::Walk);
+        // Two roots sharing one Owner; the detection replaces the Location's earlier roots.
+        index.set_owners(
+            root,
+            vec![
+                (a, owner(OwnerKind::Game, "Same")),
+                (b, owner(OwnerKind::Game, "Same")),
+                (c, owner(OwnerKind::Project, "c")),
+            ],
+        );
         index
     }
 
@@ -1722,9 +1905,18 @@ mod tests {
         Index::load(&path).unwrap()
     }
 
+    /// `index` with every Owner forgotten, as a format before 8 would hold it.
+    fn unowned(mut index: Index) -> Index {
+        let roots: Vec<EntryId> = index.volumes().map(|(_, v)| v.root).collect();
+        for root in roots {
+            index.set_owners(root, Vec::new());
+        }
+        index
+    }
+
     #[test]
     fn a_format_5_index_loads_with_every_value() {
-        let index = churned().compacted();
+        let index = unowned(churned()).compacted();
         let old = old_columns(&index);
         let ids = (0..index.capacity()).map(|i| EntryId(i as u32));
         // Format 5 kept full u64 sizes and i64 nanosecond times.
@@ -1772,7 +1964,7 @@ mod tests {
 
     #[test]
     fn a_format_6_index_loads_with_every_value() {
-        let index = churned().compacted();
+        let index = unowned(churned()).compacted();
         let old = old_columns(&index);
         let ids = (0..index.capacity()).map(|i| EntryId(i as u32));
         let column = |values: Vec<u64>| {
@@ -1943,5 +2135,87 @@ mod tests {
         assert_eq!(back.names.len(), 4, "the removed Entry's name is not saved");
         assert_eq!(back.live_count(), 6);
         assert_eq!(sorted_names(&back, back.find_path(Path::new("/v/a")).unwrap()), ["b", "same.txt"]);
+    }
+
+    fn owner(kind: OwnerKind, name: &str) -> Owner {
+        Owner::new(kind, name, "test")
+    }
+
+    #[test]
+    fn owners_are_inherited_from_the_nearest_root_and_survive_a_save() {
+        let mut index = churned();
+        let a = index.find_path(Path::new("/v/a")).unwrap();
+        let renamed = index.find_path(Path::new("/v/a/renamed")).unwrap();
+        let file = index.find_path(Path::new("/v/a/renamed/file")).unwrap();
+        let big = index.find_path(Path::new("/v/a/big")).unwrap();
+        let b = index.find_path(Path::new("/v/b")).unwrap();
+        let v = index.find_path(Path::new("/v")).unwrap();
+        let w = index.find_path(Path::new("/w")).unwrap();
+        index.set_owners(w, vec![(w, owner(OwnerKind::System, "w"))]);
+        index.set_owners(
+            v,
+            vec![
+                (a, owner(OwnerKind::Game, "Factorio")),
+                (renamed, owner(OwnerKind::Project, "renamed")),
+            ],
+        );
+        let name_of = |index: &Index, id| index.owner_of(id).map(|(root, o)| (root, index.owner(o).name.clone()));
+        assert_eq!(name_of(&index, file), Some((renamed, "renamed".to_owned())));
+        assert_eq!(name_of(&index, big), Some((a, "Factorio".to_owned())));
+        assert_eq!(name_of(&index, b), None);
+        assert_eq!(name_of(&index, w), Some((w, "w".to_owned())));
+        assert!(!index.owners_stale());
+
+        // Detecting the Location again replaces its Owners and leaves the other Location's.
+        index.set_owners(v, vec![(b, owner(OwnerKind::Program, "B"))]);
+        assert_eq!(name_of(&index, file), None);
+        assert_eq!(name_of(&index, b), Some((b, "B".to_owned())));
+        assert_eq!(name_of(&index, w), Some((w, "w".to_owned())));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.bin");
+        index.save(&path).unwrap();
+        let back = Index::load(&path).unwrap();
+        assert!(!back.owners_stale());
+        let b = back.find_path(Path::new("/v/b")).unwrap();
+        let w = back.find_path(Path::new("/w")).unwrap();
+        assert_eq!(name_of(&back, b), Some((b, "B".to_owned())));
+        assert_eq!(name_of(&back, w), Some((w, "w".to_owned())));
+        assert_eq!(back.owners.len(), 2, "unreferenced Owners are not saved");
+        let mut roots: Vec<(EntryId, OwnerKind)> = back.owner_roots().map(|(id, o)| (id, back.owner(o).kind)).collect();
+        roots.sort();
+        assert_eq!(roots, [(b, OwnerKind::Program), (w, OwnerKind::System)]);
+    }
+
+    #[test]
+    fn a_format_7_index_loads_without_owners_and_asks_for_detection() {
+        let index = unowned(churned()).compacted();
+        let v7 = IndexV7 {
+            parent: index.parent.clone(),
+            name: index.name.clone(),
+            flags: index.flags.clone(),
+            logical: index.logical.clone(),
+            on_disk: index.on_disk.clone(),
+            modified: index.modified.clone(),
+            created: index.created.clone(),
+            key: index.key.clone(),
+            dirs: index.dirs.clone(),
+            child_first: index.child_first.clone(),
+            child_count: index.child_count.clone(),
+            names: Names {
+                starts: index.names.starts.clone(),
+                bytes: index.names.bytes.clone(),
+                lookup: None,
+            },
+            volumes: index.volumes.clone(),
+            live: index.live,
+        };
+        let loaded = load_bytes(7, bincode::serialize(&v7).unwrap());
+        assert!(loaded.owners_stale());
+        assert_eq!(loaded.owner_roots().count(), 0);
+        assert_eq!(
+            bincode::serialize(&loaded.save_view()).unwrap(),
+            bincode::serialize(&index.save_view()).unwrap()
+        );
     }
 }

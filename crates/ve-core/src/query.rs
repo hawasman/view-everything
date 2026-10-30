@@ -1,5 +1,6 @@
 use crate::bits::BitSet;
 use crate::category::{Category, CategoryMap, extension};
+use crate::owner::OwnerKind;
 use chrono::{DateTime, Days, Local, Months, NaiveDate, TimeZone};
 use std::fmt;
 use std::sync::Arc;
@@ -23,6 +24,8 @@ pub struct Candidate<'a> {
     pub children: Vec<&'a str>,
     /// The file has a Duplicate; set only when [`Query::needs_duplicates`].
     pub duplicate: bool,
+    /// The Entry's Owner (kind and name); required only when [`Query::needs_owner`].
+    pub owner: Option<(OwnerKind, &'a str)>,
 }
 
 /// Everything a Query's meaning depends on besides its text.
@@ -63,7 +66,8 @@ impl std::error::Error for QueryError {}
 /// A parsed search expression selecting which Entries count.
 ///
 /// `case:` and `wholeword:` before a term change how it matches; `parent:`, `depth:`, `child:` and
-/// `empty:` select by where an Entry sits in the folder tree; `dupe:` selects files with a Duplicate.
+/// `empty:` select by where an Entry sits in the folder tree; `dupe:` selects files with a Duplicate;
+/// `owner:` and `ownerkind:` select by the Entry's Owner.
 ///
 /// Syntax (a subset of Everything's): terms separated by spaces must all match; `a|b` matches
 /// either and binds tighter than a space; `!term` excludes; `"quotes"` keep spaces; `*` and `?`
@@ -76,6 +80,7 @@ pub struct Query {
     needs_depth: bool,
     needs_children: bool,
     needs_duplicates: bool,
+    needs_owner: bool,
     duplicates: Arc<BitSet>,
 }
 
@@ -120,6 +125,10 @@ enum Term {
     Empty,
     /// Files with a Duplicate.
     Duplicate,
+    /// Entries whose Owner's name contains the lower-cased text.
+    Owner(String),
+    /// Entries whose Owner is of the kind; `None` is Entries with no Owner.
+    OwnerKind(Option<OwnerKind>),
 }
 
 #[derive(Clone, Debug)]
@@ -162,12 +171,14 @@ impl Query {
         let needs_depth = any(|t| matches!(t, Term::Depth { .. }));
         let needs_children = any(|t| matches!(t, Term::Child(_) | Term::Empty));
         let needs_duplicates = any(|t| matches!(t, Term::Duplicate));
+        let needs_owner = any(|t| matches!(t, Term::Owner(_) | Term::OwnerKind(_)));
         Ok(Query {
             clauses,
             needs_path,
             needs_depth,
             needs_children,
             needs_duplicates,
+            needs_owner,
             duplicates: context.duplicates.clone(),
         })
     }
@@ -190,6 +201,11 @@ impl Query {
     /// Whether `dupe:` is used, so candidates must say whether they have a Duplicate.
     pub fn needs_duplicates(&self) -> bool {
         self.needs_duplicates
+    }
+
+    /// Whether `owner:` or `ownerkind:` is used, so candidates must carry their Owner.
+    pub fn needs_owner(&self) -> bool {
+        self.needs_owner
     }
 
     /// Whether the Entry at `index` is known to have a Duplicate.
@@ -249,6 +265,8 @@ impl Term {
             }
             Term::Empty => candidate.is_dir && candidate.children.is_empty(),
             Term::Duplicate => !candidate.is_dir && candidate.duplicate,
+            Term::Owner(text) => candidate.owner.is_some_and(|(_, name)| contains_ignore_case(name, text)),
+            Term::OwnerKind(kind) => candidate.owner.map(|(k, _)| k) == *kind,
         }
     }
 
@@ -337,13 +355,41 @@ impl Term {
                 }
                 Ok(Term::Duplicate)
             }
+            "owner" => {
+                if value.is_empty() {
+                    return Err(missing());
+                }
+                Ok(Term::Owner(value.to_lowercase()))
+            }
+            "ownerkind" => {
+                if value.eq_ignore_ascii_case("none") {
+                    return Ok(Term::OwnerKind(None));
+                }
+                let kind = OwnerKind::parse(value).ok_or_else(|| {
+                    let known: Vec<&str> = OwnerKind::ALL.iter().map(|k| k.name()).collect();
+                    QueryError(format!("unknown ownerkind `{value}`; expected none or one of {}", known.join(", ")))
+                })?;
+                Ok(Term::OwnerKind(Some(kind)))
+            }
             _ => unreachable!("Word::modifier returns only known names"),
         }
     }
 }
 
 const MODIFIERS: &[&str] = &[
-    "ext", "type", "size", "dm", "dc", "regex", "parent", "depth", "child", "empty", "dupe",
+    "ext",
+    "type",
+    "size",
+    "dm",
+    "dc",
+    "regex",
+    "parent",
+    "depth",
+    "child",
+    "empty",
+    "dupe",
+    "owner",
+    "ownerkind",
 ];
 /// Prefixes that change how the term after them matches; they chain (`case:wholeword:Foo`).
 const FLAGS: &[&str] = &["case", "wholeword"];
