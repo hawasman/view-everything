@@ -1,0 +1,23 @@
+[package]
+name = "ve-engine"
+description = "The view-everything engine: Index, Tasks, Locations, Live updates, Sync scheduling and Snapshots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Measurement hooks: a synthetic Index's Volume (VE_BENCH_MOUNT) is never synced.
+bench = []
+
+[dependencies]
+chrono = "0.4.45"
+parking_lot = "0.13.0"
+rayon = "1.12.0"
+ve-core = { path = "../ve-core" }
+ve-scan = { path = "../ve-scan" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.191"
+
+[dev-dependencies]
+tempfile = "3.27.0"

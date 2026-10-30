@@ -3,7 +3,6 @@
 use crate::format;
 use crate::theme::{FS_BODY, RADIUS_CARD, palette};
 use crate::ui::swatch;
-use crate::view::{CategoryRow, View};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, IconName, h_flex, v_flex};
@@ -12,6 +11,7 @@ use gpui_kit::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 use ve_core::Category;
+use ve_engine::view::{CategoryRow, View};
 
 /// Column widths: the name is fixed and the bar takes what is left, so a narrow panel shortens
 /// the bar rather than running the name under it; Size, Files and Share are fixed.
@@ -44,7 +44,7 @@ impl CategoryPanel {
     }
 
     pub fn set_view(&mut self, view: Option<Arc<View>>, cx: &mut Context<Self>) {
-        if !crate::view::same(&self.view, &view) {
+        if !ve_engine::view::same(&self.view, &view) {
             self.rows = view.as_ref().map(|v| (v.categories.clone(), v.total.on_disk));
             self.view = view;
             cx.notify();

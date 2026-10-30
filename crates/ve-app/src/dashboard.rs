@@ -4,7 +4,6 @@
 
 use crate::app::volume_name;
 use crate::dashboard_summary::{Summary, ago, group_by_filesystem, oldest, summarize};
-use crate::engine::{Phase, Shared};
 use crate::format;
 use crate::inspector::Inspected;
 use crate::settings::Settings;
@@ -23,6 +22,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 use ve_core::{Capacity, Category, CategoryMap, Query, QueryContext};
+use ve_engine::{Phase, Repaint, Shared};
 use ve_scan::VolumeInfo;
 
 /// Never recompute the summary more often than this while the Index is being filled; a
@@ -108,7 +108,7 @@ impl DashboardPage {
         trash: Trash,
         categories: CategoryMap,
         settings: &Settings,
-        repaint: crate::engine::Repaint,
+        repaint: Repaint,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -291,7 +291,7 @@ fn run_summary(
     categories: &CategoryMap,
     requests: &Receiver<String>,
     latest: &Mutex<Option<Arc<Summary>>>,
-    repaint: &crate::engine::Repaint,
+    repaint: &Repaint,
 ) {
     let mut text = String::new();
     let mut computed: Option<(String, u64)> = None;

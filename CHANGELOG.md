@@ -35,6 +35,10 @@
 - The Index is now format 8. A format 7 file is converted when loaded, and every Location is detected once at launch, so Owners appear without waiting for a Sync.
 - A file saved by v0.3 can't be read by v0.2.
 
+### Engine
+- The engine (the Index, Tasks, Locations, Live updates, Sync scheduling and Snapshots) is its own crate, `ve-engine`, with no GUI in it ([ADR-0016](docs/adr/0016-engine-library-in-the-tray-process-with-a-local-socket.md)). The app hosts it and behaves as before.
+- A finished Sync's Task shows the Entries it read, as its result says; a quick Sync used to show 0.
+
 ## v0.2.1
 
 ### Half the memory

@@ -64,8 +64,8 @@ pub fn keep_scope(query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::view::{Focus, View};
     use ve_core::{CategoryMap, EntryMeta, Query, QueryContext, Remote};
+    use ve_engine::view::{FileOrder, Focus, View};
 
     #[test]
     fn a_scoped_query_shows_the_folder_and_the_treemap_draws_it() {
@@ -88,7 +88,7 @@ mod tests {
         let categories = CategoryMap::builtin();
         let view = |text: &str| {
             let query = Query::parse(text, &QueryContext::new(categories.clone(), chrono::Local::now())).unwrap();
-            View::compute(&index, text, Some(&query), &categories, &mut crate::view::FileOrder::default())
+            View::compute(&index, text, Some(&query), &categories, &mut FileOrder::default())
         };
         let text = set("ext:rs", term(&index, a).as_deref());
         // `a` holds only `b`, yet the Treemap draws `a`: the folder zoomed into.

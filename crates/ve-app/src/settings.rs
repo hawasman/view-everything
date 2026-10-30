@@ -417,8 +417,6 @@ pub fn cleanup_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join(APP_DIR).join("cleanup.toml"))
 }
 
-pub use ve_core::paths::index_path;
-
 #[cfg(test)]
 mod tests {
     use super::*;

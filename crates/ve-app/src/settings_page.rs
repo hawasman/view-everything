@@ -1,6 +1,5 @@
 //! The Settings page: which Volumes are indexed, how often they are re-read, and the theme.
 
-use crate::engine::{Intervals, last_synced_label};
 use crate::settings::{Settings, ThemeChoice, default_duplicate_exclusions};
 use crate::theme::{self, CONTROL_H, RADIUS_CONTROL, palette};
 use crate::ui::{ButtonKind, Tone, button, caption, dialog_title, panel, tag};
@@ -19,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use ve_core::paths::load_categories;
 use ve_core::{AzureRemote, CategoryMap, FtpRemote, FtpTls, Query, QueryContext, Remote, S3Remote, WebdavRemote};
+use ve_engine::{Intervals, last_synced_label};
 use ve_scan::VolumeInfo;
 
 /// How long typing in the Duplicate Exclusions pauses before they are saved.

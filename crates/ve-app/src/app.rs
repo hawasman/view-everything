@@ -6,7 +6,6 @@ use crate::cleaner::{CleanerPage, ShowInExplorer};
 use crate::compare::{Compare, CompareEvent};
 use crate::dashboard::{Act, DashboardPage};
 use crate::duplicates::DuplicatesPanel;
-use crate::engine::{Engine, Phase, last_synced_label};
 use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
 use crate::format;
@@ -18,7 +17,6 @@ use crate::settings::Settings;
 #[cfg(feature = "updater")]
 use crate::settings_page::CheckNow;
 use crate::settings_page::{Changed, Forget, Refresh, SettingsPage};
-use crate::tasks::Outcome;
 use crate::theme::{CONTROL_H, FS_BODY, FS_SMALL, GAP, PAD, RADIUS_CARD, RADIUS_CONTROL, ROW_H, palette, tabular};
 use crate::trash::{self, Trash};
 use crate::tree::TreeList;
@@ -27,7 +25,6 @@ use crate::ui::{
     ButtonKind, Tone, button, caption, dialog_title, dot, empty_state, group_label, nav_item, panel, section_title, tag, task_progress,
     title_row,
 };
-use crate::view::Focus;
 use chrono::Local;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::ButtonVariant;
@@ -45,6 +42,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use ve_core::CategoryMap;
+use ve_engine::tasks::Outcome;
+use ve_engine::view::Focus;
+use ve_engine::{Engine, Phase, last_synced_label};
 use ve_scan::VolumeInfo;
 
 /// The app's name as people read it (the binary, app id and data folders stay `view-everything`).
@@ -118,7 +118,7 @@ enum SelfUpdate {
 const QUERY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(120);
 
 /// How the Explorer looked when its window closed to the tray; a reopened window starts there.
-/// The Query itself is the Engine's ([`crate::engine::Shared::query`]).
+/// The Query itself is the Engine's ([`ve_engine::Shared::query`]).
 pub struct Remembered {
     page: Page,
     show_tree: bool,
@@ -1320,7 +1320,7 @@ impl Shell {
             if !index.is_live(last) {
                 return Vec::new();
             }
-            let folder = crate::engine::folder_of(&index, last);
+            let folder = ve_engine::folder_of(&index, last);
             let root = self
                 .engine
                 .shared
@@ -1329,7 +1329,7 @@ impl Shell {
                 .clone()
                 .map(|v| crate::treemap::zoom_root(&index, &v));
             (
-                crate::engine::can_sync_folder(&index, folder),
+                ve_engine::can_sync_folder(&index, folder),
                 self.engine.shared.folder_syncing(folder),
                 root.is_some_and(|r| r.folder().is_some()),
             )
@@ -1374,7 +1374,7 @@ impl Shell {
             ),
         ];
         if !can_sync {
-            items.push(PopupMenuItem::label(crate::engine::WHOLE_ONLY));
+            items.push(PopupMenuItem::label(ve_engine::WHOLE_ONLY));
         }
         if too_many {
             items.push(PopupMenuItem::label("Open and Show in file manager take up to 10 Entries"));
@@ -1457,7 +1457,7 @@ impl Shell {
             MenuAct::ZoomIn => {
                 let folder = {
                     let index = self.engine.shared.index.read();
-                    crate::engine::folder_of(&index, last)
+                    ve_engine::folder_of(&index, last)
                 };
                 self.scope(Some(folder), window, cx);
             }
@@ -1467,7 +1467,7 @@ impl Shell {
                 }
             }
             MenuAct::Sync => {
-                let folder = crate::engine::folder_of(&self.engine.shared.index.read(), last);
+                let folder = ve_engine::folder_of(&self.engine.shared.index.read(), last);
                 self.engine.sync_folder(folder);
             }
             MenuAct::Export => {
@@ -2231,7 +2231,7 @@ impl Shell {
                 .is_none_or(|root| std::iter::successors(Some(id), |&e| index.parent(e)).any(|e| e == root));
             let base = if inside { drawn } else { Focus::Folder(index.root_of(id)) };
             let whole = base.totals(&index, &view.filter).on_disk.max(1);
-            let target = crate::engine::folder_of(&index, id);
+            let target = ve_engine::folder_of(&index, id);
             (
                 index.is_dir(id),
                 totals,
@@ -2240,7 +2240,7 @@ impl Shell {
                 index.path(id).display().to_string(),
                 format::time(index.modified(id)),
                 target,
-                crate::engine::can_sync_folder(&index, target),
+                ve_engine::can_sync_folder(&index, target),
             )
         };
         let contains = if is_dir {
@@ -2250,7 +2250,7 @@ impl Shell {
             "1 file".to_owned()
         };
         let blocker = self.trash.blocker_of(&[id], &self.volumes);
-        let sync_why = (!can_sync).then_some(crate::engine::WHOLE_ONLY);
+        let sync_why = (!can_sync).then_some(ve_engine::WHOLE_ONLY);
         let fact = |l: &'static str, v: String| (SharedString::from(l), SharedString::from(v));
         Some(Panel {
             kind: "Entry",

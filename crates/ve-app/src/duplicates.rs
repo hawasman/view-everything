@@ -1,7 +1,6 @@
 //! The Duplicates panel: Duplicates grouped by content, largest wasted space first, with the
 //! copy to keep chosen per group and the rest sent to the Trash through its confirmation.
 
-use crate::engine::{Shared, refresh_duplicates};
 use crate::format;
 use crate::theme::palette;
 use crate::trash::Trash;
@@ -16,6 +15,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use ve_core::EntryId;
+use ve_engine::{Shared, refresh_duplicates, start_hashing};
 use ve_scan::VolumeInfo;
 
 /// Height of every row of the list, a group's heading or one copy: the list is virtualised, so
@@ -197,7 +197,7 @@ impl DuplicatesPanel {
 
     /// Starts the search again.
     pub fn rescan(&self) {
-        crate::engine::start_hashing(&self.shared);
+        start_hashing(&self.shared);
     }
 }
 

@@ -181,7 +181,7 @@ impl FileOrder {
 }
 
 impl View {
-    #[cfg(test)]
+    /// The View of `query` over `index`, computed in full.
     pub fn compute(index: &Index, query_text: &str, query: Option<&Query>, categories: &CategoryMap, order: &mut FileOrder) -> View {
         Self::compute_until(index, query_text, query, categories, order, &|| false).expect("never cancelled")
     }

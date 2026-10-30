@@ -1,12 +1,12 @@
 //! The count of folders under the inspected folder, which the Inspector shows: counted off the UI
 //! thread, kept per (Entry, View).
 
-use crate::engine::Shared;
 use crate::format;
-use crate::view::View;
 use gpui_kit::*;
 use std::sync::Arc;
 use ve_core::EntryId;
+use ve_engine::Shared;
+use ve_engine::view::View;
 
 /// How many folders lie under a folder the Query shows.
 struct FolderCount {

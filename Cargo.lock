@@ -7463,7 +7463,6 @@ dependencies = [
  "dirs 7.0.0",
  "gpui-kit",
  "ksni",
- "libc",
  "minisign",
  "minisign-verify",
  "objc2 0.6.5",
@@ -7472,7 +7471,6 @@ dependencies = [
  "opener",
  "parking_lot 0.13.0",
  "png 0.18.1",
- "rayon",
  "resvg 0.46.0",
  "serde",
  "serde_json",
@@ -7481,6 +7479,7 @@ dependencies = [
  "trash",
  "ureq",
  "ve-core",
+ "ve-engine",
  "ve-scan",
  "windows-sys 0.61.2",
  "zip",
@@ -7510,6 +7509,19 @@ dependencies = [
  "serde",
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "ve-engine"
+version = "0.3.0"
+dependencies = [
+ "chrono",
+ "libc",
+ "parking_lot 0.13.0",
+ "rayon",
+ "tempfile",
+ "ve-core",
+ "ve-scan",
 ]
 
 [[package]]

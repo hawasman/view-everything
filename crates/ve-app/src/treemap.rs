@@ -1,10 +1,8 @@
 //! The Treemap panel: Filtered Sizes as nested rectangles coloured by Category.
 
-use crate::engine::Shared;
 use crate::format;
 use crate::theme::{FS_BODY, FS_SMALL, Palette, palette};
 use crate::ui::{ButtonKind, button, caption, segmented, swatch};
-use crate::view::{Focus, View};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -18,6 +16,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 use ve_core::{Category, CategoryMap, EntryId, Filter, Index, OwnerKind};
+use ve_engine::Shared;
+use ve_engine::view::{Focus, View};
 
 /// Stop laying out once this many rectangles exist (a safety cap; the per-folder cap below keeps
 /// ordinary layouts far under it). Painting costs about a microsecond a tile.
@@ -734,7 +734,7 @@ impl Treemap {
     fn sync(&mut self) -> bool {
         let mut changed = false;
         let latest = self.shared.view.lock().clone();
-        if !crate::view::same(&self.view, &latest) {
+        if !ve_engine::view::same(&self.view, &latest) {
             self.view = latest;
             changed = true;
         }

@@ -44,7 +44,7 @@ impl Live {
     /// Starts the thread that applies what sources report.
     pub(super) fn new(shared: &Arc<Shared>, commands: Sender<Command>) -> Live {
         let (events, received) = mpsc::sync_channel(live::QUEUE);
-        let ignored = super::settings::index_path().and_then(|p| p.parent().map(Path::to_path_buf));
+        let ignored = shared.index_path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
         let applier = {
             let (shared, commands) = (shared.clone(), commands.clone());
             move || {
