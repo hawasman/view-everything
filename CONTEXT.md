@@ -125,7 +125,7 @@ _Avoid_: search, filter, find
 A Query kept under a name in the settings, to apply again from the Explorer. Saving under an existing name (ignoring case) replaces that Query.
 
 **Treemap**:
-The panel that draws Filtered Sizes as nested rectangles coloured by Category. It draws the folder everything the Query shows sits in; zooming into a folder (on the Treemap or in a list) adds that folder to the Query, so the tree and flat list follow and the Query can still be refined. Folders down to the chosen **Depth** carry a header with their name and size.
+The panel that draws Filtered Sizes as nested rectangles coloured by Category. It draws the deepest folder that holds everything the Query shows; when that spans several Locations, or the Query is empty, it draws the whole Index with one tile per Location (an Offline Volume's tile is marked offline). Zooming into a folder (on the Treemap or in a list) adds that folder to the Query, so the tree and flat list follow and the Query can still be refined. Folders down to the chosen **Depth** carry a header with their name and size.
 _Avoid_: size map, block view
 
 **Permission**:

@@ -18,7 +18,7 @@ pub fn highlight(last: bool, cx: &App) -> Div {
         .when(last, |d| d.border_1().border_color(p.control))
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Selection {
     ids: HashSet<EntryId>,
     /// The Entry a Shift-click extends from; its row is looked up per click, as rows move when

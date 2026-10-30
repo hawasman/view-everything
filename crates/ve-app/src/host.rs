@@ -42,6 +42,8 @@ pub struct Host {
     quitting: bool,
     /// Settings problems found at startup, shown by the first window.
     problems: Vec<String>,
+    /// How the Explorer looked when the last window closed to the tray; the next window starts there.
+    pub remembered: Option<crate::app::Remembered>,
 }
 
 impl Global for Host {}
@@ -102,6 +104,7 @@ impl Host {
             live_paused: paused,
             quitting: false,
             problems,
+            remembered: None,
         });
 
         // Quitting by any path (tray, update, the last window closing) saves the Index.

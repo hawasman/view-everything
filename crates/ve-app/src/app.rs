@@ -105,6 +105,18 @@ enum SelfUpdate {
 /// How long typing in the Query pauses before the engine is asked.
 const QUERY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(120);
 
+/// How the Explorer looked when its window closed to the tray; a reopened window starts there.
+/// The Query itself is the Engine's ([`crate::engine::Shared::query`]).
+pub struct Remembered {
+    page: Page,
+    show_tree: bool,
+    show_duplicates: bool,
+    compare: Option<chrono::NaiveDate>,
+    expanded: HashSet<ve_core::EntryId>,
+    tree_selection: crate::selection::Selection,
+    list_selection: crate::selection::Selection,
+}
+
 pub struct Shell {
     engine: Arc<Engine>,
     page: Page,
@@ -251,6 +263,12 @@ impl Shell {
 
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Find a file by name"));
         let filters = cx.new(|cx| FiltersPanel::new(window, cx));
+        // A window reopened from the tray shows the Query the Engine is still answering.
+        let text = engine.shared.query.lock().clone();
+        if !text.is_empty() {
+            query.update(cx, |q, cx| q.set_value(text.as_str(), window, cx));
+            filters.update(cx, |f, cx| f.reload(&text, window, cx));
+        }
         cx.subscribe_in(&query, window, |this, query, event: &InputEvent, window, cx| {
             // Typing (Change) waits for a pause; Enter, and the programmatic setters that emit
             // PressEnter after the silent set_value, send at once.
@@ -465,7 +483,7 @@ impl Shell {
             .detach();
         }
 
-        Self {
+        let mut shell = Self {
             engine,
             page,
             query,
@@ -505,7 +523,49 @@ impl Shell {
             tasks_ticking: false,
             #[cfg(feature = "bench")]
             demoed: false,
+        };
+        if let Some(remembered) = cx.global_mut::<Host>().remembered.take() {
+            shell.restore(remembered, cx);
         }
+        cx.on_release(|this, cx| {
+            if cx.has_global::<Host>() {
+                let remembered = this.remember(cx);
+                cx.global_mut::<Host>().remembered = Some(remembered);
+            }
+        })
+        .detach();
+        shell
+    }
+
+    /// What a reopened window needs to look like this one.
+    fn remember(&self, cx: &App) -> Remembered {
+        let tree = self.tree.read(cx).delegate();
+        Remembered {
+            page: self.page,
+            show_tree: self.show_tree,
+            show_duplicates: self.show_duplicates,
+            compare: self.compare.read(cx).active(),
+            expanded: tree.expanded().clone(),
+            tree_selection: tree.selection.clone(),
+            list_selection: self.table.read(cx).delegate().selection.clone(),
+        }
+    }
+
+    /// Puts back how the Explorer looked when the previous window closed.
+    fn restore(&mut self, r: Remembered, cx: &mut Context<Self>) {
+        self.page = r.page;
+        self.show_tree = r.show_tree;
+        self.show_duplicates = r.show_duplicates;
+        if r.compare.is_some() {
+            self.compare.update(cx, |c, cx| c.choose(r.compare, cx));
+        }
+        self.tree.update(cx, |t, _| {
+            let tree = t.delegate_mut();
+            tree.set_expanded(r.expanded);
+            tree.selection = r.tree_selection;
+        });
+        self.table.update(cx, |t, _| t.delegate_mut().selection = r.list_selection);
+        self.outline_selection(cx);
     }
 
     #[cfg(feature = "updater")]
@@ -1292,11 +1352,11 @@ impl Shell {
                 .view
                 .lock()
                 .clone()
-                .and_then(|v| crate::treemap::zoom_root(&index, &v));
+                .map(|v| crate::treemap::zoom_root(&index, &v));
             (
                 crate::engine::can_sync_folder(&index, folder),
                 self.engine.shared.folder_syncing(folder),
-                root.is_some_and(|r| index.parent(r).is_some()),
+                root.is_some_and(|r| r.folder().is_some()),
             )
         };
         let blocker = self.trash.blocker_of(&ids, &self.volumes);
@@ -1358,20 +1418,21 @@ impl Shell {
     }
 
     fn menu_act(&mut self, act: MenuAct, ids: &[ve_core::EntryId], last: ve_core::EntryId, window: &mut Window, cx: &mut Context<Self>) {
-        let (paths, folder, parent_scope) = {
+        let (paths, folder, zoom_out) = {
             let index = self.engine.shared.index.read();
             let live: Vec<_> = ids.iter().copied().filter(|&id| index.is_live(id)).collect();
             let paths: Vec<_> = live.iter().map(|&id| index.path(id)).collect();
             let folder = crate::entry_actions::terminal_folder(&index, last);
-            let parent = self
+            // Out of the folder drawn: into its parent, or out to the whole Index from a Location.
+            let zoom_out = self
                 .engine
                 .shared
                 .view
                 .lock()
                 .clone()
-                .and_then(|v| crate::treemap::zoom_root(&index, &v))
-                .and_then(|r| index.parent(r));
-            (paths, folder, parent)
+                .and_then(|v| crate::treemap::zoom_root(&index, &v).folder())
+                .map(|r| index.parent(r));
+            (paths, folder, zoom_out)
         };
         let fail = |what: &str, path: &std::path::Path, e: &dyn std::fmt::Display, window: &mut Window, cx: &mut App| {
             window.push_notification(Notification::error(format!("Could not {what} {}: {e}", path.display())), cx);
@@ -1426,8 +1487,8 @@ impl Shell {
                 self.scope(Some(folder), window, cx);
             }
             MenuAct::ZoomOut => {
-                if parent_scope.is_some() {
-                    self.scope(parent_scope, window, cx);
+                if let Some(parent) = zoom_out {
+                    self.scope(parent, window, cx);
                 }
             }
             MenuAct::Sync => {

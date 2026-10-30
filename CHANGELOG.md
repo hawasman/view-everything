@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- The Treemap draws the whole Index, one tile per Location, when the Query matches Entries on more than one Location or is empty, so it shows what the tree shows. An Offline Volume's tile is marked "(offline)". The Index crumb and Zoom out reach that level.
+- Reopening the window from the tray brings back the Query (in the box and the Filters button), the page and tab, the Compare with date, and the tree's open folders and selection.
+- The Cleaner shows a spinner while it looks for Cleanables, in the list and on the Dashboard card, and says it once.
+
 ## v0.2.0
 
 ### Know what the app is doing

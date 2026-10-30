@@ -33,10 +33,57 @@ pub struct View {
     pub categories: Vec<CategoryRow>,
     /// Filtered Size over every Indexed Volume.
     pub total: Totals,
-    /// The folder everything shown sits in, which the Treemap draws: the deepest folder of the
-    /// Volume with the most Filtered Size that still holds all of that Volume's shown Entries.
-    pub focus: Option<EntryId>,
+    /// What the Treemap draws: the deepest folder that holds everything shown, or the whole
+    /// Index when that spans several Locations.
+    pub focus: Focus,
     pub took: Duration,
+}
+
+/// What the Treemap draws: one folder, or the whole Index with one tile per Location.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Focus {
+    Index,
+    Folder(EntryId),
+}
+
+impl Focus {
+    /// The folder drawn; None for the whole Index.
+    pub fn folder(self) -> Option<EntryId> {
+        match self {
+            Focus::Index => None,
+            Focus::Folder(id) => Some(id),
+        }
+    }
+
+    /// What is drawn directly inside: the folder's children, or the root of every Location.
+    pub fn children(self, index: &Index) -> std::borrow::Cow<'_, [EntryId]> {
+        match self {
+            Focus::Index => index.volumes().map(|(_, v)| v.root).filter(|&id| index.is_live(id)).collect(),
+            Focus::Folder(id) => index.children(id).into(),
+        }
+    }
+
+    /// The Filtered Size drawn: the folder's, or that of every Location together.
+    pub fn totals(self, index: &Index, filter: &Filter) -> Totals {
+        match self {
+            Focus::Index => {
+                let mut total = Totals::default();
+                for &root in self.children(index).iter() {
+                    total.add(filter.totals(index, root));
+                }
+                total
+            }
+            Focus::Folder(id) => filter.totals(index, id),
+        }
+    }
+
+    /// What the Treemap and its breadcrumb call it.
+    pub fn name(self, index: &Index) -> &str {
+        match self {
+            Focus::Index => "Index",
+            Focus::Folder(id) => index.display_name(id),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -193,10 +240,7 @@ impl View {
         if cancelled() {
             return None;
         }
-        let mut total = Totals::default();
-        for (_, volume) in index.volumes() {
-            total.add(filter.totals(index, volume.root));
-        }
+        let total = Focus::Index.totals(index, &filter);
 
         Some(View {
             id: NEXT_VIEW_ID.fetch_add(1, Ordering::Relaxed),
@@ -211,15 +255,23 @@ impl View {
     }
 }
 
-/// See [`View::focus`]. The descent goes through folders shown only for what they contain and
-/// stops above one the Query matches itself, so a zoomed-in Query (`"/home/me/*"`, which matches
-/// what is inside the folder) lands on that folder.
-fn focus(index: &Index, filter: &Filter) -> Option<EntryId> {
-    let roots = || index.volumes().map(|(_, v)| v.root).filter(|&id| index.is_live(id));
-    let mut folder = roots()
-        .filter(|&id| filter.is_shown(id))
-        .max_by_key(|&id| filter.totals(index, id).on_disk)
-        .or_else(|| roots().next())?;
+/// See [`View::focus`]. With shown Entries on one Location only, the focus is [`descend`] from
+/// its root.
+fn focus(index: &Index, filter: &Filter) -> Focus {
+    let mut shown = index
+        .volumes()
+        .map(|(_, v)| v.root)
+        .filter(|&id| index.is_live(id) && filter.is_shown(id));
+    match (shown.next(), shown.next()) {
+        (Some(root), None) => Focus::Folder(descend(index, filter, root)),
+        _ => Focus::Index,
+    }
+}
+
+/// The deepest folder under `folder` that holds everything it shows: the descent goes through
+/// folders shown only for what they contain and stops above one the Query matches itself, so a
+/// zoomed-in Query (`"/home/me/*"`, which matches what is inside the folder) lands on that folder.
+pub fn descend(index: &Index, filter: &Filter, mut folder: EntryId) -> EntryId {
     loop {
         let mut shown = index
             .children(folder)
@@ -228,7 +280,7 @@ fn focus(index: &Index, filter: &Filter) -> Option<EntryId> {
             .filter(|&c| index.is_live(c) && filter.is_shown(c));
         match (shown.next(), shown.next()) {
             (Some(only), None) if index.is_dir(only) && !filter.is_matched(only) => folder = only,
-            _ => return Some(folder),
+            _ => return folder,
         }
     }
 }
@@ -332,6 +384,44 @@ mod tests {
         let query = Query::parse("ext:rs !b", &ctx).unwrap();
         let view = View::compute(&index, "ext:rs !b", Some(&query), &categories, &mut order);
         assert_eq!(view.flat, vec![big, small, tie]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn matches_on_several_locations_draw_the_whole_index() {
+        let mut index = Index::new();
+        let dir = EntryMeta {
+            is_dir: true,
+            ..Default::default()
+        };
+        let file = EntryMeta {
+            logical: 10,
+            on_disk: 10,
+            ..Default::default()
+        };
+        let ssd = index.add_volume(Path::new("/mnt/ssd"), "ext4", "ssd", dir, SyncState::Walk);
+        let home = index.add_volume(Path::new("/home"), "ext4", "home", dir, SyncState::Walk);
+        let (ssd, home) = (index.volume(ssd).unwrap().root, index.volume(home).unwrap().root);
+        let games = index.insert(ssd, "games", dir);
+        let poe2 = index.insert(games, "Path of Exile 2", dir);
+        index.insert(poe2, "game.bin", file);
+        index.insert(games, "other.bin", file);
+        let poe1 = index.insert(home, "Path of Exile", dir);
+        index.insert(poe1, "game.bin", file);
+        let categories = CategoryMap::builtin();
+        let ctx = ve_core::QueryContext::new(categories.clone(), chrono::Local::now());
+        let focus = |text: &str| {
+            let query = Query::parse(text, &ctx).unwrap();
+            View::compute(&index, text, Some(&query), &categories, &mut FileOrder::default()).focus
+        };
+        // Path of Exile is on both Volumes: neither Volume holds everything shown.
+        assert_eq!(focus("path of exile"), Focus::Index);
+        // An empty Query shows both Volumes.
+        assert_eq!(
+            View::compute(&index, "", None, &categories, &mut FileOrder::default()).focus,
+            Focus::Index
+        );
+        // Matches on one Volume only: the deepest folder holding them, as before.
+        assert_eq!(focus("other"), Focus::Folder(games));
     }
 }
 

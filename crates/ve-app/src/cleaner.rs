@@ -903,6 +903,7 @@ impl Render for CleanerPage {
             .children(advanced.map(|a| div().mt(px(12.)).child(a)));
         let looking = self.looking();
         let search_task = self.shared.tasks.running().into_iter().find(|t| t.kind == TaskKind::CleanerSearch);
+        // While looking, the empty list says so with a spinner; this row adds only the progress.
         let status = if looking {
             match search_task.filter(|t| t.total.is_some_and(|n| n > 0)) {
                 Some(t) => {
@@ -913,12 +914,7 @@ impl Render for CleanerPage {
                     };
                     task_progress("cleaner-progress", t.done, t.total, what, cx).into_any_element()
                 }
-                None => h_flex()
-                    .gap(px(10.))
-                    .items_center()
-                    .child(Spinner::new().with_size(Size::XSmall).color(muted))
-                    .child("Looking for Cleanables…")
-                    .into_any_element(),
+                None => div().into_any_element(),
             }
         } else if self.paused {
             "The search was cancelled.".into_any_element()
@@ -989,11 +985,16 @@ impl Render for CleanerPage {
                 })
         });
         let empty = ixs.is_empty().then(|| {
-            div().child(if self.looking() {
-                "Looking for Cleanables…"
+            if self.looking() {
+                h_flex()
+                    .gap(px(10.))
+                    .items_center()
+                    .child(Spinner::new().with_size(Size::XSmall).color(muted))
+                    .child("Looking for Cleanables…")
+                    .into_any_element()
             } else {
-                "Nothing to clean here."
-            })
+                div().child("Nothing to clean here.").into_any_element()
+            }
         });
         let size_pills = PAGE_SIZES.iter().map(|&n| {
             pill(("page-size", n), n.to_string()).small().selected(n == self.page_size).build(
