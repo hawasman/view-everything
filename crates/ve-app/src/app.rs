@@ -1529,6 +1529,7 @@ impl Shell {
 
     /// Brand, scope switcher, pages, Locations and Tasks; Settings and the user at the bottom.
     fn sidebar(&self, locations: &[crate::locations::Row], scale: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("Shell::sidebar");
         let p = palette(cx);
         let (border, ground) = (p.border, p.ground);
         let avatar = p.avatar;
@@ -1761,6 +1762,7 @@ impl Shell {
     }
 
     fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("Shell::explorer");
         self.fit_lists(cx);
         let p = palette(cx);
         let (text, muted) = (p.text, p.muted);
@@ -2033,6 +2035,7 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("Shell::render");
         // One read lock for the whole frame: the status bar and the Locations rows read the Index
         // again (the lock is recursive), and no writer can slip in between them.
         let _frame_index = self.engine.shared.index.read();

@@ -168,7 +168,7 @@ fn basic(user: &str, password: &str) -> String {
 }
 
 fn names(index: &Index, dir: EntryId) -> Vec<String> {
-    let mut v: Vec<_> = index.children(dir).iter().map(|&c| index.name(c).to_owned()).collect();
+    let mut v: Vec<_> = index.children(dir).map(|c| index.name(c).to_owned()).collect();
     v.sort();
     v
 }

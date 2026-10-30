@@ -18,7 +18,7 @@ pub use bits::BitSet;
 pub use category::{Category, CategoryMap};
 pub use filter::{Filter, Totals};
 pub use index::{
-    AzureRemote, Capacity, EntryId, EntryMeta, FtpRemote, FtpTls, Index, MANUAL_REFRESH, Remote, S3Remote, SshRemote, SyncState, Volume,
-    VolumeId, WebdavRemote,
+    AzureRemote, Capacity, Children, EntryId, EntryMeta, FtpRemote, FtpTls, Index, MANUAL_REFRESH, Remote, S3Remote, SshRemote, SyncState,
+    Volume, VolumeId, WebdavRemote,
 };
 pub use query::{Candidate, Query, QueryContext, QueryError};

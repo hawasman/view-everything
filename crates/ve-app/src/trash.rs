@@ -653,7 +653,7 @@ pub fn subtree_on_disk(index: &Index, id: EntryId) -> u64 {
     let mut stack = vec![id];
     while let Some(current) = stack.pop() {
         total += index.on_disk(current);
-        stack.extend_from_slice(index.children(current));
+        stack.extend(index.children(current));
     }
     total
 }

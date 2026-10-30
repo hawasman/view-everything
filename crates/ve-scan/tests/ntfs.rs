@@ -64,5 +64,5 @@ fn a_cancelled_mft_read_is_interrupted_before_the_index_is_touched() {
     let err = ve_scan::ntfs::load(&index, volume, Cursor::new(image), &progress).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
     let index = index.read();
-    assert!(index.children(index.volume(volume).unwrap().root).is_empty());
+    assert!(!index.has_children(index.volume(volume).unwrap().root));
 }

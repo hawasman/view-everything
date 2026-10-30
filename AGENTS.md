@@ -24,6 +24,8 @@ scripts/ui-sandbox.sh stop  NAME                 # always stop when done
 - The app exposes no usable accessibility tree yet, so target elements by screenshot coordinates.
 - Rebuild, then `stop` and `start` again, to test a code change; a running sandbox keeps the old binary.
 - Logs: `$XDG_RUNTIME_DIR/ve-ui-sandbox/NAME/app.log` (app) and `kwin.log`.
+- `VE_BIN` may point at a wrapper script, which is how to put a tool around the app. Frame times and GPU/CPU load: `scripts/ui-sandbox.sh perf NAME` starts a sandbox under MangoHud (overlay top-right, frame-time CSV logs in `$XDG_RUNTIME_DIR/ve-ui-sandbox/NAME/mangohud/`). Heap: a wrapper that sets `LD_PRELOAD=/usr/lib/libjemalloc.so.2 MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:18,lg_prof_interval:29,prof_prefix:/tmp/jeprof/ve`, then `jeprof --text target/release/view-everything /tmp/jeprof/ve.*.heap`.
+- Slow frames: `VE_FRAME_TRACE=8` (threshold in ms) makes every `render` slower than that print `frame-trace: <view> took N ms` to `app.log`; a wrapper script as `VE_BIN` sets it. A long `Shell::render` is the frame waiting for the Index lock (a Sync is writing); a long page render is that page's own work.
 
 ## Domain language
 

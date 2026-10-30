@@ -85,7 +85,7 @@ pub(crate) fn sync_dir(index: &SharedIndex, dir: EntryId, path: &Path, progress:
     };
     let subfolders = apply(&mut index.write(), dir, listing);
     for (id, os_name) in subfolders {
-        if index.read().children(id).is_empty() {
+        if !index.read().has_children(id) {
             rayon::scope(|scope| walk.visit(scope, id, path.join(os_name)));
         }
     }
@@ -160,7 +160,7 @@ impl<'a> Walk<'a> {
 
 /// Makes the Index children of `dir` equal to `listing`. Returns the folders to visit next.
 fn apply(index: &mut Index, dir: EntryId, listing: Vec<Listed>) -> Vec<(EntryId, OsString)> {
-    let mut existing: HashMap<String, EntryId> = index.children(dir).iter().map(|&c| (index.name(c).to_owned(), c)).collect();
+    let mut existing: HashMap<String, EntryId> = index.children(dir).map(|c| (index.name(c).to_owned(), c)).collect();
     let mut subfolders = Vec::new();
     let mut replaced = Vec::new();
     let mut added = Vec::new();

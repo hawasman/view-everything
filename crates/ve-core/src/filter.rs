@@ -68,7 +68,7 @@ impl Filter {
                 folders_preorder.push(dir);
                 let captured = inherited || (query.is_some() && matched.contains(dir.index()));
                 let dir_slot = index.folder_slot(dir).expect("only folders are stacked");
-                for &child in index.children(dir) {
+                for child in index.children(dir) {
                     if index.is_dir(child) {
                         stack.push((child, captured));
                         continue;
@@ -202,7 +202,7 @@ fn candidate<'a>(index: &'a Index, query: &Query, id: EntryId, scratch: &'a mut 
         created: index.created(id),
         depth: if query.needs_depth() { index.depth(id) } else { 0 },
         children: if query.needs_children() && index.is_dir(id) {
-            index.children(id).iter().map(|&c| index.name(c)).collect()
+            index.children(id).map(|c| index.name(c)).collect()
         } else {
             Vec::new()
         },

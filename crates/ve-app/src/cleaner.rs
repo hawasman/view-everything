@@ -776,6 +776,7 @@ impl CleanerPage {
 
 impl Render for CleanerPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("CleanerPage::render");
         self.refresh(cx);
         let p = palette(cx);
         let (muted, warning) = (p.muted, p.warning);

@@ -80,6 +80,7 @@ impl CategoryPanel {
 
 impl Render for CategoryPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("CategoryPanel::render");
         let p = palette(cx);
         let (muted, rule, free, hover, text) = (p.muted, p.rule, p.free, p.active, p.text);
         let cats = Category::ALL.map(|c| p.category(c));

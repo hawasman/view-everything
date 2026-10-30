@@ -138,7 +138,7 @@ fn summarize_with(
         let mut seen_links = HashSet::new();
         let mut stack = vec![volume.root];
         while let Some(dir) = stack.pop() {
-            for &child in index.children(dir) {
+            for child in index.children(dir) {
                 if index.is_dir(child) {
                     stack.push(child);
                     continue;
@@ -344,11 +344,12 @@ mod tests {
     use super::*;
     use ve_core::{EntryMeta, QueryContext, SyncState};
 
+    /// `modified` is in seconds: the Index keeps times to the second.
     fn file(size: u64, modified: i64) -> EntryMeta {
         EntryMeta {
             logical: size,
             on_disk: size,
-            modified,
+            modified: modified * 1_000_000_000,
             ..Default::default()
         }
     }

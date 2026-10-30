@@ -1,7 +1,9 @@
-//! Columns of 64-bit values that nearly always fit in 32 bits (sizes, creation times in
-//! seconds): 4 bytes per Entry, with the rare wide value in a side table.
+//! Compact columns for the Index: 64-bit values that nearly always fit in 32 bits (sizes,
+//! times in seconds) at 4 bytes per Entry, a bitset that can count its members below a row,
+//! and a column that stores only the rows whose value differs from a predictable one.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Marks a row whose value is in the side table.
 const WIDE: u32 = u32::MAX;
@@ -56,6 +58,153 @@ impl U64Column {
     /// The column of `rows` (old row numbers, in their new order), for saving.
     pub fn reordered<'a>(&'a self, rows: &'a [u32]) -> Reordered<'a> {
         Reordered { column: self, rows }
+    }
+
+    pub fn shrink_to_fit(&mut self) {
+        self.narrow.shrink_to_fit();
+        self.wide.shrink_to_fit();
+    }
+}
+
+/// Rows per cumulative count in a [`Rank`]: 8 words of 64 bits.
+const BLOCK: usize = 512;
+
+/// A bitset over rows that answers "how many set rows come before this one" in constant time.
+/// Rows are appended; a bit never changes once pushed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Rank {
+    words: Vec<u64>,
+    /// Set bits in the rows before each block of [`BLOCK`] rows.
+    blocks: Vec<u32>,
+    len: u32,
+    total: u32,
+}
+
+impl Rank {
+    /// Set rows in total.
+    pub fn total(&self) -> usize {
+        self.total as usize
+    }
+
+    pub fn shrink_to_fit(&mut self) {
+        self.words.shrink_to_fit();
+        self.blocks.shrink_to_fit();
+    }
+
+    pub fn push(&mut self, set: bool) {
+        let row = self.len as usize;
+        if row.is_multiple_of(BLOCK) {
+            self.blocks.push(self.total);
+        }
+        if row.is_multiple_of(64) {
+            self.words.push(0);
+        }
+        if set {
+            self.words[row / 64] |= 1 << (row % 64);
+            self.total += 1;
+        }
+        self.len += 1;
+    }
+
+    #[inline]
+    pub fn contains(&self, row: usize) -> bool {
+        self.words[row / 64] & (1 << (row % 64)) != 0
+    }
+
+    /// Set rows before `row`.
+    #[inline]
+    pub fn rank(&self, row: usize) -> usize {
+        let block = row / BLOCK;
+        let word = row / 64;
+        let mut count = self.blocks[block] as usize;
+        for w in &self.words[block * (BLOCK / 64)..word] {
+            count += w.count_ones() as usize;
+        }
+        count + (self.words[word] & ((1u64 << (row % 64)) - 1)).count_ones() as usize
+    }
+}
+
+/// A column whose value at most rows is predictable from other columns (On-disk Size from
+/// Logical Size, creation time from modification time). Only the exceptions are stored:
+/// one bit per row and a value per exception. Changes after loading go to an overlay until
+/// the Index is saved and loaded again, so an exception can appear or vanish without moving
+/// every value after it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct SparseColumn {
+    present: Rank,
+    /// The exceptions, in row order.
+    values: U64Column,
+    /// Rows whose current value is in `changed`.
+    #[serde(skip)]
+    changed_bits: Vec<u64>,
+    /// `None` means the row now has the predicted value.
+    #[serde(skip)]
+    changed: HashMap<u32, Option<u64>>,
+}
+
+impl SparseColumn {
+    pub fn shrink_to_fit(&mut self) {
+        self.present.shrink_to_fit();
+        self.values.shrink_to_fit();
+        self.changed.shrink_to_fit();
+    }
+
+    /// `None` where the row holds the predicted value.
+    #[inline]
+    pub fn get(&self, row: usize) -> Option<u64> {
+        if let Some(word) = self.changed_bits.get(row / 64)
+            && word & (1 << (row % 64)) != 0
+        {
+            return self.changed[&(row as u32)];
+        }
+        self.present.contains(row).then(|| self.values.get(self.present.rank(row)))
+    }
+
+    pub fn push(&mut self, value: Option<u64>) {
+        self.present.push(value.is_some());
+        if let Some(v) = value {
+            self.values.push(v);
+        }
+    }
+
+    pub fn set(&mut self, row: usize, value: Option<u64>) {
+        if self.get(row) == value {
+            return;
+        }
+        let present = self.present.contains(row);
+        let word = row / 64;
+        let bit = 1 << (row % 64);
+        match value {
+            // A stored exception takes its new value in place; anything else is a change to overlay.
+            Some(v) if present => {
+                self.values.set(self.present.rank(row), v);
+                if self.changed.remove(&(row as u32)).is_some() {
+                    self.changed_bits[word] &= !bit;
+                }
+            }
+            None if !present => {
+                if self.changed.remove(&(row as u32)).is_some() {
+                    self.changed_bits[word] &= !bit;
+                }
+            }
+            _ => {
+                if self.changed_bits.len() <= word {
+                    self.changed_bits.resize(word + 1, 0);
+                }
+                self.changed_bits[word] |= bit;
+                self.changed.insert(row as u32, value);
+            }
+        }
+    }
+
+    /// The column `rows` (old row numbers, in their new order) would make if pushed in that
+    /// order: compact, without the overlay.
+    pub fn reordered(&self, rows: &[u32]) -> SparseColumn {
+        let mut out = SparseColumn::default();
+        for &r in rows {
+            out.push(self.get(r as usize));
+        }
+        out
     }
 }
 
@@ -117,6 +266,53 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rank_counts_set_rows_across_word_and_block_edges() {
+        let mut r = Rank::default();
+        let set = |row: usize| row.is_multiple_of(3) || row == 511 || row == 512 || row == 1023;
+        for row in 0..1500 {
+            r.push(set(row));
+        }
+        let mut expected = 0;
+        for row in 0..1500 {
+            assert_eq!((r.contains(row), r.rank(row)), (set(row), expected), "row {row}");
+            expected += usize::from(set(row));
+        }
+        assert_eq!(r.total(), expected);
+    }
+
+    #[test]
+    fn a_sparse_column_keeps_exceptions_in_place_and_changes_in_the_overlay() {
+        let mut c = SparseColumn::default();
+        for row in 0..700 {
+            c.push((row % 100 == 50).then_some(row as u64 * 10));
+        }
+        assert_eq!((c.get(49), c.get(50), c.get(650)), (None, Some(500), Some(6500)));
+        c.set(50, Some(7)); // stored exception: changed in place
+        c.set(150, None); // stored exception, now predicted: overlaid
+        c.set(600, Some(u64::MAX)); // predicted, now an exception: overlaid, and wide
+        c.set(601, None); // no change
+        c.set(650, Some(1)); // overlaid? no: in place
+        assert_eq!(
+            (c.get(50), c.get(150), c.get(600), c.get(601), c.get(650)),
+            (Some(7), None, Some(u64::MAX), None, Some(1))
+        );
+        assert_eq!(c.changed.len(), 2);
+        c.set(600, None); // back to predicted: the overlay entry goes
+        c.set(150, Some(1500)); // back to its stored value: in place, the overlay entry goes
+        assert_eq!((c.get(600), c.get(150), c.changed.len()), (None, Some(1500), 0));
+        c.set(600, Some(3));
+        // A compact copy serialises as the column pushed in that order would.
+        let rows: Vec<u32> = (0..700).rev().collect();
+        let mut built = SparseColumn::default();
+        for &r in &rows {
+            built.push(c.get(r as usize));
+        }
+        let copy = c.reordered(&rows);
+        assert_eq!(bincode::serialize(&copy).unwrap(), bincode::serialize(&built).unwrap());
+        assert_eq!((copy.get(699 - 600), copy.get(699 - 50)), (Some(3), Some(7)));
+    }
 
     #[test]
     fn values_round_trip_across_the_32_bit_boundary_and_through_set() {

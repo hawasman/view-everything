@@ -53,8 +53,8 @@ pub struct CategoryRow {
 #[derive(Default)]
 pub struct FileOrder {
     generation: Option<u64>,
-    /// On-disk Sizes, largest first; `ids[i]` is the file of `sizes[i]`. Two Vecs, 12 bytes a file.
-    sizes: Vec<u64>,
+    /// File ids, largest On-disk Size first; 4 bytes a file. The sizes are read back from the
+    /// Index, which is still at `generation` while this order is used.
     ids: Vec<u32>,
 }
 
@@ -115,7 +115,6 @@ impl FileOrder {
         if cancelled() {
             return false;
         }
-        self.sizes = files.iter().map(|&(size, _)| size).collect();
         self.ids = files.iter().map(|&(_, id)| id).collect();
         self.generation = Some(generation);
         true
@@ -155,10 +154,10 @@ impl View {
             .collect();
         dirs.par_sort_by_key(|&(size, _)| std::cmp::Reverse(size));
         // Where each folder slots into the file order: after the files of equal size.
-        let files = &order.sizes;
+        let files = &order.ids;
         let slots: Vec<(usize, u32)> = dirs
             .iter()
-            .map(|&(size, dir)| (files.partition_point(|&s| s >= size), dir))
+            .map(|&(size, dir)| (files.partition_point(|&id| index.on_disk(EntryId(id)) >= size), dir))
             .collect();
         // Each worker turns one stretch of the file order into the matching files and the folders
         // that fall in it; the stretches join in order.
@@ -221,11 +220,7 @@ fn focus(index: &Index, filter: &Filter) -> Option<EntryId> {
         .max_by_key(|&id| filter.totals(index, id).on_disk)
         .or_else(|| roots().next())?;
     loop {
-        let mut shown = index
-            .children(folder)
-            .iter()
-            .copied()
-            .filter(|&c| index.is_live(c) && filter.is_shown(c));
+        let mut shown = index.children(folder).filter(|&c| index.is_live(c) && filter.is_shown(c));
         match (shown.next(), shown.next()) {
             (Some(only), None) if index.is_dir(only) && !filter.is_matched(only) => folder = only,
             _ => return Some(folder),
@@ -373,7 +368,7 @@ mod order_tests {
         assert!(order.generation.is_none());
         assert!(!order.ensure(&index, &|| true));
         assert!(order.ensure(&index, &|| false));
-        assert_eq!(order.sizes.len(), 10);
+        assert_eq!(order.ids.len(), 10);
     }
 
     #[::core::prelude::v1::test]

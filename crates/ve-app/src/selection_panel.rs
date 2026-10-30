@@ -47,7 +47,7 @@ fn count_folders(index: &ve_scan::SharedIndex, view: &View, dir: EntryId) -> u64
     let mut folders = 0;
     while let Some(id) = stack.pop() {
         let index = index.read();
-        for &child in index.children(id) {
+        for child in index.children(id) {
             if index.is_dir(child) && view.filter.is_shown(child) {
                 folders += 1;
                 stack.push(child);
@@ -151,6 +151,7 @@ impl SelectionPanel {
 
 impl Render for SelectionPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("SelectionPanel::render");
         let p = palette(cx);
         let shared = self.shared.clone();
         let index = shared.index.read();

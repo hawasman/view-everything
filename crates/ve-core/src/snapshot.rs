@@ -81,7 +81,7 @@ impl Snapshot {
                 s.name_start.push(s.names.len() as u32);
                 s.logical.push(totals.logical);
                 s.on_disk.push(totals.on_disk);
-                stack.extend(index.children(dir).iter().filter(|&&c| index.is_dir(c)).map(|&c| (c, at)));
+                stack.extend(index.children(dir).filter(|&c| index.is_dir(c)).map(|c| (c, at)));
             }
         }
         s
@@ -185,7 +185,7 @@ impl Snapshot {
                         new: true,
                     },
                 };
-                for &child in index.children(dir) {
+                for child in index.children(dir) {
                     if index.is_dir(child) {
                         let child_twin = twin.and_then(|t| by_parent.get(&(t, index.name(child))).copied());
                         stack.push((child, child_twin));

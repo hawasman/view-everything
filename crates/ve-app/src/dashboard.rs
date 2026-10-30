@@ -447,6 +447,7 @@ fn tilde(folder: &str) -> String {
 
 impl Render for DashboardPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("DashboardPage::render");
         let p = palette(cx);
         let now = chrono::Utc::now().timestamp();
         let locations = self.locations();

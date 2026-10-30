@@ -27,6 +27,7 @@ mod settings;
 mod settings_page;
 mod tasks;
 mod theme;
+mod trace;
 mod trash;
 mod tray;
 mod tray_icon;

@@ -34,7 +34,7 @@ fn main() {
             v.identity,
             v.mount.display(),
             if v.online { "ONLINE" } else { "OFFLINE" },
-            index.children(v.root).len()
+            index.children(v.root).count()
         );
     }
 }

@@ -2,10 +2,15 @@
 
 ## Unreleased
 
-### Less memory
-- The Index takes about 14% less memory: sizes and creation times are stored in 4 bytes each, with the rare larger value kept aside. On a 5.6M-Entry Index the app uses 403 MiB instead of 465 MiB.
-- Saving the Index no longer makes a full copy of it first, so memory no longer doubles for a moment at every save (peak 446 MiB instead of 941 MiB on the same Index).
-- An Index saved by v0.2 is converted when loaded, without a new Sync. Creation times are kept to the second.
+### Half the memory
+- The Index takes about half the memory it did: on a 5.6M-Entry Index, 211 MiB instead of 424 MiB, and the app sits at about 270 MiB after a Sync instead of 400 MiB. Each distinct name is stored once (1.8M names for 5.6M Entries), a folder's children are one run of ids rather than a list, and On-disk Size and creation time are stored only where they differ from the usual (Logical Size rounded to 4 KiB; the modification time). The saved file is 208 MB instead of 470 MB and loads in a quarter of a second.
+- Times are kept to the second. The JSON export's `modified_ns` field stays, as whole seconds.
+- Saving the Index no longer makes a full copy of it first, so memory no longer doubles for a moment at every save.
+- An Index saved by v0.2 is converted when loaded, without a new Sync.
+
+### Smooth while syncing
+- The window no longer stutters while a Sync runs. Each frame read the Index behind every walker thread that had a folder ready to write, up to 0.7 s on a 24-thread machine; writers now queue on a gate, so a frame waits for one write at most.
+- `VE_FRAME_TRACE=<ms>` prints the views whose render took longer than that, for finding slow frames.
 
 ## v0.2.0
 

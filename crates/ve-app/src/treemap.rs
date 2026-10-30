@@ -306,9 +306,8 @@ fn layout_tiles(index: &Index, filter: &Filter, categories: &CategoryMap, root: 
         // `parent` is marked subdivided when its first child tile is pushed, below.
         let mut items: Vec<(f64, Option<EntryId>)> = index
             .children(dir)
-            .iter()
-            .filter(|&&c| filter.is_shown(c))
-            .map(|&c| (filter.totals(index, c).on_disk as f64, Some(c)))
+            .filter(|&c| filter.is_shown(c))
+            .map(|c| (filter.totals(index, c).on_disk as f64, Some(c)))
             .filter(|(size, _)| *size > 0.0)
             .collect();
         items.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
@@ -377,7 +376,7 @@ pub fn dominant_category(index: &Index, filter: &Filter, categories: &CategoryMa
     let mut stack = vec![dir];
     let mut seen = 0;
     while let Some(id) = stack.pop() {
-        for &child in index.children(id) {
+        for child in index.children(id) {
             if !filter.is_shown(child) {
                 continue;
             }
@@ -995,6 +994,7 @@ impl Treemap {
 
 impl Render for Treemap {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("Treemap::render");
         // A repaint is what the engine and the layout thread ask for after publishing, so this is
         // where the panel takes up a new View or finished layout.
         self.last_paint = Instant::now();

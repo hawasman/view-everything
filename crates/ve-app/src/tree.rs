@@ -255,7 +255,7 @@ impl TreeList {
         while let Some(row) = stack.pop() {
             self.rows.push(row);
             if row.gone.is_none() && self.expanded.contains(&row.id) {
-                let children = index.children(row.id).to_vec();
+                let children: Vec<EntryId> = index.children(row.id).collect();
                 let mut children = self.shown(&index, &view, Some(row.id), children, row.depth + 1);
                 children.reverse();
                 stack.extend(children);
@@ -439,7 +439,7 @@ impl TableDelegate for TreeList {
                 Some(Cells {
                     depth,
                     name: index.display_name(id).to_owned(),
-                    expandable: index.children(id).iter().any(|&c| view.filter.is_shown(c)),
+                    expandable: index.children(id).any(|c| view.filter.is_shown(c)),
                     open: self.expanded.contains(&id),
                     muted: !view.query.trim().is_empty() && !view.filter.is_matched(id),
                     category: match (is_dir, index.parent(id)) {

@@ -271,7 +271,7 @@ fn newest_file(index: &Index, id: EntryId) -> i64 {
     let (mut newest, mut stack) = (0, vec![id]);
     while let Some(current) = stack.pop() {
         if index.is_dir(current) {
-            stack.extend_from_slice(index.children(current));
+            stack.extend(index.children(current));
         } else {
             newest = newest.max(index.modified(current));
         }
@@ -344,7 +344,7 @@ pub fn find(
             modified: index.modified(id),
             depth: 0,
             children: if needs_children && is_dir {
-                index.children(id).iter().map(|&c| index.name(c)).collect()
+                index.children(id).map(|c| index.name(c)).collect()
             } else {
                 Vec::new()
             },
@@ -433,7 +433,7 @@ fn subtree_sizes(index: &Index, id: EntryId) -> (u64, Vec<(String, Totals)>) {
         let on_disk = index.on_disk(current);
         total += on_disk;
         if index.is_dir(current) {
-            stack.extend_from_slice(index.children(current));
+            stack.extend(index.children(current));
         } else {
             let ext = extension(index.name(current)).unwrap_or("");
             let totals = match by_ext.get_mut(ext) {

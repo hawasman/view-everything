@@ -471,6 +471,12 @@ fn run_indexer(
                 save_if_changed(shared, index_path.as_deref(), &mut saved_generation, !quiet);
                 last_save = Instant::now();
             }
+            // A journal poll inserts a few Entries every few seconds; only a full sync's end
+            // is worth rebuilding the name lookup for when the next insert comes.
+            if !quiet {
+                shared.index.write().idle();
+                release_freed_memory();
+            }
         }
         if shared.busy.swap(false, Ordering::Relaxed) {
             shared.set_phase(Phase::Idle);
@@ -845,7 +851,7 @@ fn sync_volumes(
             && volumes
                 .iter()
                 .filter_map(|&id| index.volume(id))
-                .any(|v| !index.children(v.root).is_empty());
+                .any(|v| index.has_children(v.root));
         (mounts, catching_up)
     };
     if !quiet {
@@ -952,6 +958,18 @@ fn sync_volumes(
     let cancelled = shared.progress.cancelled();
     shared.progress.cancel.store(false, Ordering::Relaxed);
     cancelled
+}
+
+/// Gives the memory a sync freed back to the OS. A walk allocates and frees millions of
+/// names and per-folder maps across the rayon threads, and glibc keeps whole free pages in
+/// each thread's arena until asked (about 100 MiB after the launch Catch-up of a 5.6M-Entry
+/// Index). Other allocators return pages on their own.
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim takes no pointers and only releases free pages inside the allocator.
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
 /// Saves the Index if an Entry changed since the last save, or always when `force`.

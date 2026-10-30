@@ -10,3 +10,9 @@ license = "MIT OR Apache-2.0"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Release speed with line tables, for samply/perf: cargo build -p ve-app --profile profiling
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = false

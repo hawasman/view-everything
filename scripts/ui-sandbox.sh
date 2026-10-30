@@ -3,6 +3,7 @@
 # without touching the user's screen, mouse, keyboard or focus.
 #
 #   scripts/ui-sandbox.sh start [NAME] [WIDTHxHEIGHT]  start a sandbox (default NAME=default, 1600x1000)
+#   scripts/ui-sandbox.sh perf  [NAME] [WIDTHxHEIGHT]  the same under MangoHud: frame times, GPU/CPU load, CSV logs
 #   scripts/ui-sandbox.sh click NAME X Y [BUTTON]      move, settle, click at screen pixel X,Y
 #   scripts/ui-sandbox.sh key   NAME KEYS...           xdotool key, e.g. ctrl+f Escape
 #   scripts/ui-sandbox.sh type  NAME TEXT              type literal text
@@ -146,6 +147,27 @@ EOF
     die "the app window did not appear within 30 s"
 }
 
+# A sandbox whose app runs under MangoHud (Vulkan layer): fps and frame-time graph top-right,
+# and a frame-time CSV written to $d/mangohud/ every 60 s.
+perf() {
+    local name=${1:-default}; valid_name "$name"
+    need mangohud
+    local d=$BASE/$name bin=${VE_BIN:-}
+    if [[ -z $bin ]]; then
+        bin=$ROOT/target/release/view-everything
+        [[ -x $bin ]] || bin=$ROOT/target/debug/view-everything
+    fi
+    mkdir -p "$d.perf"
+    cat >"$d.perf/wrap.sh" <<EOF
+#!/bin/sh
+mkdir -p $(printf %q "$d/mangohud")
+export MANGOHUD_CONFIG=fps,frametime,frame_timing,cpu_stats,gpu_stats,ram,vram,position=top-right,output_folder=$(printf %q "$d/mangohud"),log_duration=60,autostart_log=1,log_interval=100
+exec mangohud $(printf %q "$bin") "\$@"
+EOF
+    chmod +x "$d.perf/wrap.sh"
+    VE_BIN=$d.perf/wrap.sh start "$name" "${2:-1600x1000}"
+}
+
 stop() {
     local name=${1:-}; valid_name "$name"
     local d=$BASE/$name
@@ -153,7 +175,7 @@ stop() {
     # The scope holds everything the sandbox started: KWin, Xwayland, the app, the bus and any
     # services the bus activated. Stopping it sends SIGTERM, then SIGKILL after 5 s.
     systemctl --user stop "ve-ui-sandbox-$name.scope" 2>/dev/null || true
-    rm -rf "${d:?}"
+    rm -rf "${d:?}" "$d.perf"
     echo "sandbox '$name' stopped"
 }
 
@@ -170,6 +192,7 @@ shot() {
 cmd=${1:-}; shift || true
 case $cmd in
     start) start "$@" ;;
+    perf) perf "$@" ;;
     stop) stop "$@" ;;
     shot) shot "$@" ;;
     click)
@@ -180,5 +203,5 @@ case $cmd in
     type) (($# == 2)) || die "usage: type NAME TEXT"; xdo "$1" type --delay 20 -- "$2" ;;
     xdo) (($# >= 2)) || die "usage: xdo NAME ARGS..."; xdo "$@" ;;
     list) for d in "$BASE"/*/; do [[ -f $d/pid ]] && kill -0 "$(<"$d/pid")" 2>/dev/null && basename "$d"; done 2>/dev/null || true ;;
-    *) sed -n '2,20p' "$0"; exit 2 ;;
+    *) sed -n '2,21p' "$0"; exit 2 ;;
 esac

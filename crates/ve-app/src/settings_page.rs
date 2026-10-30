@@ -1594,6 +1594,7 @@ fn section(title: &'static str, note: &'static str, body: impl IntoElement, cx: 
 
 impl Render for SettingsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("SettingsPage::render");
         let p = palette(cx);
         let (rule, muted, border) = (p.rule, p.muted, p.border);
         let rows: Vec<_> = (0..self.volumes.len()).map(|ix| self.volume_row(ix, cx)).collect();

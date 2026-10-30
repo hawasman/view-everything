@@ -28,17 +28,69 @@ pub use reconcile::reconcile;
 pub use remote::reconcile_remotes;
 pub use volumes::{VolumeInfo, discover_volumes};
 
-use parking_lot::RecursiveRwLock;
+use parking_lot::{Mutex, MutexGuard, RecursiveRwLock, RecursiveRwLockReadGuard, RecursiveRwLockWriteGuard};
 use std::io;
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use ve_core::{Index, SyncState, VolumeId};
 
 /// The Index as shared between scanners, the View computation and the GUI.
 ///
-/// Recursive, so a new reader is admitted while a writer waits: the GUI's per-frame read must
-/// not queue behind a scanner that is itself waiting for a long View computation to finish.
-pub type SharedIndex = RecursiveRwLock<Index>;
+/// Reads are recursive, so a new reader is admitted while a writer waits: the GUI's per-frame
+/// read must not queue behind a scanner that is itself waiting for a long View computation to
+/// finish. Writers queue on a gate before the lock, so at most one is ever waiting at the lock
+/// itself: a frame that arrives while a scanner writes waits for that one write, not for every
+/// walker thread that has a folder listing ready (measured at up to 0.7 s per frame on a
+/// 24-thread machine during the launch Catch-up).
+pub struct SharedIndex {
+    index: RecursiveRwLock<Index>,
+    writers: Mutex<()>,
+}
+
+/// Exclusive access to the Index; also holds the writers' gate until dropped.
+pub struct IndexWriteGuard<'a> {
+    index: RecursiveRwLockWriteGuard<'a, Index>,
+    _gate: MutexGuard<'a, ()>,
+}
+
+impl SharedIndex {
+    pub fn new(index: Index) -> Self {
+        SharedIndex {
+            index: RecursiveRwLock::new(index),
+            writers: Mutex::new(()),
+        }
+    }
+
+    pub fn read(&self) -> RecursiveRwLockReadGuard<'_, Index> {
+        self.index.read()
+    }
+
+    pub fn write(&self) -> IndexWriteGuard<'_> {
+        let gate = self.writers.lock();
+        IndexWriteGuard {
+            index: self.index.write(),
+            _gate: gate,
+        }
+    }
+
+    pub fn into_inner(self) -> Index {
+        self.index.into_inner()
+    }
+}
+
+impl Deref for IndexWriteGuard<'_> {
+    type Target = Index;
+    fn deref(&self) -> &Index {
+        &self.index
+    }
+}
+
+impl DerefMut for IndexWriteGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Index {
+        &mut self.index
+    }
+}
 
 /// Counters a running sync updates, for display.
 #[derive(Debug, Default)]
