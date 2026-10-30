@@ -457,8 +457,9 @@ impl FiltersPanel {
         });
     }
 
+    /// A filter as the column stacks it: its toggle above its control.
     fn row(label: impl IntoElement, body: impl IntoElement) -> Div {
-        h_flex().gap_3().items_center().child(div().w(px(130.)).child(label)).child(body)
+        v_flex().gap_1().child(label).child(body)
     }
 
     fn toggle(&self, id: &'static str, label: &'static str, on: bool, set: fn(&mut Filters, bool), cx: &mut Context<Self>) -> Checkbox {
@@ -502,12 +503,19 @@ impl FiltersPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let danger = cx.theme().danger;
+        // The bound and its units wrap as two groups, so a narrow column puts the units under it.
         h_flex()
             .gap_2()
+            .flex_wrap()
             .items_center()
-            .child(label)
-            .child(div().w(px(90.)).child(Input::new(input)))
-            .children(Unit::ALL.map(|unit| {
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().w(px(56.)).child(label))
+                    .child(div().w(px(80.)).child(Input::new(input))),
+            )
+            .child(h_flex().gap_1().children(Unit::ALL.map(|unit| {
                 let button = Button::new((id, unit as usize)).label(unit.label()).xsmall();
                 let button = if bound.unit == unit { button.primary() } else { button.ghost() };
                 button.on_click(cx.listener(move |this, _, _, cx| {
@@ -517,7 +525,7 @@ impl FiltersPanel {
                         f.size.on = true;
                     });
                 }))
-            }))
+            })))
             .when(bound.invalid(), |row| {
                 row.child(div().text_color(danger).text_size(px(crate::theme::FS_BODY)).child("not a number"))
             })
@@ -558,7 +566,7 @@ impl FiltersPanel {
             )
             .child(
                 div()
-                    .w(px(320.))
+                    .w_full()
                     .child(DatePicker::new(&self.dates).cleanable(true).placeholder(placeholder)),
             )
     }
@@ -569,7 +577,7 @@ impl Render for FiltersPanel {
         let _span = crate::trace::span("FiltersPanel::render");
         let f = self.form.clone();
         let muted = cx.theme().muted_foreground;
-        let wide = |input: &Entity<InputState>| div().w(px(320.)).child(Input::new(input));
+        let wide = |input: &Entity<InputState>| div().w_full().child(Input::new(input));
         crate::ui::panel(cx)
             .id("filters")
             .size_full()

@@ -10,6 +10,9 @@
 - The Selection panel's facts and actions moved into the Inspector; the Treemap takes the whole right column.
 - One set of controls: buttons are flat and square-cornered (one dark primary per screen), tabs are underlined, choices are segmented; cards have a 1px edge and 8px corners; five type sizes; no serif. The chrome carries no colour; teal marks data only (used bars, progress, the Snapshot tick).
 - The Index box and the user block left the sidebar; Done Tasks are grey, not green.
+- The **Cleaner** shows every Cleanable of a group in one scrolling list; the pager and the per-page choice are gone. Only the rows in view are drawn, so hundreds of thousands of Cleanables scroll smoothly.
+- **Duplicates** lists one row per group under its title and facts (groups, copies, wasted space). Clicking a group opens it in the Inspector: its copies (click one to keep it), Open, Show in Browse and Trash others….
+- On Browse, **Filters** opens as a column beside the Treemap instead of replacing it, so the Treemap redraws as you narrow the Query.
 
 ### Query modifiers
 - New Query modifiers: `kind:file` and `kind:folder`; `is:cleanable` (what the Cleaner found), `is:duplicate` (same as `dupe:`) and `is:offline` (Entries on an Offline Volume); `at:/path` (a folder and everything below it); `since:7d`, `since:12h`, `since:2026-10-01` (files modified since then). They combine with text, `|`, `!` and every other modifier.

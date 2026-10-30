@@ -6,6 +6,7 @@ use crate::theme::{
 };
 use gpui_kit::component::h_flex;
 use gpui_kit::component::progress::Progress;
+use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::v_flex;
@@ -23,6 +24,25 @@ pub fn panel(cx: &App) -> Div {
         .rounded(px(RADIUS_CARD))
         .p(px(CARD_PAD))
         .min_w_0()
+}
+
+/// A virtualised list filling its parent, with a vertical scrollbar over its right edge and the
+/// rows kept clear of it.
+pub fn scrolling_list(list: UniformList, scroll: &UniformListScrollHandle) -> Div {
+    div()
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .child(list.size_full().pr(Scrollbar::width() + px(4.)).track_scroll(scroll))
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .w(Scrollbar::width())
+                .child(Scrollbar::vertical(scroll).viewport_from_layout().max_fps(60)),
+        )
 }
 
 /// A muted caption (`FS_SMALL`).
