@@ -473,7 +473,7 @@ impl<'a> Applier<'a> {
             let index = index.read();
             let mut stack = vec![(root, String::new())];
             while let Some((dir, path)) = stack.pop() {
-                for &child in index.children(dir) {
+                for child in index.children(dir) {
                     unseen.insert((dir, index.name(child).to_owned()), child);
                     if index.is_dir(child) {
                         let p = if path.is_empty() {

@@ -37,7 +37,7 @@ fn add(index: &SharedIndex, path: &str) -> ve_core::VolumeId {
 }
 
 fn names(index: &Index, dir: ve_core::EntryId) -> Vec<String> {
-    let mut v: Vec<_> = index.children(dir).iter().map(|&c| index.name(c).to_owned()).collect();
+    let mut v: Vec<_> = index.children(dir).map(|c| index.name(c).to_owned()).collect();
     v.sort();
     v
 }
@@ -61,7 +61,7 @@ fn captured_find_output_is_indexed_with_hard_links_counted_once() {
     let a = index.child_named(root, "a.txt").unwrap();
     assert_eq!((index.logical(a), index.on_disk(a)), (5, 4096));
     assert_eq!(index.created(a), 1_600_000_000_000_000_000);
-    assert_eq!(index.modified(a), 1_704_164_645_678_901_234);
+    assert_eq!(index.modified(a), 1_704_164_645_000_000_000, "kept to the second");
     assert_eq!(progress.entries(), 9);
     // big.bin has two names (inode 553036, 2 links): its 10000 bytes and 24 blocks count once.
     let big = index.child_named(docs, "big.bin").unwrap();
@@ -365,7 +365,7 @@ fn a_server_without_gnu_find_is_indexed_over_sftp_and_remembered() {
         let secs = mtime.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         assert_eq!(index.modified(f), secs * 1_000_000_000);
         let many = index.child_named(root, "many").unwrap();
-        assert_eq!(index.children(many).len(), 2540);
+        assert_eq!(index.children(many).count(), 2540);
         assert_eq!(Filter::compute(&index, None).totals(&index, root).logical, 3000 + 1 + 1 + 1 + 40);
         assert_eq!(progress.entries(), 1 + 4 + 2 + 1 + 2540 + 40);
     }

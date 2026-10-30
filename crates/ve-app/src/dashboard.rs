@@ -12,8 +12,9 @@ use crate::trash::{self, Trash};
 use crate::ui::{Tone, caption, panel, pill, swatch, tag};
 use chrono::{Local, TimeZone, Timelike};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, Size, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use parking_lot::Mutex;
@@ -447,6 +448,7 @@ fn tilde(folder: &str) -> String {
 
 impl Render for DashboardPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("DashboardPage::render");
         let p = palette(cx);
         let now = chrono::Utc::now().timestamp();
         let locations = self.locations();
@@ -904,12 +906,16 @@ impl DashboardPage {
         let cleaner = panel(cx)
             .child(div().font_weight(FontWeight::MEDIUM).child("Cleaner"))
             .child(div().mt(px(12.)).text_size(px(32.)).line_height(px(38.)).child(if looking {
-                "…".to_owned()
+                h_flex()
+                    .h(px(38.))
+                    .items_center()
+                    .child(Spinner::new().with_size(Size::Large).color(p.muted))
+                    .into_any_element()
             } else {
-                format::size(reclaim)
+                format::size(reclaim).into_any_element()
             }))
             .child(div().text_xs().text_color(p.muted).mb(px(16.)).child(if looking {
-                "Looking for Cleanables.".to_owned()
+                "Looking for Cleanables…".to_owned()
             } else {
                 format!(
                     "Could be reclaimed from {} Cleanable{}.",

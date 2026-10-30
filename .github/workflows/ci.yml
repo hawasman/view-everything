@@ -23,9 +23,9 @@ jobs:
       - run: cargo fmt --all --check
 
   # Links between the README and docs/ pages, and their #anchors. Offline: web links are not
-  # fetched, so a flaky site never fails CI.
+  # fetched, so a flaky site never fails CI. The lychee binary needs glibc 2.39 (Ubuntu 24.04).
   links:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: lycheeverse/lychee-action@v2

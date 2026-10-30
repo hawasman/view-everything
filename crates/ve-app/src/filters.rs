@@ -566,6 +566,7 @@ impl FiltersPanel {
 
 impl Render for FiltersPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("FiltersPanel::render");
         let f = self.form.clone();
         let muted = cx.theme().muted_foreground;
         let wide = |input: &Entity<InputState>| div().w(px(320.)).child(Input::new(input));

@@ -1,5 +1,9 @@
+use crate::column::{Rank, Seq, SparseColumn, U64Column};
+use hashbrown::HashTable;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
+use std::hash::{BuildHasher, RandomState};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -619,17 +623,132 @@ const HARDLINK: u8 = 2;
 const REMOVED: u8 = 4;
 const NO_PARENT: u32 = u32::MAX;
 const NO_SLOT: u32 = u32::MAX;
+/// Allocation unit assumed for On-disk Size: a file's Logical Size rounded up to this is the
+/// predicted value, and only files that differ are stored.
+const BLOCK_SIZE: u64 = 4096;
 
 const MAGIC: &[u8; 8] = b"VEINDEX\0";
-/// v2 adds Last Synced and capacity per Volume; v3 adds the Volume's identity; v4 adds Remotes; v5 adds creation time.
-const FORMAT_VERSION: u32 = 5;
+/// v2 adds Last Synced and capacity per Volume; v3 adds the Volume's identity; v4 adds Remotes; v5 adds creation time;
+/// v6 stores sizes and creation time (in seconds) in 4 bytes per Entry; v7 interns names, keeps
+/// modification time in seconds, stores children as id ranges and only the unpredictable
+/// On-disk Sizes and creation times.
+const FORMAT_VERSION: u32 = 7;
+
+/// A time as stored: whole seconds since the Unix epoch, as the bits of an `i64`.
+fn secs(nanos: i64) -> u64 {
+    nanos.div_euclid(1_000_000_000) as u64
+}
+
+/// A stored time back in nanoseconds.
+fn nanos(secs: u64) -> i64 {
+    (secs as i64).saturating_mul(1_000_000_000)
+}
+
+/// What On-disk Size is expected to be, so only the exceptions are stored.
+fn predicted_on_disk(is_dir: bool, logical: u64) -> u64 {
+    if is_dir {
+        0
+    } else {
+        logical.div_ceil(BLOCK_SIZE).saturating_mul(BLOCK_SIZE)
+    }
+}
+
+/// Every distinct Entry name once; an Entry refers to its name by number.
+#[derive(Serialize, Deserialize)]
+struct Names {
+    /// Where each name starts in `bytes`; one more entry than names.
+    starts: Vec<u32>,
+    bytes: String,
+    /// Name number by name. Only inserting needs it: built by the first [`Names::intern`]
+    /// after a load, dropped by [`Index::idle`].
+    #[serde(skip)]
+    lookup: Option<(RandomState, HashTable<u32>)>,
+}
+
+impl Default for Names {
+    fn default() -> Self {
+        Names {
+            starts: vec![0],
+            bytes: String::new(),
+            lookup: None,
+        }
+    }
+}
+
+impl Names {
+    #[inline]
+    fn get(&self, n: u32) -> &str {
+        &self.bytes[self.starts[n as usize] as usize..self.starts[n as usize + 1] as usize]
+    }
+
+    fn len(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    /// The number of `name`, adding it if new.
+    fn intern(&mut self, name: &str) -> u32 {
+        let Names { starts, bytes, lookup } = self;
+        let get = |n: u32| &bytes[starts[n as usize] as usize..starts[n as usize + 1] as usize];
+        let (state, table) = lookup.get_or_insert_with(|| {
+            let state = RandomState::new();
+            let mut table = HashTable::with_capacity(starts.len() - 1);
+            for n in 0..starts.len() as u32 - 1 {
+                table.insert_unique(state.hash_one(get(n)), n, |&m| state.hash_one(get(m)));
+            }
+            (state, table)
+        });
+        let hash = state.hash_one(name);
+        match table.entry(hash, |&n| get(n) == name, |&m| state.hash_one(get(m))) {
+            hashbrown::hash_table::Entry::Occupied(e) => *e.get(),
+            hashbrown::hash_table::Entry::Vacant(e) => {
+                let n = u32::try_from(starts.len() - 1).expect("more than 4 billion distinct names");
+                bytes.push_str(name);
+                starts.push(u32::try_from(bytes.len()).expect("Index name storage exceeds 4 GiB"));
+                e.insert(n);
+                n
+            }
+        }
+    }
+}
 
 /// The persistent record of every Entry on every Indexed Volume.
 ///
 /// Stored column-wise to keep per-Entry overhead small. Removed Entries leave tombstones that
-/// are dropped when the Index is saved.
+/// are dropped when the Index is saved. Entries are numbered depth-first when saved, so after a
+/// load a folder's children are one run of consecutive ids; children added since then are
+/// kept aside until the next save.
 #[derive(Default, Serialize, Deserialize)]
 pub struct Index {
+    parent: Vec<u32>,
+    /// Name number per Entry, into `names`.
+    name: Vec<u32>,
+    flags: Vec<u8>,
+    logical: U64Column,
+    /// On-disk Size where it is not [`predicted_on_disk`].
+    on_disk: SparseColumn,
+    /// See [`secs`].
+    modified: U64Column,
+    /// Creation time (see [`secs`]) where it differs from `modified`.
+    created: SparseColumn,
+    key: U64Column,
+    /// Which Entries are folders; a folder's slot is its rank here.
+    dirs: Rank,
+    /// First id and length of each folder's run of children, by folder slot.
+    child_first: Vec<u32>,
+    child_count: Vec<u32>,
+    /// Children outside their folder's run, by folder slot; only live ones.
+    #[serde(skip)]
+    extra_children: HashMap<u32, Vec<EntryId>>,
+    names: Names,
+    volumes: Vec<Option<Volume>>,
+    live: usize,
+    #[serde(skip)]
+    generation: u64,
+}
+
+/// The format 5 layout, read once and converted.
+#[derive(Deserialize)]
+struct IndexV5 {
     parent: Vec<u32>,
     name_start: Vec<u32>,
     name_len: Vec<u16>,
@@ -639,15 +758,97 @@ pub struct Index {
     modified: Vec<i64>,
     created: Vec<i64>,
     key: Vec<u64>,
-    /// Folder slot per Entry, or `NO_SLOT` for files.
     slot: Vec<u32>,
-    /// Children of each folder, by folder slot.
     children: Vec<Vec<EntryId>>,
     names: String,
     volumes: Vec<Option<Volume>>,
     live: usize,
-    #[serde(skip)]
-    generation: u64,
+}
+
+/// The format 6 layout, read once and converted.
+#[derive(Deserialize)]
+struct IndexV6 {
+    parent: Vec<u32>,
+    name_start: Vec<u32>,
+    name_len: Vec<u16>,
+    flags: Vec<u8>,
+    logical: U64Column,
+    on_disk: U64Column,
+    modified: Vec<i64>,
+    created: U64Column,
+    key: Vec<u64>,
+    slot: Vec<u32>,
+    children: Vec<Vec<EntryId>>,
+    names: String,
+    volumes: Vec<Option<Volume>>,
+    live: usize,
+}
+
+impl From<IndexV5> for IndexV6 {
+    fn from(old: IndexV5) -> IndexV6 {
+        let column = |values: Vec<u64>| {
+            let mut c = U64Column::default();
+            values.into_iter().for_each(|v| c.push(v));
+            c
+        };
+        IndexV6 {
+            logical: column(old.logical),
+            on_disk: column(old.on_disk),
+            created: column(old.created.into_iter().map(secs).collect()),
+            parent: old.parent,
+            name_start: old.name_start,
+            name_len: old.name_len,
+            flags: old.flags,
+            modified: old.modified,
+            key: old.key,
+            slot: old.slot,
+            children: old.children,
+            names: old.names,
+            volumes: old.volumes,
+            live: old.live,
+        }
+    }
+}
+
+impl From<IndexV6> for Index {
+    /// Rebuilds row by row. A saved Index has no tombstones and numbers Entries depth-first,
+    /// so every folder's children form one run; a run that is not consecutive goes aside.
+    fn from(old: IndexV6) -> Index {
+        let n = old.parent.len();
+        let mut index = Index::new();
+        for i in 0..n {
+            let start = old.name_start[i] as usize;
+            let name = &old.names[start..start + old.name_len[i] as usize];
+            // Pushed, not inserted: the run of children is set from the saved lists below.
+            index.push_raw(
+                old.parent[i],
+                name,
+                old.flags[i] & (DIR | HARDLINK),
+                old.logical.get(i),
+                old.on_disk.get(i),
+                secs(old.modified[i]),
+                old.created.get(i),
+                old.key[i],
+            );
+        }
+        for (i, &slot) in old.slot.iter().enumerate() {
+            if slot == NO_SLOT {
+                continue;
+            }
+            debug_assert_eq!(index.dirs.rank(i), slot as usize);
+            let kids = &old.children[slot as usize];
+            let consecutive = kids.windows(2).all(|w| w[1].0 == w[0].0 + 1);
+            if let (true, Some(first)) = (consecutive, kids.first()) {
+                index.child_first[slot as usize] = first.0;
+                index.child_count[slot as usize] = kids.len() as u32;
+            } else if !kids.is_empty() {
+                index.extra_children.insert(slot, kids.clone());
+            }
+        }
+        index.volumes = old.volumes;
+        debug_assert_eq!(index.live, old.live, "a saved Index has no tombstones");
+        index
+    }
 }
 
 impl Index {
@@ -754,9 +955,7 @@ impl Index {
         };
         volume.mount = mount.to_path_buf();
         let root = volume.root;
-        let (start, len) = self.store_name(&mount.to_string_lossy());
-        self.name_start[root.index()] = start;
-        self.name_len[root.index()] = len;
+        self.name[root.index()] = self.names.intern(&mount.to_string_lossy());
         self.touch();
     }
 
@@ -810,39 +1009,73 @@ impl Index {
     pub fn insert(&mut self, parent: EntryId, name: &str, meta: EntryMeta) -> EntryId {
         debug_assert!(self.is_dir(parent) && self.is_live(parent));
         let id = self.push(parent.0, name, meta);
-        let slot = self.slot[parent.index()] as usize;
-        self.children[slot].push(id);
+        self.attach(parent, id);
         id
     }
 
     fn push(&mut self, parent: u32, name: &str, meta: EntryMeta) -> EntryId {
+        self.push_raw(
+            parent,
+            name,
+            flags_for(&meta),
+            meta.logical,
+            meta.on_disk,
+            secs(meta.modified),
+            secs(meta.created),
+            meta.key,
+        )
+    }
+
+    /// Appends a row with times already in stored form, attached to no folder's children.
+    #[allow(clippy::too_many_arguments)]
+    fn push_raw(
+        &mut self,
+        parent: u32,
+        name: &str,
+        flags: u8,
+        logical: u64,
+        on_disk: u64,
+        modified: u64,
+        created: u64,
+        key: u64,
+    ) -> EntryId {
         let id = EntryId(u32::try_from(self.parent.len()).expect("more than 4 billion Entries"));
+        let is_dir = flags & DIR != 0;
         self.parent.push(parent);
-        let (start, len) = self.store_name(name);
-        self.name_start.push(start);
-        self.name_len.push(len);
-        self.flags.push(flags_for(&meta));
-        self.logical.push(meta.logical);
-        self.on_disk.push(meta.on_disk);
-        self.modified.push(meta.modified);
-        self.created.push(meta.created);
-        self.key.push(meta.key);
-        if meta.is_dir {
-            self.slot.push(self.children.len() as u32);
-            self.children.push(Vec::new());
-        } else {
-            self.slot.push(NO_SLOT);
+        let name = self.names.intern(name);
+        self.name.push(name);
+        self.flags.push(flags);
+        self.logical.push(logical);
+        self.on_disk
+            .push((on_disk != predicted_on_disk(is_dir, logical)).then_some(on_disk));
+        self.modified.push(modified);
+        self.created.push((created != modified).then_some(created));
+        self.key.push(key);
+        self.dirs.push(is_dir);
+        if is_dir {
+            self.child_first.push(0);
+            self.child_count.push(0);
         }
         self.live += 1;
         self.touch();
         id
     }
 
-    fn store_name(&mut self, name: &str) -> (u32, u16) {
-        let start = u32::try_from(self.names.len()).expect("Index name storage exceeds 4 GiB");
-        let len = u16::try_from(name.len()).expect("file name longer than 65535 bytes");
-        self.names.push_str(name);
-        (start, len)
+    /// Makes `id` (whose `parent` is already `folder`) one of `folder`'s children: the next id
+    /// in the folder's run extends it, an id already inside the run is covered, any other id
+    /// goes aside.
+    fn attach(&mut self, folder: EntryId, id: EntryId) {
+        debug_assert_eq!(self.parent[id.index()], folder.0);
+        let slot = self.dirs.rank(folder.index());
+        let (first, count) = (self.child_first[slot], self.child_count[slot]);
+        if count == 0 {
+            self.child_first[slot] = id.0;
+            self.child_count[slot] = 1;
+        } else if id.0 == first + count {
+            self.child_count[slot] = count + 1;
+        } else if !(first..first + count).contains(&id.0) {
+            self.extra_children.entry(slot as u32).or_default().push(id);
+        }
     }
 
     /// Replaces an Entry's sizes, time and identity. Whether it is a folder cannot change;
@@ -851,21 +1084,25 @@ impl Index {
         let i = id.index();
         debug_assert_eq!(self.flags[i] & DIR != 0, meta.is_dir);
         let flags = (self.flags[i] & !HARDLINK) | if meta.hardlinked { HARDLINK } else { 0 };
+        let (modified, created) = (secs(meta.modified), secs(meta.created));
         if self.flags[i] == flags
-            && self.logical[i] == meta.logical
-            && self.on_disk[i] == meta.on_disk
-            && self.modified[i] == meta.modified
-            && self.created[i] == meta.created
-            && self.key[i] == meta.key
+            && self.logical.get(i) == meta.logical
+            && self.on_disk(id) == meta.on_disk
+            && self.modified.get(i) == modified
+            && self.created.get(i).unwrap_or(modified) == created
+            && self.key.get(i) == meta.key
         {
             return;
         }
         self.flags[i] = flags;
-        self.logical[i] = meta.logical;
-        self.on_disk[i] = meta.on_disk;
-        self.modified[i] = meta.modified;
-        self.created[i] = meta.created;
-        self.key[i] = meta.key;
+        self.logical.set(i, meta.logical);
+        self.on_disk.set(
+            i,
+            (meta.on_disk != predicted_on_disk(meta.is_dir, meta.logical)).then_some(meta.on_disk),
+        );
+        self.modified.set(i, modified);
+        self.created.set(i, (created != modified).then_some(created));
+        self.key.set(i, meta.key);
         self.touch();
     }
 
@@ -874,12 +1111,9 @@ impl Index {
         debug_assert!(self.is_dir(new_parent) && self.is_live(new_parent));
         self.detach(id);
         self.parent[id.index()] = new_parent.0;
-        let slot = self.slot[new_parent.index()] as usize;
-        self.children[slot].push(id);
+        self.attach(new_parent, id);
         if self.name(id) != new_name {
-            let (start, len) = self.store_name(new_name);
-            self.name_start[id.index()] = start;
-            self.name_len[id.index()] = len;
+            self.name[id.index()] = self.names.intern(new_name);
         }
         self.touch();
     }
@@ -901,8 +1135,13 @@ impl Index {
             return;
         }
         let gone: std::collections::HashSet<EntryId> = ids.iter().copied().collect();
-        let slot = self.slot[dir.index()] as usize;
-        self.children[slot].retain(|c| !gone.contains(c));
+        let slot = self.dirs.rank(dir.index()) as u32;
+        if let Some(extra) = self.extra_children.get_mut(&slot) {
+            extra.retain(|c| !gone.contains(c));
+            if extra.is_empty() {
+                self.extra_children.remove(&slot);
+            }
+        }
         for &id in ids {
             if self.is_live(id) {
                 self.tombstone(id);
@@ -911,26 +1150,68 @@ impl Index {
         self.touch();
     }
 
+    /// Marks `id` and everything beneath it removed. The removed Entries stay in their
+    /// folders' runs (skipped as removed) and leave the side lists.
     fn tombstone(&mut self, id: EntryId) {
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
             let i = current.index();
             self.flags[i] |= REMOVED;
             self.live -= 1;
-            if self.slot[i] != NO_SLOT {
-                stack.append(&mut self.children[self.slot[i] as usize]);
+            if self.dirs.contains(i) {
+                stack.extend(self.children(current));
+                self.extra_children.remove(&(self.dirs.rank(i) as u32));
             }
         }
     }
 
+    /// Takes `id` out of its folder's side list; an id in the folder's run is skipped once its
+    /// parent or removed flag changes.
     fn detach(&mut self, id: EntryId) {
         let parent = self.parent[id.index()];
-        if parent != NO_PARENT {
-            let siblings = &mut self.children[self.slot[parent as usize] as usize];
-            if let Some(pos) = siblings.iter().position(|&c| c == id) {
-                siblings.swap_remove(pos);
+        if parent == NO_PARENT {
+            return;
+        }
+        let slot = self.dirs.rank(parent as usize);
+        let (first, count) = (self.child_first[slot], self.child_count[slot]);
+        if (first..first + count).contains(&id.0) {
+            return;
+        }
+        if let Some(extra) = self.extra_children.get_mut(&(slot as u32)) {
+            if let Some(pos) = extra.iter().position(|&c| c == id) {
+                extra.swap_remove(pos);
+            }
+            if extra.is_empty() {
+                self.extra_children.remove(&(slot as u32));
             }
         }
+    }
+
+    /// Frees what only inserting needs, for when no sync is running: the name lookup table
+    /// and the spare capacity the columns grew by. Reallocating 200 MB of columns holds the
+    /// write lock for a frame or two, so it is done only after real growth (a first scan),
+    /// not after a Catch-up that added a few Entries to a loaded Index.
+    pub fn idle(&mut self) {
+        self.names.lookup = None;
+        let grown = |len: usize, capacity: usize| capacity > len + len / 4;
+        if grown(self.parent.len(), self.parent.capacity()) {
+            self.parent.shrink_to_fit();
+            self.name.shrink_to_fit();
+            self.flags.shrink_to_fit();
+            self.logical.shrink_to_fit();
+            self.on_disk.shrink_to_fit();
+            self.modified.shrink_to_fit();
+            self.created.shrink_to_fit();
+            self.key.shrink_to_fit();
+            self.dirs.shrink_to_fit();
+            self.child_first.shrink_to_fit();
+            self.child_count.shrink_to_fit();
+        }
+        if grown(self.names.bytes.len(), self.names.bytes.capacity()) {
+            self.names.starts.shrink_to_fit();
+            self.names.bytes.shrink_to_fit();
+        }
+        self.extra_children.shrink_to_fit();
     }
 
     #[inline]
@@ -950,8 +1231,7 @@ impl Index {
 
     #[inline]
     pub fn name(&self, id: EntryId) -> &str {
-        let start = self.name_start[id.index()] as usize;
-        &self.names[start..start + self.name_len[id.index()] as usize]
+        self.names.get(self.name[id.index()])
     }
 
     /// What to show for `id`: its name, except that the root of a Remote Location the user named
@@ -981,28 +1261,33 @@ impl Index {
 
     #[inline]
     pub fn logical(&self, id: EntryId) -> u64 {
-        self.logical[id.index()]
+        self.logical.get(id.index())
     }
 
     #[inline]
     pub fn on_disk(&self, id: EntryId) -> u64 {
-        self.on_disk[id.index()]
+        let i = id.index();
+        self.on_disk
+            .get(i)
+            .unwrap_or_else(|| predicted_on_disk(self.is_dir(id), self.logical.get(i)))
     }
 
+    /// Modification time in ns since the Unix epoch, to the whole second; 0 when unknown.
     #[inline]
     pub fn modified(&self, id: EntryId) -> i64 {
-        self.modified[id.index()]
+        nanos(self.modified.get(id.index()))
     }
 
-    /// Creation time in ns since the Unix epoch; 0 when unknown.
+    /// Creation time in ns since the Unix epoch, to the whole second; 0 when unknown.
     #[inline]
     pub fn created(&self, id: EntryId) -> i64 {
-        self.created[id.index()]
+        let i = id.index();
+        nanos(self.created.get(i).unwrap_or_else(|| self.modified.get(i)))
     }
 
     #[inline]
     pub fn key(&self, id: EntryId) -> u64 {
-        self.key[id.index()]
+        self.key.get(id.index())
     }
 
     pub fn meta(&self, id: EntryId) -> EntryMeta {
@@ -1017,30 +1302,44 @@ impl Index {
         }
     }
 
-    /// Children of a folder; empty for files.
+    /// The live children of a folder, in no particular order; none for a file.
     #[inline]
-    pub fn children(&self, id: EntryId) -> &[EntryId] {
-        match self.slot[id.index()] {
-            NO_SLOT => &[],
-            slot => &self.children[slot as usize],
+    pub fn children(&self, id: EntryId) -> Children<'_> {
+        let i = id.index();
+        let (run, extra) = if self.dirs.contains(i) {
+            let slot = self.dirs.rank(i);
+            let first = self.child_first[slot];
+            let extra = self.extra_children.get(&(slot as u32)).map_or(&[][..], Vec::as_slice);
+            (first..first + self.child_count[slot], extra)
+        } else {
+            (0..0, &[][..])
+        };
+        Children {
+            index: self,
+            parent: id.0,
+            run,
+            extra: extra.iter(),
         }
+    }
+
+    /// Whether a folder has any live child.
+    pub fn has_children(&self, id: EntryId) -> bool {
+        self.children(id).next().is_some()
     }
 
     /// Dense number of a folder, below [`Index::folder_slots`]; `None` for files.
     #[inline]
     pub fn folder_slot(&self, id: EntryId) -> Option<usize> {
-        match self.slot[id.index()] {
-            NO_SLOT => None,
-            slot => Some(slot as usize),
-        }
+        let i = id.index();
+        self.dirs.contains(i).then(|| self.dirs.rank(i))
     }
 
     pub fn folder_slots(&self) -> usize {
-        self.children.len()
+        self.dirs.total()
     }
 
     pub fn child_named(&self, dir: EntryId, name: &str) -> Option<EntryId> {
-        self.children(dir).iter().copied().find(|&c| self.name(c) == name)
+        self.children(dir).find(|&c| self.name(c) == name)
     }
 
     /// Full path of an Entry. A Remote's paths are the server's, joined with `/` on every OS.
@@ -1102,8 +1401,10 @@ impl Index {
         Some(current)
     }
 
-    /// A copy containing only live Entries, with ids renumbered in depth-first order.
-    pub fn compacted(&self) -> Index {
+    /// A copy containing only live Entries, with ids renumbered in depth-first order: what
+    /// [`Index::save`] writes, built in full. Kept to check [`SaveView`] against.
+    #[cfg(test)]
+    fn compacted(&self) -> Index {
         let mut out = Index::new();
         for volume in self.volumes.iter() {
             let Some(volume) = volume else {
@@ -1114,7 +1415,7 @@ impl Index {
             out.volumes.push(Some(Volume { root, ..volume.clone() }));
             let mut stack = vec![(volume.root, root)];
             while let Some((old, new)) = stack.pop() {
-                for &child in self.children(old) {
+                for child in self.children(old) {
                     let copy = out.insert(new, self.name(child), self.meta(child));
                     if self.is_dir(child) {
                         stack.push((child, copy));
@@ -1125,9 +1426,46 @@ impl Index {
         out
     }
 
+    /// The live Entries in the order a compacted copy would number them, and the volumes with
+    /// their roots renumbered: everything [`SaveView`] needs, at 8 bytes per Entry rather than a
+    /// second Index.
+    fn save_view(&self) -> SaveView<'_> {
+        let mut order: Vec<u32> = Vec::with_capacity(self.live);
+        let mut new_id = vec![NO_PARENT; self.capacity()];
+        let mut volumes = Vec::with_capacity(self.volumes.len());
+        for volume in self.volumes.iter() {
+            let Some(volume) = volume else {
+                volumes.push(None);
+                continue;
+            };
+            let root = EntryId(order.len() as u32);
+            let mut number = |old: EntryId, order: &mut Vec<u32>| {
+                new_id[old.index()] = order.len() as u32;
+                order.push(old.0);
+            };
+            number(volume.root, &mut order);
+            volumes.push(Some(Volume { root, ..volume.clone() }));
+            let mut stack = vec![volume.root];
+            while let Some(old) = stack.pop() {
+                for child in self.children(old) {
+                    number(child, &mut order);
+                    if self.is_dir(child) {
+                        stack.push(child);
+                    }
+                }
+            }
+        }
+        SaveView {
+            index: self,
+            order,
+            new_id,
+            volumes,
+        }
+    }
+
     /// Writes the Index to `path` atomically, readable only by the current user.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let compact = self.compacted();
+        let view = self.save_view();
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
@@ -1140,7 +1478,7 @@ impl Index {
             let mut out = BufWriter::new(options.open(&tmp)?);
             out.write_all(MAGIC)?;
             out.write_all(&FORMAT_VERSION.to_le_bytes())?;
-            bincode::serialize_into(&mut out, &compact).map_err(io::Error::other)?;
+            bincode::serialize_into(&mut out, &view).map_err(io::Error::other)?;
             out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
         }
         fs::rename(&tmp, path)
@@ -1156,8 +1494,10 @@ impl Index {
         if &magic != MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "not a saved Index"));
         }
-        match u32::from_le_bytes(version) {
-            FORMAT_VERSION => {}
+        let mut index: Index = match u32::from_le_bytes(version) {
+            FORMAT_VERSION => bincode::deserialize_from(input),
+            6 => bincode::deserialize_from::<_, IndexV6>(input).map(Index::from),
+            5 => bincode::deserialize_from::<_, IndexV5>(input).map(|v5| Index::from(IndexV6::from(v5))),
             // Older layouts are not migrated: the Index is cheap to rebuild by a scan.
             v if v < FORMAT_VERSION => {
                 return Err(io::Error::new(
@@ -1172,7 +1512,7 @@ impl Index {
                 ));
             }
         }
-        let mut index: Index = bincode::deserialize_from(input).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         index.touch();
         Ok(index)
     }
@@ -1180,4 +1520,428 @@ impl Index {
 
 fn flags_for(meta: &EntryMeta) -> u8 {
     (if meta.is_dir { DIR } else { 0 }) | (if meta.hardlinked { HARDLINK } else { 0 })
+}
+
+/// The live children of a folder: see [`Index::children`].
+#[derive(Clone)]
+pub struct Children<'a> {
+    index: &'a Index,
+    parent: u32,
+    /// The folder's run of ids; those still its live children are yielded.
+    run: std::ops::Range<u32>,
+    extra: std::slice::Iter<'a, EntryId>,
+}
+
+impl Iterator for Children<'_> {
+    type Item = EntryId;
+
+    #[inline]
+    fn next(&mut self) -> Option<EntryId> {
+        let ix = self.index;
+        for c in self.run.by_ref() {
+            let i = c as usize;
+            if ix.parent[i] == self.parent && ix.flags[i] & REMOVED == 0 {
+                return Some(EntryId(c));
+            }
+        }
+        self.extra.next().copied()
+    }
+}
+
+/// The Index as a compacted copy would hold it, serialised field by field from the live
+/// Index without the copy (which doubled memory during every save).
+struct SaveView<'a> {
+    index: &'a Index,
+    /// Old ids, in new id order.
+    order: Vec<u32>,
+    /// New id by old id; `NO_PARENT` for Entries not saved.
+    new_id: Vec<u32>,
+    volumes: Vec<Option<Volume>>,
+}
+
+impl Serialize for SaveView<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let (ix, order, n) = (self.index, &self.order, self.order.len());
+        let rows = order.iter().map(|&o| o as usize);
+        let folders = rows.clone().filter(|&o| ix.dirs.contains(o));
+        let parent = rows.clone().map(|o| match ix.parent[o] {
+            NO_PARENT => NO_PARENT,
+            p => self.new_id[p as usize],
+        });
+
+        // Names are numbered in order of first use, as inserting them one by one would.
+        let mut new_name = vec![u32::MAX; ix.names.len()];
+        let mut name_order: Vec<u32> = Vec::new();
+        for o in rows.clone() {
+            let old = ix.name[o];
+            if new_name[old as usize] == u32::MAX {
+                new_name[old as usize] = name_order.len() as u32;
+                name_order.push(old);
+            }
+        }
+        let name = rows.clone().map(|o| new_name[ix.name[o] as usize]);
+        let name_starts = std::iter::once(0u32).chain(name_order.iter().scan(0u32, |end, &old| {
+            *end += ix.names.get(old).len() as u32;
+            Some(*end)
+        }));
+        let name_bytes: usize = name_order.iter().map(|&old| ix.names.get(old).len()).sum();
+        let names = name_order.iter().flat_map(|&old| ix.names.get(old).bytes());
+
+        let mut dirs = Rank::default();
+        rows.clone().for_each(|o| dirs.push(ix.dirs.contains(o)));
+        // Children were numbered consecutively, from the first one met.
+        let child_first = folders
+            .clone()
+            .map(|o| ix.children(EntryId(o as u32)).next().map_or(0, |c| self.new_id[c.index()]));
+        let child_count = folders.clone().map(|o| ix.children(EntryId(o as u32)).count() as u32);
+
+        let mut s = serializer.serialize_struct("Index", 14)?;
+        s.serialize_field("parent", &Seq::new(n, parent))?;
+        s.serialize_field("name", &Seq::new(n, name))?;
+        s.serialize_field("flags", &Seq::new(n, rows.clone().map(|o| ix.flags[o] & (DIR | HARDLINK))))?;
+        s.serialize_field("logical", &ix.logical.reordered(order))?;
+        s.serialize_field("on_disk", &ix.on_disk.reordered(order))?;
+        s.serialize_field("modified", &ix.modified.reordered(order))?;
+        s.serialize_field("created", &ix.created.reordered(order))?;
+        s.serialize_field("key", &ix.key.reordered(order))?;
+        s.serialize_field("dirs", &dirs)?;
+        s.serialize_field("child_first", &Seq::new(dirs.total(), child_first))?;
+        s.serialize_field("child_count", &Seq::new(dirs.total(), child_count))?;
+        s.serialize_field(
+            "names",
+            &NamesView {
+                starts: Seq::new(name_order.len() + 1, name_starts),
+                // A String serialises as its length and bytes, as a sequence of bytes does.
+                bytes: Seq::new(name_bytes, names),
+            },
+        )?;
+        s.serialize_field("volumes", &self.volumes)?;
+        s.serialize_field("live", &n)?;
+        s.end()
+    }
+}
+
+/// Serialises as a [`Names`] would.
+#[derive(Serialize)]
+struct NamesView<S, B> {
+    starts: S,
+    bytes: B,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(is_dir: bool, size: u64) -> EntryMeta {
+        EntryMeta {
+            is_dir,
+            logical: size,
+            on_disk: size,
+            modified: 1_700_000_000_123_456_789,
+            created: -5_500_000_000,
+            key: size,
+            hardlinked: false,
+        }
+    }
+
+    /// An Index with removed Entries, a rename, a moved folder and wide values, so ids, slots
+    /// and names all need renumbering when saved.
+    fn churned() -> Index {
+        let mut index = Index::new();
+        let v = index.add_volume(Path::new("/v"), "ext4", "uuid", meta(true, 0), SyncState::Walk);
+        let root = index.volume(v).unwrap().root;
+        let a = index.insert(root, "a", meta(true, 1));
+        let b = index.insert(root, "b", meta(true, 2));
+        let gone = index.insert(a, "gone", meta(true, 3));
+        index.insert(gone, "deep", meta(false, 4));
+        index.insert(a, "big", meta(false, 5 << 32));
+        let c = index.insert(b, "c", meta(true, 6));
+        index.insert(c, "file", meta(false, u64::MAX));
+        index.remove(gone);
+        index.rename(c, a, "renamed");
+        index.add_volume(Path::new("/w"), "ext4", "uuid2", meta(true, 0), SyncState::Walk);
+        index
+    }
+
+    #[test]
+    fn the_streamed_save_is_byte_for_byte_the_compacted_copy() {
+        let index = churned();
+        assert_eq!(
+            bincode::serialize(&index.save_view()).unwrap(),
+            bincode::serialize(&index.compacted()).unwrap()
+        );
+    }
+
+    /// The columns formats 5 and 6 share, taken from `index` through its accessors.
+    struct OldColumns {
+        parent: Vec<u32>,
+        name_start: Vec<u32>,
+        name_len: Vec<u16>,
+        flags: Vec<u8>,
+        slot: Vec<u32>,
+        children: Vec<Vec<EntryId>>,
+        names: String,
+    }
+
+    fn old_columns(index: &Index) -> OldColumns {
+        let mut old = OldColumns {
+            parent: Vec::new(),
+            name_start: Vec::new(),
+            name_len: Vec::new(),
+            flags: Vec::new(),
+            slot: Vec::new(),
+            children: Vec::new(),
+            names: String::new(),
+        };
+        for i in 0..index.capacity() {
+            let id = EntryId(i as u32);
+            old.parent.push(index.parent(id).map_or(NO_PARENT, |p| p.0));
+            old.name_start.push(old.names.len() as u32);
+            old.name_len.push(index.name(id).len() as u16);
+            old.names.push_str(index.name(id));
+            old.flags.push(index.flags[i]);
+            match index.folder_slot(id) {
+                Some(slot) => {
+                    old.slot.push(slot as u32);
+                    old.children.push(index.children(id).collect());
+                }
+                None => old.slot.push(NO_SLOT),
+            }
+        }
+        old
+    }
+
+    fn load_bytes(version: u32, body: Vec<u8>) -> Index {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.bin");
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend(version.to_le_bytes());
+        bytes.extend(body);
+        fs::write(&path, bytes).unwrap();
+        Index::load(&path).unwrap()
+    }
+
+    #[test]
+    fn a_format_5_index_loads_with_every_value() {
+        let index = churned().compacted();
+        let old = old_columns(&index);
+        let ids = (0..index.capacity()).map(|i| EntryId(i as u32));
+        // Format 5 kept full u64 sizes and i64 nanosecond times.
+        #[derive(Serialize)]
+        struct V5<'a> {
+            parent: &'a [u32],
+            name_start: &'a [u32],
+            name_len: &'a [u16],
+            flags: &'a [u8],
+            logical: Vec<u64>,
+            on_disk: Vec<u64>,
+            modified: Vec<i64>,
+            created: Vec<i64>,
+            key: Vec<u64>,
+            slot: &'a [u32],
+            children: &'a [Vec<EntryId>],
+            names: &'a str,
+            volumes: &'a [Option<Volume>],
+            live: usize,
+        }
+        let v5 = V5 {
+            parent: &old.parent,
+            name_start: &old.name_start,
+            name_len: &old.name_len,
+            flags: &old.flags,
+            logical: ids.clone().map(|id| index.logical(id)).collect(),
+            on_disk: ids.clone().map(|id| index.on_disk(id)).collect(),
+            modified: ids.clone().map(|id| index.modified(id) + 123_456_789).collect(),
+            created: ids.clone().map(|id| index.created(id) + 999_999_999).collect(),
+            key: ids.clone().map(|id| index.key(id)).collect(),
+            slot: &old.slot,
+            children: &old.children,
+            names: &old.names,
+            volumes: &index.volumes,
+            live: index.live,
+        };
+        let loaded = load_bytes(5, bincode::serialize(&v5).unwrap());
+        assert_eq!(
+            bincode::serialize(&loaded.save_view()).unwrap(),
+            bincode::serialize(&index.save_view()).unwrap()
+        );
+        let file = loaded.find_path(Path::new("/v/a/renamed/file")).unwrap();
+        assert_eq!((loaded.logical(file), loaded.created(file)), (u64::MAX, -6_000_000_000));
+    }
+
+    #[test]
+    fn a_format_6_index_loads_with_every_value() {
+        let index = churned().compacted();
+        let old = old_columns(&index);
+        let ids = (0..index.capacity()).map(|i| EntryId(i as u32));
+        let column = |values: Vec<u64>| {
+            let mut c = U64Column::default();
+            values.into_iter().for_each(|v| c.push(v));
+            c
+        };
+        #[derive(Serialize)]
+        struct V6<'a> {
+            parent: &'a [u32],
+            name_start: &'a [u32],
+            name_len: &'a [u16],
+            flags: &'a [u8],
+            logical: U64Column,
+            on_disk: U64Column,
+            modified: Vec<i64>,
+            created: U64Column,
+            key: Vec<u64>,
+            slot: &'a [u32],
+            children: &'a [Vec<EntryId>],
+            names: &'a str,
+            volumes: &'a [Option<Volume>],
+            live: usize,
+        }
+        let v6 = V6 {
+            parent: &old.parent,
+            name_start: &old.name_start,
+            name_len: &old.name_len,
+            flags: &old.flags,
+            logical: column(ids.clone().map(|id| index.logical(id)).collect()),
+            on_disk: column(ids.clone().map(|id| index.on_disk(id)).collect()),
+            modified: ids.clone().map(|id| index.modified(id) + 123_456_789).collect(),
+            created: column(ids.clone().map(|id| secs(index.created(id))).collect()),
+            key: ids.clone().map(|id| index.key(id)).collect(),
+            slot: &old.slot,
+            children: &old.children,
+            names: &old.names,
+            volumes: &index.volumes,
+            live: index.live,
+        };
+        let loaded = load_bytes(6, bincode::serialize(&v6).unwrap());
+        assert_eq!(
+            bincode::serialize(&loaded.save_view()).unwrap(),
+            bincode::serialize(&index.save_view()).unwrap()
+        );
+        let big = loaded.find_path(Path::new("/v/a/big")).unwrap();
+        assert_eq!((loaded.logical(big), loaded.on_disk(big)), (5 << 32, 5 << 32));
+        assert_eq!(loaded.modified(big), 1_700_000_000_000_000_000);
+    }
+
+    fn sorted_names(index: &Index, dir: EntryId) -> Vec<String> {
+        let mut names: Vec<String> = index.children(dir).map(|c| index.name(c).to_owned()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn children_added_moved_and_removed_after_a_load_are_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.bin");
+        churned().save(&path).unwrap();
+        let mut index = Index::load(&path).unwrap();
+        let root = index.find_path(Path::new("/v")).unwrap();
+        let a = index.find_path(Path::new("/v/a")).unwrap();
+        let b = index.find_path(Path::new("/v/b")).unwrap();
+        let renamed = index.find_path(Path::new("/v/a/renamed")).unwrap();
+        assert_eq!(sorted_names(&index, a), ["big", "renamed"]);
+        assert!(!index.has_children(b));
+
+        // New ids are far from a's run: they go aside and are still its children.
+        let x = index.insert(a, "x", meta(false, 7));
+        let y = index.insert(a, "y", meta(false, 8));
+        assert_eq!(sorted_names(&index, a), ["big", "renamed", "x", "y"]);
+        // A move out of the run and back into another folder, then into its own run again.
+        index.rename(renamed, b, "renamed");
+        assert_eq!(sorted_names(&index, a), ["big", "x", "y"]);
+        assert_eq!(sorted_names(&index, b), ["renamed"]);
+        index.rename(renamed, a, "back");
+        assert_eq!(sorted_names(&index, a), ["back", "big", "x", "y"]);
+        assert_eq!(sorted_names(&index, b), Vec::<String>::new());
+        // Removing one aside child and one run child.
+        index.remove_children(a, &[x, index.child_named(a, "big").unwrap()]);
+        assert_eq!(sorted_names(&index, a), ["back", "y"]);
+        assert_eq!(index.live_count(), 7);
+        // Removing a folder removes what is beneath it, run and aside alike.
+        index.remove(a);
+        assert_eq!(sorted_names(&index, root), ["b"]);
+        assert!(!index.is_live(y) && !index.is_live(renamed));
+        assert_eq!(index.live_count(), 3);
+        assert!(index.extra_children.is_empty());
+        assert_eq!(
+            bincode::serialize(&index.save_view()).unwrap(),
+            bincode::serialize(&index.compacted()).unwrap()
+        );
+    }
+
+    #[test]
+    fn sizes_and_times_survive_moving_between_predicted_and_stored() {
+        let mut index = Index::new();
+        let v = index.add_volume(Path::new("/v"), "ext4", "uuid", meta(true, 0), SyncState::Walk);
+        let root = index.volume(v).unwrap().root;
+        let usual = EntryMeta {
+            is_dir: false,
+            logical: 5000,
+            on_disk: 8192,
+            modified: 1_700_000_000_000_000_000,
+            created: 1_700_000_000_000_000_000,
+            key: 9,
+            hardlinked: false,
+        };
+        let f = index.insert(root, "f", usual);
+        assert_eq!((index.on_disk(f), index.created(f)), (8192, 1_700_000_000_000_000_000));
+        assert!(index.on_disk.get(f.index()).is_none() && index.created.get(f.index()).is_none());
+
+        // Written again: the time moves, the creation time stays and is now an exception.
+        let touched = EntryMeta {
+            modified: 1_700_000_100_000_000_000,
+            ..usual
+        };
+        index.update(f, touched);
+        assert_eq!(
+            (index.modified(f), index.created(f)),
+            (1_700_000_100_000_000_000, 1_700_000_000_000_000_000)
+        );
+        // Compressed on disk, then sparse, then back to the usual allocation.
+        index.update(f, EntryMeta { on_disk: 4096, ..touched });
+        assert_eq!(index.on_disk(f), 4096);
+        index.update(f, EntryMeta { on_disk: 0, ..touched });
+        assert_eq!(index.on_disk(f), 0);
+        index.update(f, EntryMeta { on_disk: 8192, ..touched });
+        assert_eq!(index.on_disk(f), 8192);
+        // An unknown creation time is kept apart from a known modification time.
+        index.update(f, EntryMeta { created: 0, ..touched });
+        assert_eq!(index.created(f), 0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.bin");
+        index.save(&path).unwrap();
+        let back = Index::load(&path).unwrap();
+        let f = back.find_path(Path::new("/v/f")).unwrap();
+        assert_eq!(back.meta(f), EntryMeta { created: 0, ..touched });
+        // A folder's sizes are its own (0): nothing stored for it.
+        assert!(back.on_disk.get(root.index()).is_none());
+    }
+
+    #[test]
+    fn names_are_stored_once_and_renumbered_in_first_use_order_when_saved() {
+        let mut index = Index::new();
+        let v = index.add_volume(Path::new("/v"), "ext4", "uuid", meta(true, 0), SyncState::Walk);
+        let root = index.volume(v).unwrap().root;
+        let a = index.insert(root, "a", meta(true, 1));
+        let b = index.insert(root, "b", meta(true, 2));
+        let gone = index.insert(root, "only-here", meta(false, 3));
+        for dir in [a, b] {
+            index.insert(dir, "same.txt", meta(false, 4));
+        }
+        index.remove(gone);
+        assert_eq!(index.names.len(), 5, "/v, a, b, only-here, same.txt");
+        index.idle();
+        assert!(index.names.lookup.is_none());
+        index.insert(a, "b", meta(false, 5));
+        assert_eq!(index.names.len(), 5, "an interned name is found again after idle()");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.bin");
+        index.save(&path).unwrap();
+        let back = Index::load(&path).unwrap();
+        assert_eq!(back.names.len(), 4, "the removed Entry's name is not saved");
+        assert_eq!(back.live_count(), 6);
+        assert_eq!(sorted_names(&back, back.find_path(Path::new("/v/a")).unwrap()), ["b", "same.txt"]);
+    }
 }

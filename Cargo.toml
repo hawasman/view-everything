@@ -3,10 +3,16 @@ resolver = "2"
 members = ["crates/ve-core", "crates/ve-scan", "crates/ve-app", "crates/ve-cli", "crates/ve-fanotify"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Release speed with line tables, for samply/perf: cargo build -p ve-app --profile profiling
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = false

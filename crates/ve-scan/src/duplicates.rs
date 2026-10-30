@@ -138,7 +138,7 @@ pub fn find(
         let mut links = std::collections::HashSet::new();
         let mut stack = vec![root];
         while let Some(dir) = stack.pop() {
-            for &child in index.children(dir) {
+            for child in index.children(dir) {
                 if index.is_dir(child) {
                     stack.push(child);
                     continue;

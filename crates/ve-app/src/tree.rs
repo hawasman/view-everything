@@ -5,7 +5,7 @@ use crate::format;
 use crate::selection::Selection;
 use crate::theme::palette;
 use crate::ui::swatch;
-use crate::view::{self, View};
+use crate::view::{self, Focus, View};
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::{Icon, IconName, h_flex};
@@ -171,7 +171,8 @@ impl TreeList {
 
     /// Shows `view`; false when it already was the one shown. When the Query changed, its focus
     /// (the folder the Treemap draws) is opened with its ancestors, so the tree shows what the
-    /// Treemap does; a View recomputed only because the Index grew leaves folders as they are.
+    /// Treemap does; on the whole Index, each Location is opened down to what it shows. A View
+    /// recomputed only because the Index grew leaves folders as they are.
     pub fn set_view(&mut self, view: Option<Arc<View>>) -> bool {
         if view::same(&self.view, &view) {
             return false;
@@ -180,11 +181,23 @@ impl TreeList {
         self.view = view;
         if let Some(view) = self.view.clone()
             && old_query.is_some_and(|q| q != view.query)
-            && let Some(focus) = view.focus
         {
-            self.open_to(focus);
-            self.expanded.insert(focus);
-            self.scroll_to_focus = true;
+            match view.focus {
+                Focus::Folder(focus) => {
+                    self.open_to(focus);
+                    self.expanded.insert(focus);
+                    self.scroll_to_focus = true;
+                }
+                // With an empty Query every Location is shown: opening them all would bury the list.
+                Focus::Index if !view.query.trim().is_empty() => {
+                    let index = self.shared.index.read();
+                    for root in view::shown_location_roots(&index, &view.filter) {
+                        let folder = view::descend(&index, &view.filter, root);
+                        self.expanded.extend(std::iter::successors(Some(folder), |&p| index.parent(p)));
+                    }
+                }
+                Focus::Index => {}
+            }
         }
         self.rebuild();
         // The Entries the new View no longer shows fall out of the selection.
@@ -196,12 +209,23 @@ impl TreeList {
         true
     }
 
+    /// The folders opened in the tree, to open again in a reopened window.
+    pub fn expanded(&self) -> &HashSet<EntryId> {
+        &self.expanded
+    }
+
+    /// Opens the folders a closed window had open.
+    pub fn set_expanded(&mut self, expanded: HashSet<EntryId>) {
+        self.expanded = expanded;
+        self.rebuild();
+    }
+
     /// The row of the focus a new Query opened, once; the Explorer scrolls to it.
     pub fn take_focus_row(&mut self) -> Option<usize> {
         if !std::mem::take(&mut self.scroll_to_focus) {
             return None;
         }
-        let focus = self.view.as_ref()?.focus?;
+        let focus = self.view.as_ref()?.focus.folder()?;
         self.rows.iter().position(|r| r.id == focus && r.gone.is_none())
     }
 
@@ -255,7 +279,7 @@ impl TreeList {
         while let Some(row) = stack.pop() {
             self.rows.push(row);
             if row.gone.is_none() && self.expanded.contains(&row.id) {
-                let children = index.children(row.id).to_vec();
+                let children: Vec<EntryId> = index.children(row.id).collect();
                 let mut children = self.shown(&index, &view, Some(row.id), children, row.depth + 1);
                 children.reverse();
                 stack.extend(children);
@@ -439,7 +463,7 @@ impl TableDelegate for TreeList {
                 Some(Cells {
                     depth,
                     name: index.display_name(id).to_owned(),
-                    expandable: index.children(id).iter().any(|&c| view.filter.is_shown(c)),
+                    expandable: index.children(id).any(|c| view.filter.is_shown(c)),
                     open: self.expanded.contains(&id),
                     muted: !view.query.trim().is_empty() && !view.filter.is_matched(id),
                     category: match (is_dir, index.parent(id)) {

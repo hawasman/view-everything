@@ -55,7 +55,7 @@ pub fn load<R: Read + Seek>(index: &SharedIndex, volume: VolumeId, mut reader: R
 
     {
         let mut w = index.write();
-        let old = w.children(root).to_vec();
+        let old: Vec<EntryId> = w.children(root).collect();
         for id in old {
             w.remove(id);
         }

@@ -11,7 +11,7 @@ pub fn write_csv(out: &mut impl Write, index: &Index, filter: &Filter, categorie
     for &id in ids.iter().filter(|&&id| index.is_live(id)) {
         let totals = filter.totals(index, id);
         let name = index.name(id);
-        // The Index keeps nanoseconds since the Unix epoch; 0 is unknown.
+        // The Index keeps nanoseconds since the Unix epoch (to the whole second); 0 is unknown.
         let modified = match index.modified(id) {
             0 => String::new(),
             ns => chrono::DateTime::from_timestamp_nanos(ns).format("%Y-%m-%dT%H:%M:%SZ").to_string(),

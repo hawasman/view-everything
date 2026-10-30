@@ -11,7 +11,7 @@ fn snapshot(index: &Index, volume: VolumeId) -> BTreeMap<String, (bool, u64, u64
     let mut out = BTreeMap::new();
     let mut stack: Vec<(EntryId, String)> = vec![(root, String::new())];
     while let Some((dir, prefix)) = stack.pop() {
-        for &child in index.children(dir) {
+        for child in index.children(dir) {
             let path = format!("{prefix}/{}", index.name(child));
             let m = index.meta(child);
             // NTFS updates a folder's time in its parent's listing lazily, so a scan moments

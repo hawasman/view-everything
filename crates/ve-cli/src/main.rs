@@ -253,7 +253,7 @@ fn scope(index: &Index, path: Option<&std::path::Path>) -> Result<Vec<EntryId>, 
     let mut found = Vec::new();
     let mut stack = vec![root];
     while let Some(dir) = stack.pop() {
-        for &child in index.children(dir) {
+        for child in index.children(dir) {
             if index.is_live(child) {
                 found.push(child);
                 if index.is_dir(child) {

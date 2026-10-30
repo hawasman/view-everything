@@ -64,7 +64,7 @@ pub fn keep_scope(query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::view::View;
+    use crate::view::{Focus, View};
     use ve_core::{CategoryMap, EntryMeta, Query, QueryContext, Remote};
 
     #[test]
@@ -93,11 +93,11 @@ mod tests {
         let text = set("ext:rs", term(&index, a).as_deref());
         // `a` holds only `b`, yet the Treemap draws `a`: the folder zoomed into.
         let scoped = view(&set("", term(&index, a).as_deref()));
-        assert_eq!(scoped.focus, Some(a));
+        assert_eq!(scoped.focus, Focus::Folder(a));
         assert!(scoped.flat.contains(&b) && scoped.flat.contains(&x) && !scoped.flat.contains(&outside));
         // Refined around the scope: only `x.rs` matches, so the Treemap draws its folder.
         let refined = view(&text);
-        assert_eq!((refined.flat.clone(), refined.focus), (vec![x], Some(b)));
+        assert_eq!((refined.flat.clone(), refined.focus), (vec![x], Focus::Folder(b)));
     }
 
     #[test]

@@ -7456,13 +7456,14 @@ dependencies = [
 
 [[package]]
 name = "ve-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-channel",
  "chrono",
  "dirs 7.0.0",
  "gpui-kit",
  "ksni",
+ "libc",
  "minisign",
  "minisign-verify",
  "objc2 0.6.5",
@@ -7487,7 +7488,7 @@ dependencies = [
 
 [[package]]
 name = "ve-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "serde_json",
@@ -7497,12 +7498,13 @@ dependencies = [
 
 [[package]]
 name = "ve-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bincode",
  "chrono",
  "dirs 7.0.0",
  "flate2",
+ "hashbrown 0.16.1",
  "rayon",
  "regex",
  "serde",
@@ -7512,7 +7514,7 @@ dependencies = [
 
 [[package]]
 name = "ve-fanotify"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "tempfile",
@@ -7520,7 +7522,7 @@ dependencies = [
 
 [[package]]
 name = "ve-scan"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.23.1",
  "bincode",

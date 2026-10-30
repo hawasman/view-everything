@@ -4,7 +4,7 @@ use crate::engine::Shared;
 use crate::format;
 use crate::theme::{RADIUS_CARD, palette};
 use crate::ui::{caption, pill};
-use crate::view::View;
+use crate::view::{Focus, View};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -47,7 +47,7 @@ fn count_folders(index: &ve_scan::SharedIndex, view: &View, dir: EntryId) -> u64
     let mut folders = 0;
     while let Some(id) = stack.pop() {
         let index = index.read();
-        for &child in index.children(id) {
+        for child in index.children(id) {
             if index.is_dir(child) && view.filter.is_shown(child) {
                 folders += 1;
                 stack.push(child);
@@ -151,6 +151,7 @@ impl SelectionPanel {
 
 impl Render for SelectionPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("SelectionPanel::render");
         let p = palette(cx);
         let shared = self.shared.clone();
         let index = shared.index.read();
@@ -194,11 +195,13 @@ impl Render for SelectionPanel {
 
         let is_dir = index.is_dir(id);
         let totals = view.filter.totals(&index, id);
-        // Share of the zoomed folder; a selection outside it is measured against its Location.
-        let zoom = crate::treemap::zoom_root(&index, &view)
-            .filter(|&root| std::iter::successors(Some(id), |&e| index.parent(e)).any(|e| e == root));
-        let base = zoom.unwrap_or_else(|| index.root_of(id));
-        let whole = view.filter.totals(&index, base).on_disk.max(1);
+        // Share of what the Treemap draws; a selection outside it is measured against its Location.
+        let drawn = crate::treemap::zoom_root(&index, &view);
+        let inside = drawn
+            .folder()
+            .is_none_or(|root| std::iter::successors(Some(id), |&e| index.parent(e)).any(|e| e == root));
+        let base = if inside { drawn } else { Focus::Folder(index.root_of(id)) };
+        let whole = base.totals(&index, &view.filter).on_disk.max(1);
         let name = index.display_name(id).to_owned();
         let head = h_flex()
             .justify_between()
@@ -210,11 +213,7 @@ impl Render for SelectionPanel {
             return card.child(head);
         }
 
-        let share = format!(
-            "{:.1}% of {}",
-            totals.on_disk as f64 * 100.0 / whole as f64,
-            index.display_name(base)
-        );
+        let share = format!("{:.1}% of {}", totals.on_disk as f64 * 100.0 / whole as f64, base.name(&index));
         let counts = if is_dir {
             self.ensure_count(id, &view, cx);
             let folders = self

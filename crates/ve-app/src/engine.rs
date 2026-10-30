@@ -48,6 +48,9 @@ pub struct Shared {
     pub status: Mutex<Status>,
     /// The latest View; replaced whole when recomputed.
     pub view: Mutex<Option<Arc<View>>>,
+    /// The Query text last asked for, as typed even when it does not parse; a reopened window
+    /// shows it again.
+    pub query: Mutex<String>,
     /// Why the current Query text could not be parsed.
     pub query_error: Mutex<Option<String>>,
     busy: AtomicBool,
@@ -179,6 +182,7 @@ impl Engine {
                 problems: Vec::new(),
             }),
             view: Mutex::new(None),
+            query: Mutex::new(String::new()),
             query_error: Mutex::new(None),
             busy: AtomicBool::new(true),
             duplicates: Mutex::new(DuplicateState::default()),
@@ -230,6 +234,7 @@ impl Engine {
 
     pub fn set_query(&self, text: String) {
         self.newest_query.fetch_add(1, Ordering::Relaxed);
+        self.shared.query.lock().clone_from(&text);
         let _ = self.queries.send(text);
     }
 
@@ -470,6 +475,12 @@ fn run_indexer(
                 // Last Synced moved even when no Entry did, and a restart relies on it.
                 save_if_changed(shared, index_path.as_deref(), &mut saved_generation, !quiet);
                 last_save = Instant::now();
+            }
+            // A journal poll inserts a few Entries every few seconds; only a full sync's end
+            // is worth rebuilding the name lookup for when the next insert comes.
+            if !quiet {
+                shared.index.write().idle();
+                release_freed_memory();
             }
         }
         if shared.busy.swap(false, Ordering::Relaxed) {
@@ -845,7 +856,7 @@ fn sync_volumes(
             && volumes
                 .iter()
                 .filter_map(|&id| index.volume(id))
-                .any(|v| !index.children(v.root).is_empty());
+                .any(|v| index.has_children(v.root));
         (mounts, catching_up)
     };
     if !quiet {
@@ -952,6 +963,18 @@ fn sync_volumes(
     let cancelled = shared.progress.cancelled();
     shared.progress.cancel.store(false, Ordering::Relaxed);
     cancelled
+}
+
+/// Gives the memory a sync freed back to the OS. A walk allocates and frees millions of
+/// names and per-folder maps across the rayon threads, and glibc keeps whole free pages in
+/// each thread's arena until asked (about 100 MiB after the launch Catch-up of a 5.6M-Entry
+/// Index). Other allocators return pages on their own.
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim takes no pointers and only releases free pages inside the allocator.
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
 /// Saves the Index if an Entry changed since the last save, or always when `force`.
@@ -1264,6 +1287,7 @@ mod tests {
                 problems: Vec::new(),
             }),
             view: Mutex::new(None),
+            query: Mutex::new(String::new()),
             query_error: Mutex::new(None),
             busy: AtomicBool::new(false),
             duplicates: Mutex::new(DuplicateState::default()),

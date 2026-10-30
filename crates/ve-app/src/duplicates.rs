@@ -171,6 +171,7 @@ enum Row {
 
 impl Render for DuplicatesPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("DuplicatesPanel::render");
         refresh_duplicates(&self.shared);
         self.rebuild();
         let muted = palette(cx).muted;

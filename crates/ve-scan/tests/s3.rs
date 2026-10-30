@@ -175,7 +175,7 @@ fn keys(_: &S3Remote) -> Result<Option<Credentials>, String> {
 }
 
 fn names(index: &Index, dir: EntryId) -> Vec<String> {
-    let mut v: Vec<_> = index.children(dir).iter().map(|&c| index.name(c).to_owned()).collect();
+    let mut v: Vec<_> = index.children(dir).map(|c| index.name(c).to_owned()).collect();
     v.sort();
     v
 }
@@ -238,7 +238,11 @@ fn a_bucket_prefix_is_indexed_page_by_page_and_a_refresh_applies_differences() {
         assert_eq!((index.logical(a), index.on_disk(a)), (1000, 1000));
         assert_eq!(index.modified(a), 1_704_164_645_000_000_000);
         let uni = index.child_named(index.child_named(root, "2025").unwrap(), "ünï.png").unwrap();
-        assert_eq!(index.modified(uni), 1_748_779_200_500_000_000);
+        assert_eq!(
+            index.modified(uni),
+            1_748_779_200_000_000_000,
+            "LastModified's milliseconds are not kept"
+        );
         assert_eq!(names(&index, index.child_named(root, "2024").unwrap()), ["a.jpg", "b b.jpg"]);
         assert_eq!(names(&index, index.child_named(root, "empty").unwrap()), Vec::<String>::new());
         let totals = Filter::compute(&index, None).totals(&index, root);
