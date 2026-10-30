@@ -112,6 +112,27 @@ fn a_synced_location_answers_queries_and_reports_its_task() {
 }
 
 #[test]
+fn last_synced_is_stamped_only_once_owners_are_detected() {
+    let (data, fixture) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    write(&fixture.path().join("proj/Cargo.toml"), 10);
+    write(&fixture.path().join("proj/src/main.rs"), 100);
+    let engine = start(data.path(), fixture.path());
+    let proj = fixture.path().join("proj");
+    // Detection is the last step of the first Sync: whenever Last Synced reads as set, the
+    // Project is already there.
+    wait_for("Last Synced", || {
+        let index = engine.shared.index.read();
+        let synced = index.volumes().any(|(_, v)| v.last_synced.is_some());
+        if synced {
+            let owner = index.find_path(&proj).and_then(|id| index.entry_owner(id)).map(|o| o.name.clone());
+            assert_eq!(owner.as_deref(), Some("proj"));
+        }
+        synced
+    });
+    engine.shutdown();
+}
+
+#[test]
 fn a_restart_catches_the_saved_location_up() {
     let (data, fixture) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let engine = synced(data.path(), fixture.path());

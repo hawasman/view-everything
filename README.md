@@ -26,7 +26,7 @@ It keeps one Index of every file on your Volumes, saved between runs, so searchi
 
 ### See
 - **Overview:** what is indexed, what can be cleaned up, the Trash, when the Index was last synced; then a used bar per Location, the Categories, and the largest and most recently modified files.
-- **Browse:** a tree and a flat list beside a Treemap, all driven by one Query box that works from every page. Double-click any folder to zoom into it. Select several rows for the right-click menu: Open, Show in Explorer, Open terminal here, Copy path, Trash, Sync this folder and Export selection to CSV.
+- **Browse:** a tree and a flat list beside a Treemap, all driven by one Query box that works from every page. Double-click any folder to zoom into it. Select several rows for the right-click menu: Open, Show in file manager, Open terminal here, Copy path, Trash, Sync this folder and Export selection to CSV.
 - **Treemap and Inspector:** folders labelled with their name and size down to an adjustable Depth, coloured by Category or by Owner kind; hover shows every enclosing folder. The **Inspector** at the right shows the selected Entry's size, share and contents, with its actions; it shows a Location or a Task the same way.
 - **Owners:** the program, game, package or project a folder belongs to, found for Steam games, installed programs, system folders and code projects. [More](docs/guide/owners.md)
 - **Snapshots and Compare with:** a daily Snapshot of folder sizes, and a Change column showing what grew. [More](docs/guide/snapshots-and-export.md)

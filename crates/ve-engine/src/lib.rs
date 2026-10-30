@@ -972,12 +972,13 @@ fn sync_volumes(
                             } else {
                                 ve_scan::capacity(mount)
                             };
-                            shared.index.write().mark_synced(*id, started, capacity);
                             // The last step of a Sync or Catch-up (ADR-0014); a journal poll
                             // added a few Entries and is not worth a walk.
                             if !quiet {
                                 detect_owners(shared, *id);
                             }
+                            // Stamped once the whole Sync, detection included, has finished.
+                            shared.index.write().mark_synced(*id, started, capacity);
                         }
                         // A cancel interrupts the read; that is not a failure.
                         Err(_) if shared.progress.cancelled() => {}

@@ -606,6 +606,61 @@ fn owner_facets_compose_with_text_other_facets_or_and_not() {
 }
 
 #[test]
+fn owner_facets_compose_with_kind_at_and_since() {
+    use std::path::Path;
+    use ve_core::{EntryMeta, Filter, Index, Owner, OwnerKind, SyncState};
+    let dir = EntryMeta {
+        is_dir: true,
+        ..EntryMeta::default()
+    };
+    // Now is 2025-03-14 12:00.
+    let modified = |d| EntryMeta {
+        modified: Local.with_ymd_and_hms(2025, 3, d, 0, 0, 0).unwrap().timestamp_nanos_opt().unwrap(),
+        ..EntryMeta::default()
+    };
+    let mut index = Index::new();
+    let vol = index.add_volume(Path::new("/m/loc"), "ext4", "loc", dir, SyncState::Walk);
+    let root = index.volume(vol).unwrap().root;
+    let game = index.insert(root, "Shock", dir);
+    let saves = index.insert(game, "saves", dir);
+    let fresh = index.insert(saves, "new.sav", modified(13));
+    let old = index.insert(game, "old.sav", modified(1));
+    let proj = index.insert(root, "proj", dir);
+    let src = index.insert(proj, "main.rs", modified(13));
+    let loose = index.insert(root, "loose.txt", modified(13));
+    index.set_owners(
+        root,
+        vec![
+            (game, Owner::new(OwnerKind::Game, "Shock", "Steam")),
+            (proj, Owner::new(OwnerKind::Project, "proj", "Cargo.toml")),
+        ],
+    );
+    let all = [game, saves, fresh, old, proj, src, loose];
+    let matched = |q: &str| {
+        let query = Query::parse(q, &context()).unwrap();
+        let filter = Filter::compute(&index, Some(&query));
+        all.map(|id| filter.is_matched(id))
+    };
+    assert_eq!(matched("owner:shock kind:folder"), [true, true, false, false, false, false, false]);
+    assert_eq!(matched("ownerkind:game kind:file"), [false, false, true, true, false, false, false]);
+    assert_eq!(matched("ownerkind:game since:7d"), [false, false, true, false, false, false, false]);
+    assert_eq!(matched("since:7d !ownerkind:game"), [false, false, false, false, false, true, true]);
+    assert_eq!(
+        matched("at:/m/loc/Shock/saves owner:shock"),
+        [false, true, true, false, false, false, false]
+    );
+    assert_eq!(
+        matched("at:/m/loc ownerkind:none kind:file"),
+        [false, false, false, false, false, false, true]
+    );
+    // `|` binds tighter than space: either Owner, and a folder.
+    assert_eq!(
+        matched("owner:proj | ownerkind:game kind:folder"),
+        [true, true, false, false, true, false, false]
+    );
+}
+
+#[test]
 fn dc_matches_like_dm_and_never_an_unknown_creation_time() {
     let created = |y, mo, d, h| {
         let created = Local.with_ymd_and_hms(y, mo, d, h, 0, 0).unwrap().timestamp_nanos_opt().unwrap();

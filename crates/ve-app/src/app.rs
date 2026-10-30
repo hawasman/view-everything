@@ -2,7 +2,7 @@
 //! Cleaner, Duplicates, Tasks, Settings), the Timeline dock, the status strip and the Inspector.
 
 use crate::categories::CategoryPanel;
-use crate::cleaner::{CleanerPage, ShowInExplorer};
+use crate::cleaner::{CleanerPage, ShowInBrowse};
 use crate::compare::{Compare, CompareEvent};
 use crate::dashboard::{Act, DashboardPage};
 use crate::duplicates::{DuplicatesPanel, InspectGroup};
@@ -253,7 +253,7 @@ impl Shell {
             this.dashboard_act(act, window, cx)
         })
         .detach();
-        cx.subscribe_in(&cleaner, window, |this, _, show: &ShowInExplorer, window, cx| {
+        cx.subscribe_in(&cleaner, window, |this, _, show: &ShowInBrowse, window, cx| {
             this.dashboard_act(&Act::Explore(show.0.clone().or(Some(String::new()))), window, cx);
             cx.notify();
         })
@@ -2325,10 +2325,7 @@ impl Shell {
     fn duplicates_panel(&mut self, first: ve_core::EntryId, cx: &mut Context<Self>) -> Option<Panel> {
         let group = self.duplicates.update(cx, |d, _| d.group(first))?;
         let kept = group.kept;
-        let (name, folder) = {
-            let index = self.engine.shared.index.read();
-            (index.display_name(kept).to_owned(), index.parent(kept))
-        };
+        let name = self.engine.shared.index.read().display_name(kept).to_owned();
         let others = group.others();
         let blocker = self.trash.blocker_of(&others, &self.volumes);
         let fact = |l: &'static str, v: String| (SharedString::from(l), SharedString::from(v));
@@ -2351,10 +2348,8 @@ impl Shell {
                     "inspector-dupes-browse",
                     "Show in Browse",
                     cx.listener(move |this, _, window, cx| {
-                        this.scope(folder, window, cx);
-                        this.page = Page::Browse;
+                        this.show_in_browse(kept, window, cx);
                         this.inspected = Some(Inspected::Entry(kept));
-                        cx.notify();
                     }),
                 ),
                 Item::new(

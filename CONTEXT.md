@@ -130,7 +130,7 @@ The column of Modules and their pages at the left of the window, with the Work b
 _Avoid_: sidebar, menu
 
 **Inspector**:
-The pane at the right that shows whatever is selected (an Entry, a Location, a Task) with its facts and the actions it allows. It follows the selection; Esc clears it.
+The pane at the right that shows whatever is selected (an Entry, a Location, a Task, a group of Duplicates) with its facts and the actions it allows. It follows the selection; Esc clears it.
 _Avoid_: details pane, properties, selection panel
 
 **Timeline dock**:
@@ -197,5 +197,6 @@ _Avoid_: delete, purge, wipe
 **Admin only**:
 A Cleanable the user does not own, or that holds something they do not own. Clean never touches it; it is listed apart with the exact command that removes it, and removed only by a separate admin step that shows that command first and runs it elevated.
 
-**Show in Explorer**:
-The Cleaner's action on a Cleanable: opens the Explorer with a Query scoped to its folder.
+**Show in Browse**:
+Opens Browse with the Query scoped to a folder. From the Cleaner, the Cleanable's folder; from the Inspector, the folder holding the Entry (or a group's kept copy), which is then selected among its siblings.
+_Avoid_: Show in Explorer

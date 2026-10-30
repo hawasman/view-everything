@@ -189,9 +189,11 @@ impl DuplicatesPanel {
         let skipped = self.shared.duplicates.lock().skipped;
         let wasted: u64 = self.shown.iter().map(Shown::wasted).sum();
         let copies: usize = self.shown.iter().map(|g| g.copies.len()).sum();
+        let groups = self.shown.len();
         let mut line = format!(
-            "{} groups · {} copies · {} wasted",
-            format::count(self.shown.len() as u64),
+            "{} group{} · {} copies · {} wasted",
+            format::count(groups as u64),
+            if groups == 1 { "" } else { "s" },
             format::count(copies as u64),
             format::size(wasted)
         );

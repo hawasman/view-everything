@@ -57,10 +57,10 @@ enum Tab {
     Admin,
 }
 
-/// "Show in Explorer": the Query that selects one Cleanable (None: the Index has no folder to scope to).
-pub struct ShowInExplorer(pub Option<String>);
+/// "Show in Browse": the Query that selects one Cleanable (None: the Index has no folder to scope to).
+pub struct ShowInBrowse(pub Option<String>);
 
-impl EventEmitter<ShowInExplorer> for CleanerPage {}
+impl EventEmitter<ShowInBrowse> for CleanerPage {}
 
 pub struct CleanerPage {
     shared: Arc<Shared>,
@@ -457,13 +457,13 @@ impl CleanerPage {
         self.admin.iter().map(|c| c.on_disk).sum()
     }
 
-    fn show_in_explorer(&mut self, path: &std::path::Path, is_file: bool, cx: &mut Context<Self>) {
+    fn show_in_browse(&mut self, path: &std::path::Path, is_file: bool, cx: &mut Context<Self>) {
         let index = self.shared.index.read();
         // A file is shown by the folder it sits in.
         let at = if is_file { path.parent() } else { Some(path) };
         let term = at.and_then(|p| index.find_path(p)).and_then(|id| crate::scope::term(&index, id));
         drop(index);
-        cx.emit(ShowInExplorer(term));
+        cx.emit(ShowInBrowse(term));
     }
 
     /// The Cleanables of the admin step that are ticked and can run (command rules cannot).
@@ -717,9 +717,9 @@ impl CleanerPage {
 
     fn show_button(&self, id: (&'static str, usize), c: &Cleanable, cx: &mut Context<Self>) -> impl IntoElement {
         let (path, command) = (c.path.clone(), c.rule.is_command());
-        button(id, "Show in Explorer").small().build(
+        button(id, "Show in Browse").small().build(
             cx,
-            cx.listener(move |this, _, _, cx| this.show_in_explorer(&path, !command && !path.is_dir(), cx)),
+            cx.listener(move |this, _, _, cx| this.show_in_browse(&path, !command && !path.is_dir(), cx)),
         )
     }
 

@@ -50,7 +50,7 @@ Command rules are never run with admin rights.
 ### Elsewhere in the app
 
 - The Category breakdown shows how much of the reclaimable space each Category takes, for every Cleanable or for the ticked Cleanup Plan.
-- **Show in Explorer** on a Cleanable sets the Query to its folder.
+- **Show in Browse** on a Cleanable opens Browse with the Query set to its folder.
 - The Overview's finding line and its Cleanable figure show the total the Cleaner could reclaim; Open Cleaner and Review Cleanup Plan open the Cleaner.
 
 ## Write your own rules

@@ -1,10 +1,11 @@
 //! The Inspector: the right pane that follows what was clicked, whatever the page. One shape for
-//! an Entry, a Location or a Task: kind and tag, title, subtitle, facts, then actions. The
-//! Shell builds the [`Panel`] of the inspected thing (it owns the Engine and the actions) and
-//! this module draws it; [`Folders`] counts an inspected folder's folders off the UI thread.
+//! an Entry, a Location, a Task or a Duplicate group: kind and tag, title, subtitle, facts, a
+//! group's copies, then actions. The Shell builds the [`Panel`] of the inspected thing (it owns
+//! the Engine and the actions) and this module draws it; [`Folders`] counts an inspected
+//! folder's folders off the UI thread.
 
 use crate::format;
-use crate::theme::{FS_SECTION, FS_SMALL, palette};
+use crate::theme::{FS_BODY, FS_SECTION, FS_SMALL, palette};
 use crate::ui::{ButtonKind, Tone, button, group_label, tag};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -96,7 +97,7 @@ pub fn render(panel: Panel, members: Vec<Member>, cx: &App) -> Stateful<Div> {
             .gap(px(12.))
             .items_center()
             .justify_between()
-            .text_size(px(crate::theme::FS_BODY))
+            .text_size(px(FS_BODY))
             .when(i > 0, |d| d.border_t_1().border_color(p.rule))
             .child(div().flex_none().text_color(p.muted).child(label))
             .child(div().min_w_0().truncate().text_color(p.text).child(value))
@@ -109,14 +110,14 @@ pub fn render(panel: Panel, members: Vec<Member>, cx: &App) -> Stateful<Div> {
             .py(px(4.))
             .gap(px(8.))
             .items_center()
-            .text_size(px(crate::theme::FS_BODY))
+            .text_size(px(FS_BODY))
             .cursor_pointer()
             .when(i > 0, |d| d.border_t_1().border_color(p.rule))
             .on_click(m.on_click)
             .child(
                 div()
                     .flex_none()
-                    .text_color(if m.keep { p.accent } else { p.muted })
+                    .text_color(if m.keep { p.text } else { p.muted })
                     .child(if m.keep { "●" } else { "○" }),
             )
             .child(
