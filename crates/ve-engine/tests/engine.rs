@@ -62,28 +62,37 @@ fn locations(engine: &Engine) -> Vec<(String, PathBuf, bool, bool)> {
         .collect()
 }
 
+/// The names of the Entries the Engine's View of `query` matches, once that View is of the Index
+/// as it is now (a View of the same text made before a Sync is stale).
 fn names(engine: &Engine, query: &str) -> BTreeSet<String> {
     engine.set_query(query.to_owned());
     wait_for("the View of the Query", || {
-        engine.shared.view.lock().as_ref().is_some_and(|v| v.query == query)
+        let generation = engine.shared.index.read().generation();
+        let view = engine.shared.view.lock();
+        view.as_ref()
+            .is_some_and(|v| v.query == query && v.filter.generation() == generation)
     });
     let view = engine.shared.view.lock().clone().unwrap();
     let index = engine.shared.index.read();
     view.flat.iter().map(|&id| index.name(id).to_owned()).collect()
 }
 
-#[test]
-fn a_synced_location_answers_queries_and_reports_its_task() {
-    let data = tempfile::tempdir().unwrap();
-    let fixture = tempfile::tempdir().unwrap();
-    write(&fixture.path().join("docs/quarterly-report.pdf"), 3000);
-    write(&fixture.path().join("music/song.mp3"), 7000);
-    let engine = start(data.path(), fixture.path());
-
+/// Two files in two folders, and an Engine that has finished its first Sync of them.
+fn synced(data: &Path, fixture: &Path) -> Engine {
+    write(&fixture.join("docs/quarterly-report.pdf"), 3000);
+    write(&fixture.join("music/song.mp3"), 7000);
+    let engine = start(data, fixture);
     // A Volume the Index has never held is read in full at launch.
     wait_for("the first Sync", || idle(&engine) && !engine.shared.tasks.finished().is_empty());
-    let mount = fixture.path().to_path_buf();
-    assert_eq!(locations(&engine), [(IDENTITY.to_owned(), mount.clone(), true, true)]);
+    engine
+}
+
+#[test]
+fn a_synced_location_answers_queries_and_reports_its_task() {
+    let (data, fixture) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let engine = synced(data.path(), fixture.path());
+    let location = (IDENTITY.to_owned(), fixture.path().to_path_buf(), true, true);
+    assert_eq!(locations(&engine), [location]);
     assert_eq!(names(&engine, "report"), BTreeSet::from(["quarterly-report.pdf".to_owned()]));
 
     // Sync now of the Location reads what was written since.
@@ -99,16 +108,23 @@ fn a_synced_location_answers_queries_and_reports_its_task() {
         names(&engine, "report"),
         BTreeSet::from(["annual-report.pdf".to_owned(), "quarterly-report.pdf".to_owned()])
     );
+    engine.shutdown();
+}
 
-    // Quitting saves the Index; the next start catches the saved Location up.
+#[test]
+fn a_restart_catches_the_saved_location_up() {
+    let (data, fixture) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let engine = synced(data.path(), fixture.path());
+    // Quitting saves the Index; the next start loads it and catches the Location up.
     engine.shutdown();
     drop(engine);
     fs::remove_file(fixture.path().join("music/song.mp3")).unwrap();
     let again = start(data.path(), fixture.path());
     wait_for("the Catch-up", || idle(&again) && !again.shared.tasks.finished().is_empty());
     assert_eq!(again.shared.tasks.finished()[0].kind, TaskKind::CatchUp);
-    assert_eq!(locations(&again), [(IDENTITY.to_owned(), mount, true, true)]);
+    let location = (IDENTITY.to_owned(), fixture.path().to_path_buf(), true, true);
+    assert_eq!(locations(&again), [location]);
     assert!(names(&again, "song").is_empty());
-    assert_eq!(names(&again, "report").len(), 2);
+    assert_eq!(names(&again, "report"), BTreeSet::from(["quarterly-report.pdf".to_owned()]));
     again.shutdown();
 }

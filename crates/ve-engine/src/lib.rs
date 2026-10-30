@@ -27,7 +27,7 @@ use view::{FileOrder, View};
 
 /// How often a Volume kept current by the NTFS change journal is polled while the app runs.
 const JOURNAL_POLL: Duration = Duration::from_secs(5);
-/// How often the GUI is told to redraw the progress of a running sync.
+/// How often clients are told to redraw the progress of a running sync.
 const PROGRESS_NUDGE: Duration = Duration::from_millis(250);
 /// Minimum time between View recomputations while the Index is being filled.
 const VIEW_THROTTLE: Duration = Duration::from_millis(800);
@@ -98,13 +98,13 @@ pub struct Shared {
     live_lost: AtomicU32,
     live_held: AtomicU64,
     /// The Volumes a running Live updates source keeps current, as of the last time the
-    /// indexer looked (see `Live::covered`). The sidebar shows these as Live.
+    /// indexer looked (see `Live::covered`). Clients show these as Live.
     pub followed: Mutex<HashSet<VolumeId>>,
     /// A Sync now is queued for the indexer and not yet started.
     pub sync_queued: AtomicBool,
     /// The folders being Synced alone now, so the same one is not started twice.
     folders_syncing: Mutex<Vec<EntryId>>,
-    /// Background work the sidebar lists (Sync, Duplicate search, Cleaner, ...).
+    /// Background work clients list (Sync, Duplicate search, Cleaner, ...).
     pub tasks: Tasks,
     /// Called from the background threads whenever something a client shows has changed.
     pub repaint: Repaint,
@@ -268,7 +268,7 @@ impl Engine {
     /// Sets the names the user gave Remotes (by identity), shown wherever a Remote is named.
     pub fn set_remote_names(&self, names: &std::collections::BTreeMap<String, String>) {
         *self.shared.remote_names.lock() = names.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        // Off the UI thread: the Index's write lock can be held for a whole save or sync.
+        // Off the caller's thread: the Index's write lock can be held for a whole save or sync.
         let shared = self.shared.clone();
         let _ = thread::Builder::new().name("ve-remote-names".into()).spawn(move || {
             shared.apply_remote_names();
@@ -643,7 +643,7 @@ fn run_indexer(
                 }
             }
         }
-        // The sidebar's Live state follows the helper and the Volumes at once.
+        // The Locations' Live state follows the helper and the Volumes at once.
         let _ = live.covered();
         if !pending.is_empty() && !quiet {
             shared.busy.store(true, Ordering::Relaxed);
@@ -924,7 +924,7 @@ fn sync_volumes(
         shared.tasks.begin(kind, label, true)
     });
     thread::scope(|outer| {
-        // The entry count moves without a notice, so the GUI is nudged while a sync runs; the
+        // The entry count moves without a notice, so clients are nudged while a sync runs; the
         // same loop carries a cancel from the Task to the walk.
         if let Some(task) = &task {
             outer.spawn(|| {
@@ -1092,7 +1092,7 @@ impl Shared {
 }
 
 /// After the first Index save of a day (once every Location has synced), stores that day's Snapshot on a thread of its own, so
-/// neither the save nor the GUI waits for it, then drops the Snapshots retention no longer keeps.
+/// neither the save nor a client waits for it, then drops the Snapshots retention no longer keeps.
 fn snapshot_first_save_of_day(shared: &Arc<Shared>, index_path: &Path) {
     let dir = index_path.with_file_name(SNAPSHOTS);
     let today = Local::now().date_naive();
