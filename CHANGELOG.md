@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Less memory
+- The Index takes about 14% less memory: sizes and creation times are stored in 4 bytes each, with the rare larger value kept aside. On a 5.6M-Entry Index the app uses 403 MiB instead of 465 MiB.
+- Saving the Index no longer makes a full copy of it first, so memory no longer doubles for a moment at every save (peak 446 MiB instead of 941 MiB on the same Index).
+- An Index saved by v0.2 is converted when loaded, without a new Sync. Creation times are kept to the second.
+
 ## v0.2.0
 
 ### Know what the app is doing

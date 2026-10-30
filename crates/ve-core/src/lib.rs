@@ -6,6 +6,7 @@
 
 mod bits;
 pub mod category;
+mod column;
 pub mod export;
 mod filter;
 mod index;
