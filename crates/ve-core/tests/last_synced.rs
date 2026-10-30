@@ -112,6 +112,39 @@ fn the_overall_last_synced_is_the_oldest_volume() {
 }
 
 #[test]
+fn a_location_mid_first_sync_has_no_last_synced() {
+    let mut index = index_with(&["/a", "/b"]);
+    let ids: Vec<_> = index.volumes().map(|(id, _)| id).collect();
+    index.mark_synced(ids[0], 500, None);
+    // The walk of /b has put Entries in and set its sync state, and the Index was saved and
+    // read back meanwhile; none of that is a finished Sync.
+    let top = index.volume(ids[1]).unwrap().root;
+    let docs = index.insert(top, "docs", root());
+    index.insert(
+        docs,
+        "a.txt",
+        EntryMeta {
+            logical: 10,
+            on_disk: 10,
+            ..EntryMeta::default()
+        },
+    );
+    index.set_sync_state(ids[1], SyncState::Walk);
+    index.set_capacity(ids[1], Some(Capacity { total: 1000, free: 10 }));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.bin");
+    index.save(&path).unwrap();
+    let mut index = Index::load(&path).unwrap();
+    assert_eq!(index.volume(ids[1]).unwrap().last_synced, None);
+    assert_eq!(index.oldest_synced(), Some(None));
+    assert!(index.volume(ids[1]).unwrap().needs_catch_up(1_000, 30 * MINUTE));
+    // Only the end of the Sync stamps it.
+    index.mark_synced(ids[1], 900, None);
+    assert_eq!(index.volume(ids[1]).unwrap().last_synced, Some(900));
+    assert_eq!(index.oldest_synced(), Some(Some(500)));
+}
+
+#[test]
 fn a_v2_file_is_refused_as_needing_a_rebuild() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("index.bin");

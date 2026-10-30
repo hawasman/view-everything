@@ -219,16 +219,18 @@ fn summarize_with(
     }
 }
 
-/// Owners shown in the Largest Owners card.
-pub const OWNER_LEN: usize = 10;
+/// Owners kept for the Largest Owners panel, as many as the other lists.
+pub const OWNER_LEN: usize = LIST_LEN;
 
-/// One Owner in the Largest Owners card.
+/// One Owner in the Largest Owners panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnerRow {
     pub name: String,
     pub kind: OwnerKind,
     /// Folder Size summed over the Owner's roots.
     pub size: u64,
+    /// Its largest Owner root, which a click inspects.
+    pub root: EntryId,
 }
 
 /// The `n` Owners with the largest Folder Size, largest first. An Owner with several roots sums
@@ -236,7 +238,13 @@ pub struct OwnerRow {
 /// the Folder Size of its roots, so an enclosing Owner includes what the nested one holds.
 /// Hard links count once per root.
 fn largest_owners(index: &Index, n: usize) -> Vec<OwnerRow> {
-    let mut sizes: HashMap<OwnerId, u64> = HashMap::new();
+    /// What one Owner adds up to so far.
+    struct Tally {
+        size: u64,
+        largest_root: EntryId,
+        largest_root_size: u64,
+    }
+    let mut tallies: HashMap<OwnerId, Tally> = HashMap::new();
     for (root, owner) in index.owner_roots() {
         let mut seen_links = HashSet::new();
         let mut total = 0u64;
@@ -248,16 +256,26 @@ fn largest_owners(index: &Index, n: usize) -> Vec<OwnerRow> {
                 total += index.on_disk(id);
             }
         }
-        *sizes.entry(owner).or_default() += total;
+        let tally = tallies.entry(owner).or_insert(Tally {
+            size: 0,
+            largest_root: root,
+            largest_root_size: 0,
+        });
+        tally.size += total;
+        if total > tally.largest_root_size {
+            tally.largest_root = root;
+            tally.largest_root_size = total;
+        }
     }
-    let mut rows: Vec<OwnerRow> = sizes
+    let mut rows: Vec<OwnerRow> = tallies
         .into_iter()
-        .map(|(o, size)| {
+        .map(|(o, tally)| {
             let owner = index.owner(o);
             OwnerRow {
                 name: owner.name.clone(),
                 kind: owner.kind,
-                size,
+                size: tally.size,
+                root: tally.largest_root,
             }
         })
         .collect();
@@ -529,6 +547,8 @@ mod tests {
         let rows = largest_owners(&index, 10);
         assert_eq!(rows.len(), 10);
         assert_eq!((rows[0].name.as_str(), rows[0].size, rows[0].kind), ("Game", 300, OwnerKind::Game));
+        // A click inspects the larger of its two roots.
+        assert_eq!(rows[0].root, l2);
         assert_eq!((rows[1].name.as_str(), rows[1].size), ("Proj", 80));
         assert_eq!((rows[2].name.as_str(), rows[2].size), ("Inner", 30));
         assert!(rows.windows(2).all(|w| w[0].size >= w[1].size));

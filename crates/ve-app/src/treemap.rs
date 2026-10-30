@@ -860,8 +860,7 @@ impl Treemap {
             .min_w_0()
             .overflow_hidden()
             .text_xs()
-            .text_color(muted)
-            .mb(px(12.));
+            .text_color(muted);
         row = row.child(
             crumb("Index".into(), chain.is_empty())
                 .flex_none()
@@ -881,7 +880,7 @@ impl Treemap {
             .gap(px(12.))
             .items_center()
             .min_w_0()
-            .mb(px(14.))
+            .mb(px(10.))
             .child(
                 div()
                     .flex_none()
@@ -922,17 +921,35 @@ impl Treemap {
                             .build(cx, cx.listener(|this, _, window, cx| this.export_png(window, cx))),
                     ),
             );
-        v_flex().child(title).child(
-            row.child(
-                div()
-                    .flex_none()
-                    .ml(px(6.))
-                    .child(format::size(root.totals(index, &view.filter).on_disk)),
-            ),
-        )
+        let colour_by = h_flex()
+            .flex_none()
+            .gap(px(6.))
+            .items_center()
+            .child(caption("Colour by", cx))
+            .child(segmented(
+                "colour-by",
+                &["Category", "Owner kind"],
+                usize::from(self.colour_by == ColourBy::OwnerKind),
+                cx,
+                {
+                    let this = cx.entity();
+                    move |ix, _, cx| {
+                        let by = if ix == 0 { ColourBy::Category } else { ColourBy::OwnerKind };
+                        this.update(cx, |this, cx| this.set_colour_by(by, cx));
+                    }
+                },
+            ));
+        // Under the title: what the colours mean, then where the Treemap is.
+        let path = row.mb(px(12.)).child(
+            div()
+                .flex_none()
+                .ml(px(6.))
+                .child(format::size(root.totals(index, &view.filter).on_disk)),
+        );
+        v_flex().child(title).child(colour_by.mb(px(10.))).child(path)
     }
 
-    /// Legend of the colours the tiles show, as `.legend`, with the Colour by control at its end.
+    /// Legend of the colours the tiles show, as `.legend`.
     fn legend(&self, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
         let mut row = h_flex()
@@ -960,26 +977,7 @@ impl Treemap {
                 row = row.child(item(p.owner_kind(None), "No Owner"));
             }
         }
-        row.child(
-            h_flex()
-                .ml_auto()
-                .gap(px(6.))
-                .items_center()
-                .child(caption("Colour by", cx))
-                .child(segmented(
-                    "colour-by",
-                    &["Category", "Owner kind"],
-                    usize::from(self.colour_by == ColourBy::OwnerKind),
-                    cx,
-                    {
-                        let this = cx.entity();
-                        move |ix, _, cx| {
-                            let by = if ix == 0 { ColourBy::Category } else { ColourBy::OwnerKind };
-                            this.update(cx, |this, cx| this.set_colour_by(by, cx));
-                        }
-                    },
-                )),
-        )
+        row
     }
 
     /// The colour of every tile under the active colouring (a folder's Owner kind is exact, not sampled).

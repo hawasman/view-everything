@@ -19,6 +19,10 @@
 - A Query that does not parse says why inside the Query box, naming the modifier.
 - Cleanup Rules accept `kind:` and `at:` (which names a location, like `parent:`), and refuse `is:` and `dupe:` with the reason.
 - `ve` refuses `is:offline` and warns that `is:cleanable` finds nothing.
+- `Ctrl+1`, `Ctrl+2` and `Ctrl+3` (`Cmd` on macOS) switch to Overview, Browse and Work from any page, the Query box included.
+- The Entry Inspector has **Show in Browse**: it zooms the Query to the folder the Entry is in and selects the Entry there, among its siblings. The rest of the Query stays, unless it would hide the Entry.
+- The Overview's finding line says how much of the Cleanable total needs administrator ("…; 1.2 GB of it needs administrator"); with none, it says nothing about it.
+- A Location in its first Sync shows Last Synced as "—" everywhere (Overview, Locations, Inspector) until that Sync finishes.
 
 ### Owners
 - Every folder can now say which program, game, package or project it belongs to. That is its **Owner**, found at an **Owner root** (the game's install folder, the application's folder, the folder holding a project's marker files) and inherited by everything beneath it unless a nearer Owner root sits in between. An Owner has a **kind**: System, Program, Game or Project. Folders under no Owner root have no Owner.
@@ -30,15 +34,13 @@
 - Where a platform convention and a project marker find the same folder, the platform's Owner is kept.
 - Detection runs at the end of every Sync and Catch-up of a Location, inside the same Task. Steam, Windows, Linux and macOS detection read only mounted local Volumes; project markers are read from the Index alone. Live updates do not trigger it. The detectors are built in; you can't add your own Owner rules yet ([ADR-0014](docs/adr/0014-owners-live-in-the-index.md)).
 
-### Explorer
-- The Selection panel has an **Owner** row (`<name> · <kind>`, with detail in brackets where there is some). It is left out when the item has no Owner.
-- The Treemap tooltip adds `Owner: <name> · <kind>`, and the flat list has an **Owner** column.
-- **Colour by: Category | Owner kind**, at the right of the Treemap's legend, is remembered between runs. Under Owner kind, the legend shows the four kinds and "No Owner" (grey).
-- Two new Query modifiers: `owner:<text>` matches an Owner's name (a substring, ignoring case; quote a name with spaces: `owner:"Program Files"`), and `ownerkind:system|program|game|project|none`. Both match folders as well as files, and work in `ve find` and `ve top`.
+### Owners in the shell
+- The Entry Inspector has an **Owner** row, `<name> · <kind>`, or "—" when the Entry has no Owner.
+- The Treemap tooltip adds `Owner: <name> · <kind>`, and Browse's flat list has an **Owner** column.
+- **Colour by: Category | Owner kind**, under the Treemap's title, is remembered between runs. Under Owner kind, the legend shows the four kinds and "No Owner" (grey).
+- Two new Query modifiers: `owner:<text>` matches an Owner's name (a substring, ignoring case; quote a name with spaces: `owner:"Program Files"`), and `ownerkind:system|program|game|project|none`. Both match folders as well as files, combine with the rest of a Query, and work in `ve find` and `ve top`.
 - CSV export gains `Owner` and `Owner kind` columns, in the app, in `ve export` and in `ve find --csv`.
-
-### Dashboard
-- A **Largest Owners** card lists the 10 Owners with the largest Folder Size. Clicking one opens the Explorer on `owner:"<name>"`. The card is hidden while the Index has no Owners.
+- The Overview has a **Largest Owners** panel: the 5 Owners with the largest Folder Size. Clicking one shows its Owner root in the Inspector. The panel is hidden while the Index has no Owners.
 
 ### Index format
 - The Index is now format 8. A format 7 file is converted when loaded, and every Location is detected once at launch, so Owners appear without waiting for a Sync.

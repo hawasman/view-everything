@@ -22,7 +22,6 @@ mod locations;
 mod motion;
 mod scope;
 mod selection;
-mod selection_panel;
 mod settings;
 mod settings_page;
 mod tasks;
