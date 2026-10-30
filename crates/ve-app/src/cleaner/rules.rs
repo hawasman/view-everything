@@ -181,8 +181,13 @@ fn check(raw: Raw, os: &str, context: &QueryContext) -> Result<Option<Rule>, Str
     }
     let text = expand(&raw.query).map_err(|e| format!("`{name}`: {e}"))?;
     let query = Query::parse(&text, context).map_err(|e| format!("`{name}`: query `{}`: {e}", raw.query))?;
-    if raw.markers.is_empty() && !text.contains("parent:") {
-        return Err(format!("`{name}`: a rule needs `markers` or a `parent:` location in its query"));
+    let located = ve_core::query::clauses(&text)
+        .iter()
+        .any(|c| c.words.iter().any(|w| !w.negated && matches!(w.modifier, Some("parent" | "at"))));
+    if raw.markers.is_empty() && !located {
+        return Err(format!(
+            "`{name}`: a rule needs `markers` or a `parent:` or `at:` location in its query"
+        ));
     }
     if query.needs_depth() {
         return Err(format!("`{name}`: depth: is not supported in a Cleanup Rule"));
@@ -190,6 +195,13 @@ fn check(raw: Raw, os: &str, context: &QueryContext) -> Result<Option<Rule>, Str
     // The recheck before a Clean reads the disk, where there is no Owner to compare against.
     if query.needs_owner() {
         return Err(format!("`{name}`: owner: and ownerkind: are not supported in a Cleanup Rule"));
+    }
+    // Nor are Duplicates, Cleanables or Offline Volumes known there; and `is:cleanable` would ask a
+    // rule to find what rules found.
+    if query.needs_duplicates() || query.needs_cleanables() || query.needs_offline() {
+        return Err(format!(
+            "`{name}`: is: and dupe: are not supported in a Cleanup Rule; the recheck before a Clean reads the disk, which knows no Duplicates, Cleanables or Offline Volumes"
+        ));
     }
     for m in &raw.markers {
         let p = Path::new(m);
@@ -239,6 +251,8 @@ pub struct Cleanable {
     pub rule: Arc<Rule>,
     /// The path to remove, or the working folder of the command.
     pub path: PathBuf,
+    /// The Entry at `path` when it was found, for `is:cleanable`.
+    pub entry: EntryId,
     /// On-disk Size; for a command rule only an estimate.
     pub on_disk: u64,
     /// Files under it by lower-cased extension (empty: none), for the Category breakdown.
@@ -409,6 +423,7 @@ pub fn find(
         let (on_disk, exts) = subtree_sizes(index, sized);
         out.push(Cleanable {
             path: index.path(id),
+            entry: id,
             on_disk,
             exts,
             newest: newest_file(index, project),
@@ -922,6 +937,44 @@ mod tests {
     }
 
     #[test]
+    fn rules_take_kind_and_at_and_refuse_is() {
+        let ctx = context();
+        let rule = |query: &str| format!("[[rule]]\nname = \"r\"\ngroup = \"cache\"\nquery = '{query}'\n");
+        // `at:` names a location, so no markers are needed.
+        let ok = parse(&rule("at:/w/cache kind:folder"), "cleanup.toml", OS, &ctx);
+        assert_eq!(ok.rules.len(), 1, "{:?}", ok.errors);
+        // A negated `at:` names no location.
+        let unplaced = parse(&rule("!at:/w kind:folder"), "cleanup.toml", OS, &ctx);
+        assert!(unplaced.errors[0].contains("location"), "{:?}", unplaced.errors);
+        for refused in ["at:/w is:cleanable", "at:/w is:offline", "at:/w is:duplicate"] {
+            let out = parse(&rule(refused), "cleanup.toml", OS, &ctx);
+            assert!(out.rules.is_empty());
+            assert!(
+                out.errors[0].contains("is: and dupe: are not supported in a Cleanup Rule; the recheck"),
+                "{:?}",
+                out.errors
+            );
+        }
+        // The rule finds the folders under `at:` and leaves its files.
+        let mut index = Index::new();
+        let vol = index.add_volume(Path::new("/w"), "ext4", "uuid:w", dir(), SyncState::Walk);
+        let root = index.volume(vol).unwrap().root;
+        let cache = index.insert(root, "cache", dir());
+        let inner = index.insert(cache, "pip", dir());
+        index.insert(cache, "loose.bin", file(3));
+        index.insert(root, "elsewhere", dir());
+        let rules = parse(&rule("parent:/w/cache kind:folder"), "cleanup.toml", OS, &ctx).rules;
+        let found = find(&index, &[], &rules, &AtomicBool::new(false), &|_, _, _| {});
+        let ids: Vec<_> = found.iter().map(|c| c.entry).collect();
+        assert_eq!(ids, [inner]);
+        let rules = parse(&rule("at:/w/cache kind:folder"), "cleanup.toml", OS, &ctx).rules;
+        let found = find(&index, &[], &rules, &AtomicBool::new(false), &|_, _, _| {});
+        let ids: Vec<_> = found.iter().map(|c| c.entry).collect();
+        // The folder itself is under `at:`; what is inside it goes with it.
+        assert_eq!(ids, [cache]);
+    }
+
+    #[test]
     fn finds_marked_cleanables_on_writable_locations() {
         let mut index = Index::new();
         let vol = index.add_volume(Path::new("/w"), "ext4", "uuid:w", dir(), SyncState::Walk);
@@ -1034,6 +1087,7 @@ mod tests {
         let c = |name: &str, newest| Cleanable {
             rule: rule(name),
             path: "/x".into(),
+            entry: EntryId(0),
             on_disk: 0,
             exts: Vec::new(),
             newest,

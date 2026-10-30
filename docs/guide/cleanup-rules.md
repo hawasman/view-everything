@@ -88,7 +88,7 @@ estimate = "target"              # what to size for the Estimated figure
 | --- | --- |
 | `name`, `group` | Required. `group` is `temp` (Temporary Files), `cache` (Caches) or `build` (Build Artefacts). |
 | `query` | Required. A [Query](query-language.md) over the Index. `{home}`, `{cache}` and `{temp}` stand for those folders of the user, so `parent:"{cache}"` selects what is directly inside the user cache folder. |
-| `markers` | Required unless the Query names a location with `parent:`. Paths relative to a match, such as `../package.json` (a sibling) or `CACHEDIR.TAG` (inside). A match counts only when one is a plain file, never a link. |
+| `markers` | Required unless the Query names a location with `parent:` or `at:`. Paths relative to a match, such as `../package.json` (a sibling) or `CACHEDIR.TAG` (inside). A match counts only when one is a plain file, never a link. |
 | `files` | `true` lets files match too, not only folders. |
 | `tick` | `false` never pre-ticks the rule. Caches are never pre-ticked either. |
 | `platforms` | Any of `linux`, `macos`, `windows`; every platform when left out. |
@@ -96,3 +96,5 @@ estimate = "target"              # what to size for the Estimated figure
 | `estimate` | With `command`: a path inside the matched folder whose size is shown. |
 
 Clean checks every match again on disk (the Query, the markers, no links, no Volume mounted inside) before it removes or runs anything.
+
+A rule's Query may use `kind:` and `at:`. It may not use `depth:`, `owner:`, `ownerkind:`, `dupe:` or `is:`: the check on disk before a Clean knows no depth, Owners, Duplicates, Cleanables or Offline Volumes, so such a rule is refused with that reason.

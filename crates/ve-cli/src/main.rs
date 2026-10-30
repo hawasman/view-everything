@@ -22,6 +22,10 @@ Options:
   -n <N>          top/du: how many rows (default 20, 0 for all)
   --files         top/du: largest files instead of folders
 
+Queries use the app's Query language: text, ext:, type:, size:, dm:, since:7d, kind:folder,
+at:/path, parent:, owner:, ... (see docs/guide/query-language.md). is:offline is refused, and
+dupe:, is:duplicate and is:cleanable find nothing here: the CLI reads only the Index.
+
 Exit codes: 0 success, 1 no match, 2 error. Last Synced is reported on stderr.";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -173,8 +177,19 @@ fn run(args: &Args, out: &mut impl Write, err: &mut impl Write) -> Result<usize,
         "" => None,
         text => Some(Query::parse(text, &context).map_err(|e| Failure::Message(format!("bad Query: {e}")))?),
     };
+    if query.as_ref().is_some_and(Query::needs_offline) {
+        return Err(Failure::Message(
+            "bad Query: is:offline needs the app; the CLI does not know which Volumes are mounted".into(),
+        ));
+    }
     if query.as_ref().is_some_and(Query::needs_duplicates) {
-        writeln!(err, "ve: dupe: finds nothing here; the CLI does not read the app's hashes")?;
+        writeln!(
+            err,
+            "ve: dupe: and is:duplicate find nothing here; the CLI does not read the app's hashes"
+        )?;
+    }
+    if query.as_ref().is_some_and(Query::needs_cleanables) {
+        writeln!(err, "ve: is:cleanable finds nothing here; the CLI does not run the Cleaner")?;
     }
     let filter = Filter::compute(&index, query.as_ref());
     let scope = scope(&index, args.path.as_deref())?;

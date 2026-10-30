@@ -583,3 +583,125 @@ fn dc_matches_like_dm_and_never_an_unknown_creation_time() {
     ));
     assert!(!matches("dc:2025", &folder("dir")));
 }
+
+#[test]
+fn kind_selects_files_or_folders_and_composes_with_text() {
+    assert!(matches("kind:file", &file("a.txt")));
+    assert!(!matches("kind:file", &folder("a")));
+    assert!(matches("kind:FOLDER", &folder("src")));
+    assert!(!matches("kind:folder", &file("src.rs")));
+    assert!(matches("src kind:folder", &folder("src")));
+    assert!(!matches("src kind:folder", &folder("lib")));
+    assert!(matches("!kind:folder", &file("a.txt")));
+    assert!(matches("kind:file|kind:folder", &folder("x")));
+    let error = |q: &str| Query::parse(q, &context()).unwrap_err().to_string();
+    assert!(error("kind:dir").starts_with("kind:"), "{}", error("kind:dir"));
+    assert!(error("kind:").contains("kind:"));
+}
+
+#[test]
+fn since_takes_a_duration_back_from_now_or_a_date() {
+    // Now is 2025-03-14 12:00.
+    assert!(matches("since:7d", &modified_at(2025, 3, 8, 0)));
+    assert!(!matches("since:7d", &modified_at(2025, 3, 7, 11)));
+    assert!(matches("since:12h", &modified_at(2025, 3, 14, 0)));
+    assert!(!matches("since:12h", &modified_at(2025, 3, 13, 23)));
+    assert!(matches("since:90m", &modified_at(2025, 3, 14, 11)));
+    assert!(matches("since:2w", &modified_at(2025, 3, 1, 0)));
+    assert!(!matches("since:2w", &modified_at(2025, 2, 27, 0)));
+    // A date means from its start, local time.
+    assert!(matches("since:2025-03-01", &modified_at(2025, 3, 1, 0)));
+    assert!(!matches("since:2025-03-01", &modified_at(2025, 2, 28, 23)));
+    assert!(matches("since:2025-03", &modified_at(2025, 3, 1, 0)));
+    assert!(matches("since:yesterday", &modified_at(2025, 3, 13, 0)));
+    // Like dm:, it is about files; it composes with other terms.
+    let mut dir = modified_at(2025, 3, 14, 0);
+    dir.is_dir = true;
+    assert!(!matches("since:7d", &dir));
+    assert!(matches(
+        "report since:7d",
+        &Candidate {
+            name: "report.pdf",
+            ..modified_at(2025, 3, 10, 0)
+        }
+    ));
+    assert!(!matches(
+        "report !since:7d",
+        &Candidate {
+            name: "report.pdf",
+            ..modified_at(2025, 3, 10, 0)
+        }
+    ));
+    for bad in ["since:", "since:7x", "since:soon", "since:d", "since:2025-13-01"] {
+        let error = Query::parse(bad, &context()).unwrap_err().to_string();
+        assert!(error.contains("since:"), "{bad}: {error}");
+    }
+}
+
+#[test]
+fn at_matches_a_folder_and_everything_below_it_ignoring_case() {
+    let query = Query::parse("at:/home/Me", &context()).unwrap();
+    assert!(query.needs_path());
+    assert!(query.matches(&at("/home/me")));
+    assert!(query.matches(&at("/home/ME/docs/a.txt")));
+    assert!(!query.matches(&at("/home/meme/a.txt")));
+    assert!(!query.matches(&at("/home")));
+    assert!(matches("at:/home/me/", &at("/home/me/a.txt")));
+    assert!(matches("at:C:\\Users", &at("C:/Users/me/a.txt")));
+    assert!(matches("at:/", &at("/")));
+    assert!(matches("at:/", &at("/etc/hosts")));
+    assert!(matches("at:/home/Ünï", &at("/home/üNÏ/a.txt")));
+    assert!(matches("at:\"/home/my docs\" *.pdf", &at("/home/my docs/a.pdf")));
+    assert!(!matches("at:/home !at:/home/me", &at("/home/me/a.txt")));
+    for bad in ["at:", "at:docs", "at:docs:old"] {
+        let error = Query::parse(bad, &context()).unwrap_err().to_string();
+        assert!(error.contains("at:"), "{bad}: {error}");
+    }
+}
+
+#[test]
+fn is_selects_cleanables_duplicates_and_entries_on_offline_volumes() {
+    use std::path::Path;
+    use std::sync::Arc;
+    use ve_core::{BitSet, EntryMeta, Filter, Index, SyncState};
+    let dir = EntryMeta {
+        is_dir: true,
+        ..EntryMeta::default()
+    };
+    let mut index = Index::new();
+    let here = index.add_volume(Path::new("/m/here"), "ext4", "here", dir, SyncState::Walk);
+    let gone = index.add_volume(Path::new("/m/gone"), "ext4", "gone", dir, SyncState::Walk);
+    let (here_root, gone_root) = (index.volume(here).unwrap().root, index.volume(gone).unwrap().root);
+    let target = index.insert(here_root, "target", dir);
+    let built = index.insert(target, "app.bin", EntryMeta::default());
+    let copy = index.insert(here_root, "copy.txt", EntryMeta::default());
+    let away = index.insert(gone_root, "away.txt", EntryMeta::default());
+    index.set_mount(gone, None);
+    let mut cleanables = BitSet::new(index.capacity());
+    cleanables.insert(target.index());
+    let mut duplicates = BitSet::new(index.capacity());
+    duplicates.insert(copy.index());
+    let context = context()
+        .with_cleanables(Arc::new(cleanables))
+        .with_duplicates(Arc::new(duplicates));
+    let all = [here_root, target, built, copy, gone_root, away];
+    let matched = |q: &str| {
+        let query = Query::parse(q, &context).unwrap();
+        let filter = Filter::compute(&index, Some(&query));
+        all.map(|id| filter.is_matched(id))
+    };
+    assert!(Query::parse("is:cleanable", &context).unwrap().needs_cleanables());
+    assert!(Query::parse("is:offline", &context).unwrap().needs_offline());
+    assert_eq!(matched("is:cleanable"), [false, true, false, false, false, false]);
+    // What is inside a Cleanable counts toward Filtered Size with it.
+    let filter = Filter::compute(&index, Some(&Query::parse("is:cleanable", &context).unwrap()));
+    assert!(filter.is_counted(built) && !filter.is_counted(copy));
+    assert_eq!(matched("is:duplicate"), [false, false, false, true, false, false]);
+    assert_eq!(matched("is:Offline"), [false, false, false, false, true, true]);
+    assert_eq!(matched("!is:offline kind:file"), [false, false, true, true, false, false]);
+    assert_eq!(matched("is:cleanable|is:duplicate"), [false, true, false, true, false, false]);
+    assert_eq!(matched("at:/m/here is:duplicate"), [false, false, false, true, false, false]);
+    let error = |q: &str| Query::parse(q, &context).unwrap_err().to_string();
+    assert!(error("is:big").starts_with("is:"), "{}", error("is:big"));
+    assert!(error("is:").contains("is:"));
+}
