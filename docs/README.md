@@ -5,6 +5,7 @@
 | Page | Covers |
 | --- | --- |
 | [Query language](guide/query-language.md) | every Query term and modifier |
+| [Owners](guide/owners.md) | the program, game or project a folder belongs to, how it is found, `owner:` and `ownerkind:` |
 | [Cleaner and Cleanup Rules](guide/cleanup-rules.md) | what the Cleaner finds, how Clean checks before removing, writing your own rules |
 | [Duplicates](guide/duplicates.md) | finding and trashing Duplicates, Duplicate Exclusions, how files are compared |
 | [Snapshots, Compare with and Export](guide/snapshots-and-export.md) | daily Snapshots, the Change column, CSV and PNG export |

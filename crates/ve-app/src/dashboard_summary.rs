@@ -3,9 +3,9 @@
 //! the saved Query. It ignores the Explorer's Query.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::{Duration, Instant};
-use ve_core::{Candidate, Capacity, Category, CategoryMap, EntryId, Index, Query};
+use ve_core::{Candidate, Capacity, Category, CategoryMap, EntryId, Index, OwnerId, OwnerKind, Query};
 
 /// Rows in each of the Largest files and Recently modified tables.
 pub const LIST_LEN: usize = 6;
@@ -50,6 +50,8 @@ pub struct Summary {
     pub entries: u64,
     pub volumes: Vec<VolumeSummary>,
     pub largest: Vec<FileRow>,
+    /// The Owners with the largest Folder Size, largest first; empty without Owner roots.
+    pub owners: Vec<OwnerRow>,
     pub recent: Vec<FileRow>,
     pub took: Duration,
 }
@@ -221,10 +223,58 @@ fn summarize_with(
         categories: totals,
         entries: index.live_count() as u64,
         volumes,
+        owners: largest_owners(index, OWNER_LEN),
         largest: largest.into_sorted().into_iter().map(row).collect(),
         recent: recent_ids.into_iter().map(row).collect(),
         took: started.elapsed(),
     }
+}
+
+/// Owners shown in the Largest Owners card.
+pub const OWNER_LEN: usize = 10;
+
+/// One Owner in the Largest Owners card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnerRow {
+    pub name: String,
+    pub kind: OwnerKind,
+    /// Folder Size summed over the Owner's roots.
+    pub size: u64,
+}
+
+/// The `n` Owners with the largest Folder Size, largest first. An Owner with several roots sums
+/// them. A root nested in another Owner's root counts toward both: each Owner's size is simply
+/// the Folder Size of its roots, so an enclosing Owner includes what the nested one holds.
+/// Hard links count once per root.
+fn largest_owners(index: &Index, n: usize) -> Vec<OwnerRow> {
+    let mut sizes: HashMap<OwnerId, u64> = HashMap::new();
+    for (root, owner) in index.owner_roots() {
+        let mut seen_links = HashSet::new();
+        let mut total = 0u64;
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if index.is_dir(id) {
+                stack.extend(index.children(id));
+            } else if !index.is_hardlinked(id) || seen_links.insert(index.key(id)) {
+                total += index.on_disk(id);
+            }
+        }
+        *sizes.entry(owner).or_default() += total;
+    }
+    let mut rows: Vec<OwnerRow> = sizes
+        .into_iter()
+        .map(|(o, size)| {
+            let owner = index.owner(o);
+            OwnerRow {
+                name: owner.name.clone(),
+                kind: owner.kind,
+                size,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
+    rows.truncate(n);
+    rows
 }
 
 /// Whether the file `id` matches `query`; `scratch` is reused between calls.
@@ -240,6 +290,11 @@ fn matches(index: &Index, query: &Query, id: EntryId, scratch: &mut (String, Vec
         logical: index.logical(id),
         modified: index.modified(id),
         depth: if query.needs_depth() { index.depth(id) } else { 0 },
+        owner: if query.needs_owner() {
+            index.entry_owner(id).map(|o| (o.kind, o.name.as_str()))
+        } else {
+            None
+        },
         ..Candidate::default()
     })
 }
@@ -542,5 +597,40 @@ mod tests {
             (every(15), every(120), every(0)),
             ("Every 15 min".into(), "Every 2 h".into(), "Manual".into())
         );
+    }
+
+    #[test]
+    fn largest_owners_sum_roots_count_nested_twice_and_cut_at_n() {
+        use ve_core::Owner;
+        let mut index = Index::new();
+        let v = index.add_volume(std::path::Path::new("/v"), "ext4", "v", folder(), SyncState::Walk);
+        let root = index.volume(v).unwrap().root;
+        let game = Owner::new(OwnerKind::Game, "Game", "Steam");
+        let mut roots = Vec::new();
+        // One Owner in two folders: 100 + 200.
+        let (l1, l2) = (index.insert(root, "lib1", folder()), index.insert(root, "lib2", folder()));
+        index.insert(l1, "a.bin", file(100, 1));
+        index.insert(l2, "b.bin", file(200, 1));
+        roots.push((l1, game.clone()));
+        roots.push((l2, game));
+        // A Project holding 50 with a nested Program of 30: the Project counts both.
+        let p = index.insert(root, "proj", folder());
+        index.insert(p, "x.rs", file(50, 1));
+        let inner = index.insert(p, "inner", folder());
+        index.insert(inner, "y.rs", file(30, 1));
+        roots.push((p, Owner::new(OwnerKind::Project, "Proj", "Cargo.toml")));
+        roots.push((inner, Owner::new(OwnerKind::Program, "Inner", "pacman")));
+        for i in 0..12 {
+            let f = index.insert(root, &format!("o{i}"), folder());
+            index.insert(f, "f", file(i, 1));
+            roots.push((f, Owner::new(OwnerKind::Program, format!("O{i}"), "")));
+        }
+        index.set_owners(root, roots);
+        let rows = largest_owners(&index, 10);
+        assert_eq!(rows.len(), 10);
+        assert_eq!((rows[0].name.as_str(), rows[0].size, rows[0].kind), ("Game", 300, OwnerKind::Game));
+        assert_eq!((rows[1].name.as_str(), rows[1].size), ("Proj", 80));
+        assert_eq!((rows[2].name.as_str(), rows[2].size), ("Inner", 30));
+        assert!(rows.windows(2).all(|w| w[0].size >= w[1].size));
     }
 }

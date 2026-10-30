@@ -6,7 +6,7 @@ use gpui_kit::component::{ActiveTheme as _, Theme, ThemeConfig, ThemeConfigColor
 use gpui_kit::*;
 use std::borrow::Cow;
 use std::rc::Rc;
-use ve_core::Category;
+use ve_core::{Category, OwnerKind};
 
 /// Static instances of the OFL variable Instrument Sans (wght 400, 500, 600): GPUI picks a
 /// weight by face, so each one is its own file.
@@ -54,6 +54,8 @@ pub struct Palette {
     pub pill_accent: (Hsla, Hsla),
     /// `--cat-*`, in `Category` declaration order.
     pub cat: [Hsla; 8],
+    /// The Treemap's Owner kind colours: System, Program, Game, Project, then "No Owner".
+    pub owner: [Hsla; 5],
     pub tileink: Hsla,
     pub free: Hsla,
     pub avatar: (Hsla, Hsla),
@@ -93,6 +95,7 @@ impl Palette {
                 hx(0x9a5530),
                 hx(0x6f6f6b),
             ],
+            owner: [hx(0xa8661a), hx(0x35609a), hx(0x5f7d2a), hx(0xa0456f), hx(0xa0a09b)],
             tileink: hx(0xffffff),
             free: hx(0xe7eaea),
             avatar: (hx(0xdbe7f3), hx(0x1d3a57)),
@@ -132,6 +135,7 @@ impl Palette {
                 hx(0xbf7448),
                 hx(0x8a8a85),
             ],
+            owner: [hx(0xc98a3d), hx(0x4a7fbf), hx(0x86a44a), hx(0xc0638f), hx(0x6f6f6b)],
             tileink: hx(0x0d0d0d),
             free: hx(0x2a2b2b),
             avatar: (hx(0x25384a), hx(0xbcd6ee)),
@@ -140,6 +144,11 @@ impl Palette {
 
     pub fn category(&self, category: Category) -> Hsla {
         self.cat[category as usize]
+    }
+
+    /// The Treemap's Owner kind colour; None is "No Owner".
+    pub fn owner_kind(&self, kind: Option<OwnerKind>) -> Hsla {
+        self.owner[kind.map_or(4, |k| k as usize)]
     }
 
     /// The tokens as the kit's theme file expresses them.

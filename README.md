@@ -20,14 +20,15 @@ It keeps one Index of every file on your Volumes, saved between runs, so searchi
 ### Find
 - **One Index** of every local Volume. Removable disks stay searchable as Offline Volumes after you unplug them. Mounted network shares are opt-in.
 - **Remotes:** index SSH/SFTP, S3, FTP, WebDAV and Azure Blob storage, read-only. [More](docs/guide/remotes.md)
-- **Query:** results as you type, with modifiers such as `ext:`, `size:>1gb`, `dm:yesterday`, `regex:` and `dupe:`. [More](docs/guide/query-language.md)
+- **Query:** results as you type, with modifiers such as `ext:`, `size:>1gb`, `dm:yesterday`, `regex:`, `dupe:` and `owner:`. [More](docs/guide/query-language.md)
 - **Saved Queries** for the searches you repeat.
 - **Command line:** `ve find`, `ve top` and `ve export` read the same Index. [More](docs/guide/command-line.md)
 
 ### See
-- **Dashboard:** space per Category, a capacity bar per Location, the largest and most recently modified files, and when each Location last synced.
+- **Dashboard:** space per Category, a capacity bar per Location, the largest and most recently modified files, the largest Owners, and when each Location last synced.
 - **Explorer:** a tree and a flat list beside a Treemap, all driven by one Query. Double-click any folder to zoom into it. Select several rows for the right-click menu: Open, Show in Explorer, Open terminal here, Copy path, Trash, Sync this folder and Export selection to CSV.
-- **Treemap:** folders labelled with their name and size down to an adjustable Depth. Hover shows every enclosing folder. The **Selection panel** shows the selected item's size, share and contents, with actions.
+- **Treemap:** folders labelled with their name and size down to an adjustable Depth, coloured by Category or by Owner kind. Hover shows every enclosing folder. The **Selection panel** shows the selected item's size, share, contents and Owner, with actions.
+- **Owners:** the program, game, package or project a folder belongs to, found for Steam games, installed programs, system folders and code projects. [More](docs/guide/owners.md)
 - **Snapshots and Compare with:** a daily Snapshot of folder sizes, and a Change column showing what grew. [More](docs/guide/snapshots-and-export.md)
 - **Export** to CSV or the Treemap to PNG. [More](docs/guide/snapshots-and-export.md#export)
 

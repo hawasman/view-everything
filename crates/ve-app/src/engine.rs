@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use ve_core::owners::{self, LocalDisk, Platform};
 use ve_core::snapshot::{self, Snapshot};
 use ve_core::{BitSet, CategoryMap, EntryId, Filter, Index, Query, QueryContext, Remote, SyncState, Volume, VolumeId};
 use ve_scan::duplicates::{self, Group, HashCache, HashProgress};
@@ -403,7 +404,18 @@ fn run_indexer(
     let index_path = settings::index_path();
     if let Some(path) = &index_path {
         match Index::load(path) {
-            Ok(index) => *shared.index.write() = index,
+            Ok(index) => {
+                let stale = index.owners_stale();
+                *shared.index.write() = index;
+                // A format before 8 had no Owners: every Location is detected once, now,
+                // rather than at its next Sync, so the Treemap is not half grey until then.
+                if stale {
+                    let volumes: Vec<VolumeId> = shared.index.read().volumes().map(|(id, _)| id).collect();
+                    for id in volumes {
+                        detect_owners(shared, id);
+                    }
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             // The format changed (a new column, say): say so rather than show a bare error.
             Err(e) if e.kind() == std::io::ErrorKind::Unsupported && e.to_string().contains("needs rebuild") => shared.report(
@@ -922,6 +934,11 @@ fn sync_volumes(
                                 ve_scan::capacity(mount)
                             };
                             shared.index.write().mark_synced(*id, started, capacity);
+                            // The last step of a Sync or Catch-up (ADR-0014); a journal poll
+                            // added a few Entries and is not worth a walk.
+                            if !quiet {
+                                detect_owners(shared, *id);
+                            }
                         }
                         // A cancel interrupts the read; that is not a failure.
                         Err(_) if shared.progress.cancelled() => {}
@@ -963,6 +980,30 @@ fn sync_volumes(
     let cancelled = shared.progress.cancelled();
     shared.progress.cancel.store(false, Ordering::Relaxed);
     cancelled
+}
+
+/// Finds the Owner roots of a Location and records them in the Index. A mounted local Volume
+/// gets the platform's conventions (Steam manifests, install folders, the package database);
+/// a Remote or an Offline Volume only what the Index alone shows, project markers. Files are
+/// read between the two locks, so frames never wait on the disk.
+fn detect_owners(shared: &Shared, id: VolumeId) {
+    let detection = {
+        let index = shared.index.read();
+        let Some(volume) = index.volume(id) else {
+            return;
+        };
+        let platform = (volume.online && !volume.is_remote()).then(Platform::current).flatten();
+        owners::plan(&index, id, platform)
+    };
+    let Some(detection) = detection else {
+        return;
+    };
+    let text = detection.read(&LocalDisk);
+    let mut index = shared.index.write();
+    let (root, roots) = detection.finish(&index, text);
+    index.set_owners(root, roots);
+    drop(index);
+    (shared.repaint)();
 }
 
 /// Gives the memory a sync freed back to the OS. A walk allocates and frees millions of

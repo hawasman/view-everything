@@ -2,7 +2,7 @@
 
 use crate::engine::Shared;
 use crate::format;
-use crate::theme::palette;
+use crate::theme::{Palette, palette};
 use crate::ui::{caption, pill, swatch};
 use crate::view::{Focus, View};
 use gpui_kit::component::notification::Notification;
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
-use ve_core::{Category, CategoryMap, EntryId, Filter, Index};
+use ve_core::{Category, CategoryMap, EntryId, Filter, Index, OwnerKind};
 
 /// Stop laying out once this many rectangles exist (a safety cap; the per-folder cap below keeps
 /// ordinary layouts far under it). Painting costs about a microsecond a tile.
@@ -117,6 +117,8 @@ struct Tile {
     is_dir: bool,
     /// A file's Category; for a folder, the Category holding most of its size.
     category: Category,
+    /// The kind of the Entry's Owner, if it has one.
+    owner: Option<OwnerKind>,
     /// A folder whose children are laid out inside it (under a header band).
     subdivided: bool,
     /// How deep under the zoom root: 1 directly under it; drives the shade ladder.
@@ -253,6 +255,14 @@ pub const MIN_DEPTH: u8 = 1;
 pub const MAX_DEPTH: u8 = 8;
 pub const DEFAULT_DEPTH: u8 = 3;
 
+/// What the Treemap's tiles are coloured by.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ColourBy {
+    #[default]
+    Category,
+    OwnerKind,
+}
+
 /// The area for the children of a folder drawn in `rect` at `level` (1 directly under the zoom
 /// root), or None when it is past the `depth` or has no room for a header band.
 fn plan_folder(rect: Rect, level: u8, depth: u8) -> Option<Rect> {
@@ -290,10 +300,13 @@ fn layout(index: &Index, filter: &Filter, categories: &CategoryMap, root: Focus,
 }
 
 /// Folders take the colour of what is inside them: shown as a block, or as the tint behind
-/// their children.
+/// their children. Every tile learns its Owner kind here too.
 fn colour_folders(tiles: &mut [Tile], index: &Index, filter: &Filter, categories: &CategoryMap) {
-    for tile in tiles.iter_mut().filter(|t| t.is_dir) {
-        tile.category = dominant_category(index, filter, categories, tile.id);
+    for tile in tiles.iter_mut() {
+        if tile.is_dir {
+            tile.category = dominant_category(index, filter, categories, tile.id);
+        }
+        tile.owner = index.entry_owner(tile.id).map(|o| o.kind);
     }
 }
 
@@ -343,6 +356,7 @@ fn layout_tiles(index: &Index, filter: &Filter, categories: &CategoryMap, root: 
                         id: folder,
                         is_dir: false,
                         category: Category::Other,
+                        owner: None,
                         subdivided: false,
                         level,
                         more,
@@ -363,6 +377,7 @@ fn layout_tiles(index: &Index, filter: &Filter, categories: &CategoryMap, root: 
                 id,
                 is_dir,
                 category,
+                owner: None,
                 subdivided: false,
                 level,
                 more: None,
@@ -582,6 +597,8 @@ pub enum TreemapEvent {
     Scope(Option<EntryId>),
     /// The Depth control moved: persist the new Depth.
     Depth(u8),
+    /// The Colour by control moved: persist the new choice.
+    ColourBy(ColourBy),
 }
 
 impl EventEmitter<TreemapEvent> for Treemap {}
@@ -607,6 +624,8 @@ pub struct Treemap {
     asked: Option<(Option<u64>, [i32; 2], u8)>,
     /// How many levels of folders are subdivided; see `plan_folder`.
     depth: u8,
+    /// What the tiles are coloured by.
+    colour_by: ColourBy,
     /// The drawing area in window coordinates, as of the last paint.
     bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The index of the tile under the pointer, with the pointer's position inside the drawing area.
@@ -624,7 +643,7 @@ pub struct Treemap {
 }
 
 impl Treemap {
-    pub fn new(shared: Arc<Shared>, categories: CategoryMap, depth: u8, cx: &mut Context<Self>) -> Self {
+    pub fn new(shared: Arc<Shared>, categories: CategoryMap, depth: u8, colour_by: ColourBy, cx: &mut Context<Self>) -> Self {
         cx.spawn(async move |this, cx| {
             let mut wait = POLL;
             loop {
@@ -649,6 +668,7 @@ impl Treemap {
             tiles_key: None,
             asked: None,
             depth: depth.clamp(MIN_DEPTH, MAX_DEPTH),
+            colour_by,
             bounds: Rc::default(),
             hovered: None,
             motion: Duration::ZERO,
@@ -666,6 +686,14 @@ impl Treemap {
             self.depth = depth;
             self.hovered = None;
             cx.emit(TreemapEvent::Depth(depth));
+            cx.notify();
+        }
+    }
+
+    fn set_colour_by(&mut self, colour_by: ColourBy, cx: &mut Context<Self>) {
+        if colour_by != self.colour_by {
+            self.colour_by = colour_by;
+            cx.emit(TreemapEvent::ColourBy(colour_by));
             cx.notify();
         }
     }
@@ -787,11 +815,13 @@ impl Treemap {
         };
         let free = rgb(p.free);
         // Subdivided folders show only as the gaps between their children: the background.
+        let hues = self.hues(&p);
         let blocks: Vec<_> = self
             .tiles
             .iter()
-            .filter(|t| !t.subdivided)
-            .flat_map(|t| {
+            .zip(&hues)
+            .filter(|(t, _)| !t.subdivided)
+            .flat_map(|(t, &hue)| {
                 let r = t.rect;
                 let inner = t.visible();
                 [
@@ -801,7 +831,7 @@ impl Treemap {
                     },
                     crate::export::Block {
                         rect: [inner.x0, inner.y0, inner.x1, inner.y1],
-                        rgb: rgb(p.category(t.category)),
+                        rgb: rgb(hue),
                     },
                 ]
             })
@@ -899,13 +929,9 @@ impl Treemap {
         )
     }
 
-    /// Legend of the Categories the tiles show, as `.legend`.
-    fn legend(&self, cx: &App) -> Div {
+    /// Legend of the colours the tiles show, as `.legend`, with the Colour by control at its end.
+    fn legend(&self, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
-        let mut seen = [false; Category::ALL.len()];
-        for tile in self.tiles.iter().filter(|t| !t.subdivided && t.more.is_none()) {
-            seen[tile.category as usize] = true;
-        }
         let mut row = h_flex()
             .flex_wrap()
             .gap_x(px(14.))
@@ -913,16 +939,54 @@ impl Treemap {
             .mt(px(12.))
             .text_xs()
             .text_color(p.muted);
-        for category in Category::ALL.into_iter().filter(|c| seen[*c as usize]) {
-            row = row.child(
-                h_flex()
-                    .gap(px(6.))
-                    .items_center()
-                    .child(swatch(p.category(category)))
-                    .child(category.name()),
-            );
+        let item = |color: Hsla, name: &'static str| h_flex().gap(px(6.)).items_center().child(swatch(color)).child(name);
+        match self.colour_by {
+            ColourBy::Category => {
+                let mut seen = [false; Category::ALL.len()];
+                for tile in self.tiles.iter().filter(|t| !t.subdivided && t.more.is_none()) {
+                    seen[tile.category as usize] = true;
+                }
+                for category in Category::ALL.into_iter().filter(|c| seen[*c as usize]) {
+                    row = row.child(item(p.category(category), category.name()));
+                }
+            }
+            ColourBy::OwnerKind => {
+                for kind in OwnerKind::ALL {
+                    row = row.child(item(p.owner_kind(Some(kind)), kind.name()));
+                }
+                row = row.child(item(p.owner_kind(None), "No Owner"));
+            }
         }
-        row.child(div().ml_auto().child("Tile colour = folder's largest Category"))
+        row.child(
+            h_flex()
+                .ml_auto()
+                .gap(px(6.))
+                .items_center()
+                .child(caption("Colour by", cx))
+                .child(
+                    pill("colour-category", "Category")
+                        .small()
+                        .selected(self.colour_by == ColourBy::Category)
+                        .build(cx, cx.listener(|this, _, _, cx| this.set_colour_by(ColourBy::Category, cx))),
+                )
+                .child(
+                    pill("colour-owner-kind", "Owner kind")
+                        .small()
+                        .selected(self.colour_by == ColourBy::OwnerKind)
+                        .build(cx, cx.listener(|this, _, _, cx| this.set_colour_by(ColourBy::OwnerKind, cx))),
+                ),
+        )
+    }
+
+    /// The colour of every tile under the active colouring (a folder's Owner kind is exact, not sampled).
+    fn hues(&self, p: &Palette) -> Vec<Hsla> {
+        self.tiles
+            .iter()
+            .map(|t| match self.colour_by {
+                ColourBy::Category => p.category(t.category),
+                ColourBy::OwnerKind => p.owner_kind(t.owner),
+            })
+            .collect()
     }
 
     /// The pointer's tooltip (`.tip`): inverted; the Volume-relative path as a breadcrumb, the
@@ -996,6 +1060,14 @@ impl Treemap {
             }))
             .child(first)
             .child(second)
+            .children(index.entry_owner(id).map(|owner| {
+                let detail = if owner.detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", owner.detail)
+                };
+                div().child(format!("Owner: {} · {}{detail}", owner.name, owner.kind.name()))
+            }))
             .children(around.into_iter().map(|line| div().opacity(0.8).child(format!("in {line}"))))
     }
 }
@@ -1027,7 +1099,6 @@ impl Render for Treemap {
         }
         let p = palette(cx);
         let (free, ink, text, muted) = (p.free, p.tileink, p.text, p.muted);
-        let cats = Category::ALL.map(|c| p.category(c));
         let panel = crate::ui::panel(cx).size_full().flex().flex_col();
         let shared = self.shared.clone();
         let index = shared.index.read();
@@ -1037,6 +1108,7 @@ impl Render for Treemap {
         let root = zoom_root(&index, &view);
 
         let tiles = self.tiles.clone();
+        let hues = self.hues(&p);
         // The selected Entry's own tile, else the nearest folder of it that is drawn.
         let selected = self.selected.filter(|&id| index.is_live(id)).and_then(|id| {
             let chain: Vec<EntryId> = std::iter::successors(Some(id), |&e| index.parent(e)).collect();
@@ -1118,9 +1190,9 @@ impl Render for Treemap {
                         mix(free, muted, 0.3)
                     } else if tile.subdivided {
                         // Shows between the children: a faint tint of the folder's Category.
-                        mix(free, cats[tile.category as usize], 0.14 + 0.025 * step)
+                        mix(free, hues[i], 0.14 + 0.025 * step)
                     } else {
-                        shade(cats[tile.category as usize], tile.level, dark)
+                        shade(hues[i], tile.level, dark)
                     };
                     // During a zoom the tile is between where it was and where it is.
                     let (cell, opacity) = match &zoom {
@@ -1143,7 +1215,7 @@ impl Render for Treemap {
                     // A strip in the folder's colour across the top of each top-level folder.
                     if tile.subdivided && tile.parent.is_none() {
                         let strip = Rect { y1: vis.y0 + 2.0, ..vis };
-                        window.paint_quad(fill(at(strip), cats[tile.category as usize].opacity(opacity)));
+                        window.paint_quad(fill(at(strip), hues[i].opacity(opacity)));
                     }
                 }
                 let clear = gpui_kit::transparent_black();
@@ -1387,6 +1459,7 @@ mod tests {
             id: EntryId(1),
             is_dir: false,
             category: Category::Other,
+            owner: None,
             subdivided: false,
             level: 1,
             more: None,
@@ -1409,6 +1482,7 @@ mod tests {
             id: EntryId(id),
             is_dir,
             category: Category::Other,
+            owner: None,
             subdivided: is_dir,
             level: 1,
             more: None,
@@ -1577,6 +1651,7 @@ mod tests {
             id: EntryId(1),
             is_dir: false,
             category: Category::Other,
+            owner: None,
             subdivided: false,
             level: 1,
             more: None,
@@ -1608,6 +1683,7 @@ mod tests {
             id: EntryId(id),
             is_dir: false,
             category: Category::Other,
+            owner: None,
             subdivided: false,
             level: 1,
             more,

@@ -104,8 +104,16 @@ A Query naming Entries that the search for Duplicates treats as absent, because 
 _Avoid_: ignore list, duplicate filter
 
 **Owner**:
-The program, game, package or project that a folder belongs to, such as a Steam game, the operating system or a code project.
+The program, game, package or project that a folder belongs to, such as a Steam game, the operating system or a code project. An Owner is found at one folder, its Owner root, and every Entry below it has that Owner unless a nearer Owner root sits in between; an Entry has at most one Owner.
 _Avoid_: app, vendor, source
+
+**Owner kind**:
+Which sort of thing an Owner is: System (the operating system and what its package manager installed), Program (an application the user installed), Game (installed by a game launcher) or Project (a code project, recognised by its marker files). Entries under no Owner root have no Owner.
+_Avoid_: owner type, owner category
+
+**Owner root**:
+The folder where an Owner was found: the game's install folder, the application's folder or the folder holding a project's marker files.
+_Avoid_: owner folder, install dir
 
 ### Views
 

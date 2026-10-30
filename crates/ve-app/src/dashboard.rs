@@ -524,6 +524,7 @@ impl Render for DashboardPage {
                     .child(self.locations_panel(&locations, now, cx))
                     .child(self.side_column(&locations, oldest_ix, now, cx)),
             )
+            .children(self.owners_panel(cx))
             .child(
                 h_flex()
                     .items_start()
@@ -1088,6 +1089,34 @@ impl DashboardPage {
                     ),
             )
             .child(table)
+    }
+
+    /// The Largest Owners card: top Owners by Folder Size, each opening the Explorer on its Owner.
+    /// Nothing when the Index has no Owner roots.
+    fn owners_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = palette(cx);
+        let rows = self.shown.as_ref().map(|s| s.owners.clone()).filter(|r| !r.is_empty())?;
+        let list = rows.into_iter().enumerate().map(|(ix, r)| {
+            let query = format!("owner:\"{}\"", r.name.replace('"', ""));
+            h_flex()
+                .id(("owner", ix))
+                .items_center()
+                .gap(px(10.))
+                .py(px(6.))
+                .cursor_pointer()
+                .hover(|s| s.bg(p.control))
+                .child(div().flex_grow(1.).min_w_0().truncate().child(r.name))
+                .child(div().flex_none().text_xs().text_color(p.muted).child(r.kind.name()))
+                .child(div().flex_none().w(px(80.)).text_right().child(format::size(r.size)))
+                .on_click(cx.listener(move |_, _, _, cx| Self::explore(Some(query.clone()), cx)))
+        });
+        Some(
+            panel(cx)
+                .mt(px(16.))
+                .child(div().mb(px(14.)).font_weight(FontWeight::MEDIUM).child("Largest Owners"))
+                .child(v_flex().children(list))
+                .into_any_element(),
+        )
     }
 
     fn recent_panel(&self, locations: &[Location], cx: &mut Context<Self>) -> impl IntoElement {

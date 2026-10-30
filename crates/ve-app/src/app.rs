@@ -219,6 +219,7 @@ impl Shell {
         });
         let duplicates = cx.new(|_| DuplicatesPanel::new(engine.shared.clone(), trash.clone(), volumes.clone()));
         let treemap_depth = settings.treemap_depth;
+        let treemap_colour_by = settings.treemap_colour_by;
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
         cx.subscribe_in(&dashboard, window, |this, _, act: &Act, window, cx| {
             this.dashboard_act(act, window, cx)
@@ -308,7 +309,7 @@ impl Shell {
                 .col_resizable(false)
                 .select_on_modifier_click(false)
         });
-        let treemap = cx.new(|cx| Treemap::new(engine.shared.clone(), categories.clone(), treemap_depth, cx));
+        let treemap = cx.new(|cx| Treemap::new(engine.shared.clone(), categories.clone(), treemap_depth, treemap_colour_by, cx));
         let selection_panel = cx.new(|_| SelectionPanel::new(engine.shared.clone()));
         cx.subscribe_in(
             &selection_panel,
@@ -415,6 +416,11 @@ impl Shell {
                 let depth = *depth;
                 this.settings_page
                     .update(cx, |page, cx| page.apply(|s| s.treemap_depth = depth, cx));
+            }
+            TreemapEvent::ColourBy(colour_by) => {
+                let colour_by = *colour_by;
+                this.settings_page
+                    .update(cx, |page, cx| page.apply(|s| s.treemap_colour_by = colour_by, cx));
             }
         })
         .detach();

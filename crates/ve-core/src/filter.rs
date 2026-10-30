@@ -1,5 +1,6 @@
 use crate::bits::BitSet;
 use crate::index::{EntryId, Index};
+use crate::owner::OwnerId;
 use crate::query::{Candidate, Query};
 use rayon::prelude::*;
 use std::collections::HashSet;
@@ -166,7 +167,8 @@ impl Filter {
 }
 
 /// Scratch for building match paths: entries of one folder (the usual run of ids) share the
-/// folder's path, so it is written once and only the name changes.
+/// folder's path, so it is written once and only the name changes. The folder's Owner is
+/// remembered the same way.
 #[derive(Default)]
 struct PathScratch {
     path: String,
@@ -174,9 +176,35 @@ struct PathScratch {
     /// The parent of the Entry whose path `path` holds, and how much of `path` is the parent's
     /// path plus separator.
     base: Option<(EntryId, usize)>,
+    /// A folder and its Owner, for the Entries beneath it.
+    owner: Option<(EntryId, Option<OwnerId>)>,
+}
+
+/// The Owner of `id`: its own root's, or its parent's remembered one.
+fn owner_of(index: &Index, id: EntryId, scratch: &mut PathScratch) -> Option<OwnerId> {
+    if let Some(own) = index.owner_root_at(id) {
+        return Some(own);
+    }
+    let parent = index.parent(id)?;
+    match scratch.owner {
+        Some((folder, owner)) if folder == parent => owner,
+        _ => {
+            let owner = index.owner_of(parent).map(|(_, o)| o);
+            scratch.owner = Some((parent, owner));
+            owner
+        }
+    }
 }
 
 fn candidate<'a>(index: &'a Index, query: &Query, id: EntryId, scratch: &'a mut PathScratch) -> Candidate<'a> {
+    let owner = if query.needs_owner() {
+        owner_of(index, id, scratch).map(|o| {
+            let owner = index.owner(o);
+            (owner.kind, owner.name.as_str())
+        })
+    } else {
+        None
+    };
     let path = if query.needs_path() {
         let parent = index.parent(id);
         match (parent, scratch.base) {
@@ -207,6 +235,7 @@ fn candidate<'a>(index: &'a Index, query: &Query, id: EntryId, scratch: &'a mut 
             Vec::new()
         },
         duplicate: query.needs_duplicates() && query.has_duplicate(id.index()),
+        owner,
     }
 }
 
