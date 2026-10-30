@@ -219,8 +219,8 @@ fn summarize_with(
     }
 }
 
-/// Owners shown in the Largest Owners card.
-pub const OWNER_LEN: usize = 10;
+/// Owners kept for the Largest Owners card, as many as the other lists.
+pub const OWNER_LEN: usize = LIST_LEN;
 
 /// One Owner in the Largest Owners card.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -229,6 +229,8 @@ pub struct OwnerRow {
     pub kind: OwnerKind,
     /// Folder Size summed over the Owner's roots.
     pub size: u64,
+    /// Its largest Owner root, which a click inspects.
+    pub root: EntryId,
 }
 
 /// The `n` Owners with the largest Folder Size, largest first. An Owner with several roots sums
@@ -236,7 +238,8 @@ pub struct OwnerRow {
 /// the Folder Size of its roots, so an enclosing Owner includes what the nested one holds.
 /// Hard links count once per root.
 fn largest_owners(index: &Index, n: usize) -> Vec<OwnerRow> {
-    let mut sizes: HashMap<OwnerId, u64> = HashMap::new();
+    // Per Owner: the summed size, and its largest root with that root's size.
+    let mut sizes: HashMap<OwnerId, (u64, EntryId, u64)> = HashMap::new();
     for (root, owner) in index.owner_roots() {
         let mut seen_links = HashSet::new();
         let mut total = 0u64;
@@ -248,16 +251,21 @@ fn largest_owners(index: &Index, n: usize) -> Vec<OwnerRow> {
                 total += index.on_disk(id);
             }
         }
-        *sizes.entry(owner).or_default() += total;
+        let entry = sizes.entry(owner).or_insert((0, root, 0));
+        entry.0 += total;
+        if total > entry.2 {
+            (entry.1, entry.2) = (root, total);
+        }
     }
     let mut rows: Vec<OwnerRow> = sizes
         .into_iter()
-        .map(|(o, size)| {
+        .map(|(o, (size, root, _))| {
             let owner = index.owner(o);
             OwnerRow {
                 name: owner.name.clone(),
                 kind: owner.kind,
                 size,
+                root,
             }
         })
         .collect();
@@ -529,6 +537,8 @@ mod tests {
         let rows = largest_owners(&index, 10);
         assert_eq!(rows.len(), 10);
         assert_eq!((rows[0].name.as_str(), rows[0].size, rows[0].kind), ("Game", 300, OwnerKind::Game));
+        // A click inspects the larger of its two roots.
+        assert_eq!(rows[0].root, l2);
         assert_eq!((rows[1].name.as_str(), rows[1].size), ("Proj", 80));
         assert_eq!((rows[2].name.as_str(), rows[2].size), ("Inner", 30));
         assert!(rows.windows(2).all(|w| w[0].size >= w[1].size));

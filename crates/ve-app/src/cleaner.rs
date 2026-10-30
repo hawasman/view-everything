@@ -363,6 +363,11 @@ impl CleanerPage {
         (all.clone().map(|c| c.on_disk).sum(), all.count())
     }
 
+    /// The part of [`CleanerPage::reclaimable`] only a Clean with administrator rights frees.
+    pub fn admin_reclaimable(&self) -> u64 {
+        self.admin.iter().map(|c| c.on_disk).sum()
+    }
+
     fn show_in_explorer(&mut self, path: &std::path::Path, is_file: bool, cx: &mut Context<Self>) {
         let index = self.shared.index.read();
         // A file is shown by the folder it sits in.

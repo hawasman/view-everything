@@ -24,7 +24,7 @@ pub struct Selection {
     /// The Entry a Shift-click extends from; its row is looked up per click, as rows move when
     /// the tree expands or the list re-sorts.
     anchor: Option<EntryId>,
-    /// The Entry last clicked, which the Selection panel shows.
+    /// The Entry last clicked, which the Inspector shows.
     last: Option<EntryId>,
     /// The Entry last right-clicked, which the context menu acts on.
     pub context: Option<EntryId>,

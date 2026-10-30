@@ -13,7 +13,6 @@ use crate::format;
 use crate::host::{Attached, Host};
 use crate::inspector::{self, Inspected, Item, Panel};
 use crate::locations;
-use crate::selection_panel::SelectionPanel;
 use crate::settings::Settings;
 #[cfg(feature = "updater")]
 use crate::settings_page::CheckNow;
@@ -151,7 +150,8 @@ pub struct Shell {
     cleaner: Entity<CleanerPage>,
     trash: Trash,
     treemap: Entity<Treemap>,
-    selection_panel: Entity<SelectionPanel>,
+    /// Counts the folders under the inspected folder.
+    folders: Entity<inspector::Folders>,
     categories: Entity<CategoryPanel>,
     category_map: CategoryMap,
     volumes: Vec<VolumeInfo>,
@@ -173,8 +173,12 @@ pub struct Shell {
     inspected: Option<Inspected>,
     /// The Entry a list selection last put in the Inspector.
     last_outlined: Option<ve_core::EntryId>,
+    /// Show in Browse: the Entry to select once the View of this Query text arrives.
+    reveal_on_view: Option<(ve_core::EntryId, String)>,
     /// The pending repaint of the Tasks page's elapsed times.
     tick: Option<gpui::Task<()>>,
+    /// Holds the keyboard when nothing else does, so the window's shortcuts always arrive.
+    focus: FocusHandle,
     #[cfg(feature = "bench")]
     demoed: bool,
 }
@@ -317,9 +321,9 @@ impl Shell {
                 .select_on_modifier_click(false)
         });
         let treemap = cx.new(|cx| Treemap::new(engine.shared.clone(), categories.clone(), treemap_depth, treemap_colour_by, cx));
-        let selection_panel = cx.new(|_| SelectionPanel::new(engine.shared.clone()));
+        let folders = cx.new(|_| inspector::Folders::new(engine.shared.clone()));
         // A finished folder count repaints the Inspector.
-        cx.observe(&selection_panel, |_, _, cx| cx.notify()).detach();
+        cx.observe(&folders, |_, _, cx| cx.notify()).detach();
         let category_panel = cx.new(|_| CategoryPanel::new(Some(query.clone()), "All Locations · click a row to add type: to the Query"));
 
         let tree = cx.new(|cx| {
@@ -510,7 +514,7 @@ impl Shell {
             duplicates,
             trash,
             treemap,
-            selection_panel,
+            folders,
             categories: category_panel,
             category_map: categories.clone(),
             volumes,
@@ -524,7 +528,9 @@ impl Shell {
             selected_size: Cell::new(None),
             inspected: None,
             last_outlined: None,
+            reveal_on_view: None,
             tick: None,
+            focus: cx.focus_handle(),
             #[cfg(feature = "bench")]
             demoed: false,
         };
@@ -832,8 +838,33 @@ impl Shell {
         });
     }
 
+    /// Show in Browse: zooms the Query to the folder holding `id` (a Location's root zooms to
+    /// itself) and, once that View is in, selects `id` among its siblings.
+    fn show_in_browse(&mut self, id: ve_core::EntryId, window: &mut Window, cx: &mut Context<Self>) {
+        let folder = {
+            let index = self.engine.shared.index.read();
+            if !index.is_live(id) {
+                return;
+            }
+            index.parent(id).unwrap_or(id)
+        };
+        self.scope(Some(folder), window, cx);
+        // Not `go`: the Inspector keeps the Entry it was asked from.
+        self.page = Page::Browse;
+        let text = self.query.read(cx).value().to_string();
+        let current = self.engine.shared.view.lock().as_ref().is_some_and(|v| v.query == text);
+        if current {
+            self.reveal_on_view = None;
+            self.reveal(id, cx);
+            self.treemap.update(cx, |t, cx| t.set_selected(Some(id), cx));
+        } else {
+            self.reveal_on_view = Some((id, text));
+        }
+        cx.notify();
+    }
+
     /// Outlines on the Treemap what the shown list selects, the last-clicked Entry boldest, and
-    /// shows that Entry in the Selection panel. A list that cannot show what the Treemap selected
+    /// shows that Entry in the Inspector. A list that cannot show what the Treemap selected
     /// leaves its outline alone.
     fn outline_selection(&mut self, cx: &mut Context<Self>) {
         let ids = self.selected_entries(cx);
@@ -880,6 +911,14 @@ impl Shell {
                 table.scroll_to_row(row, cx);
             }
         });
+        // Show in Browse waited for this View: select the Entry in it.
+        if let Some((id, _)) = self
+            .reveal_on_view
+            .take_if(|(_, text)| latest.as_ref().is_some_and(|v| v.query == *text))
+        {
+            self.reveal(id, cx);
+            self.treemap.update(cx, |t, cx| t.set_selected(Some(id), cx));
+        }
         #[cfg(feature = "bench")]
         if std::env::var_os("VE_DEMO").is_some() && !self.demoed && latest.as_ref().is_some_and(|v| !v.flat.is_empty()) {
             self.demoed = true;
@@ -1490,7 +1529,7 @@ impl Shell {
         }
     }
 
-    /// Drops the selection of the shown list, and its outline on the Treemap and Selection panel.
+    /// Drops the selection of the shown list, its outline on the Treemap and its Inspector.
     fn clear_selection(&mut self, cx: &mut Context<Self>) {
         if self.show_tree {
             self.tree.update(cx, |t, _| t.delegate_mut().selection.clear());
@@ -1552,14 +1591,16 @@ impl Shell {
         nested: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        nav_item(id, label, icon, self.page == page, nested, cx).on_click(cx.listener(move |this, _, _, cx| {
-            // What was selected belongs to the page being left; the new page selects anew.
-            if this.page != page {
-                this.inspected = None;
-            }
-            this.page = page;
-            cx.notify();
-        }))
+        nav_item(id, label, icon, self.page == page, nested, cx).on_click(cx.listener(move |this, _, _, cx| this.go(page, cx)))
+    }
+
+    /// Shows `page`. What was selected belongs to the page being left; the new page selects anew.
+    fn go(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.page != page {
+            self.inspected = None;
+        }
+        self.page = page;
+        cx.notify();
     }
 
     /// A clickable block of the rail's Work section.
@@ -1616,13 +1657,7 @@ impl Shell {
                     .child(caption(locations::rail_status(rows), cx)),
             )
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-            .on_click(cx.listener(|this, _, _, cx| {
-                if this.page != Page::Work {
-                    this.inspected = None;
-                }
-                this.page = Page::Work;
-                cx.notify();
-            }))
+            .on_click(cx.listener(|this, _, _, cx| this.go(Page::Work, cx)))
     }
 
     /// The Module rail: brand, Overview, Files (Browse, Cleaner, Duplicates), then Work, the
@@ -2218,7 +2253,7 @@ impl Shell {
     fn entry_panel(&mut self, id: ve_core::EntryId, cx: &mut Context<Self>) -> Option<Panel> {
         let shared = self.engine.shared.clone();
         let view = shared.view.lock().clone()?;
-        let (is_dir, totals, share, name, path, when, target, can_sync) = {
+        let (is_dir, totals, share, name, path, when, target, can_sync, owner) = {
             let index = shared.index.read();
             if !index.is_live(id) {
                 return None;
@@ -2241,11 +2276,13 @@ impl Shell {
                 format::time(index.modified(id)),
                 target,
                 crate::engine::can_sync_folder(&index, target),
+                index.entry_owner(id).map(|o| format!("{} · {}", o.name, o.kind.name())),
             )
         };
         let contains = if is_dir {
-            let folders = self.selection_panel.update(cx, |p, cx| p.folders_text(id, &view, cx));
-            format!("{} files · {folders}", format::count(totals.files))
+            let folders = self.folders.update(cx, |p, cx| p.text(id, &view, cx));
+            let s = if totals.files == 1 { "" } else { "s" };
+            format!("{} file{s} · {folders}", format::count(totals.files))
         } else {
             "1 file".to_owned()
         };
@@ -2262,12 +2299,18 @@ impl Shell {
                 fact("Share", share),
                 fact("Contains", contains),
                 fact("Last write", if when.is_empty() { "—".into() } else { when }),
+                fact("Owner", owner.unwrap_or_else(|| "—".into())),
             ],
             actions: vec![
                 Item::new(
                     "inspector-open",
                     "Open",
                     cx.listener(move |this, _, window, cx| this.menu_act(MenuAct::Open, &[id], id, window, cx)),
+                ),
+                Item::new(
+                    "inspector-show-in-browse",
+                    "Show in Browse",
+                    cx.listener(move |this, _, window, cx| this.show_in_browse(id, window, cx)),
                 ),
                 Item::new(
                     "inspector-reveal",
@@ -2431,11 +2474,11 @@ impl Shell {
     }
 
     /// Whether no text field has the keyboard (so `/` and Escape are the window's): nothing
-    /// focused, or one of the lists.
+    /// focused, the Shell itself, or one of the lists.
     fn keys_are_ours(&self, window: &Window, cx: &App) -> bool {
         match window.focused(cx) {
             None => true,
-            Some(h) => h == self.tree.focus_handle(cx) || h == self.table.focus_handle(cx),
+            Some(h) => h == self.focus || h == self.tree.focus_handle(cx) || h == self.table.focus_handle(cx),
         }
     }
 }
@@ -2460,6 +2503,10 @@ impl Render for Shell {
                 });
             }));
         }
+        // With nothing focused no key reaches the window's handlers: the Shell takes the keyboard.
+        if window.focused(cx).is_none() {
+            self.focus.focus(window, cx);
+        }
         let rows = locations::rows(&self.engine.shared, &self.volumes, self.settings_page.read(cx).settings(), now);
         let inspector = self
             .inspected
@@ -2478,6 +2525,7 @@ impl Render for Shell {
         let gutter = self.page != Page::Settings;
         let p = palette(cx);
         h_flex()
+            .track_focus(&self.focus)
             .size_full()
             .relative()
             .bg(p.ground)
@@ -2486,6 +2534,20 @@ impl Render for Shell {
             .line_height(px(20.))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let m = &event.keystroke.modifiers;
+                // Ctrl+1/2/3 switch pages from anywhere, the Query box included.
+                if m.secondary(cx) && !m.alt && !m.shift {
+                    let page = match event.keystroke.key.as_str() {
+                        "1" => Some(Page::Overview),
+                        "2" => Some(Page::Browse),
+                        "3" => Some(Page::Work),
+                        _ => None,
+                    };
+                    if let Some(page) = page {
+                        this.go(page, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
                 if m.control || m.platform || m.alt || this.query.focus_handle(cx).is_focused(window) || !this.keys_are_ours(window, cx) {
                     return;
                 }

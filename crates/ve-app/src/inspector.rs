@@ -3,11 +3,15 @@
 //! Shell builds the [`Panel`] of the inspected thing (it owns the Engine and the actions) and
 //! this module draws it.
 
+use crate::engine::Shared;
+use crate::format;
 use crate::theme::{FS_SECTION, FS_SMALL, palette};
 use crate::ui::{ButtonKind, Tone, button, group_label, tag};
+use crate::view::View;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::sync::Arc;
 use ve_core::EntryId;
 
 /// What the Inspector shows.
@@ -151,4 +155,69 @@ pub fn render(panel: Panel, cx: &App) -> Stateful<Div> {
                 .text_color(p.muted)
                 .child("Follows your selection · Esc clears"),
         )
+}
+
+/// The count of folders under the inspected folder, for its Contains fact: counted off the UI
+/// thread, kept per (Entry, View).
+pub struct Folders {
+    shared: Arc<Shared>,
+    /// The last count: (Entry, View id, folders).
+    counted: Option<(EntryId, u64, u64)>,
+    /// The (Entry, View id) a count is running for.
+    pending: Option<(EntryId, u64)>,
+}
+
+/// Folders shown under `dir` by `view`, at any depth. The Index is locked per folder, not for
+/// the whole walk, so a writer never waits behind a large count.
+fn count_folders(index: &ve_scan::SharedIndex, view: &View, dir: EntryId) -> u64 {
+    let mut stack = vec![dir];
+    let mut folders = 0;
+    while let Some(id) = stack.pop() {
+        let index = index.read();
+        for child in index.children(id) {
+            if index.is_dir(child) && view.filter.is_shown(child) {
+                folders += 1;
+                stack.push(child);
+            }
+        }
+    }
+    folders
+}
+
+impl Folders {
+    pub fn new(shared: Arc<Shared>) -> Self {
+        Self {
+            shared,
+            counted: None,
+            pending: None,
+        }
+    }
+
+    /// "12 folders" for the folder `id` under `view`, or "counting folders…" while the count
+    /// runs. A new View (a zoom) changes the key, so the count is asked for again.
+    pub fn text(&mut self, id: EntryId, view: &Arc<View>, cx: &mut Context<Self>) -> String {
+        let key = (id, view.id);
+        if let Some((_, _, folders)) = self.counted.filter(|&(e, v, _)| (e, v) == key) {
+            return format!("{} folder{}", format::count(folders), if folders == 1 { "" } else { "s" });
+        }
+        if self.pending != Some(key) {
+            self.pending = Some(key);
+            let (shared, view) = (self.shared.clone(), view.clone());
+            cx.spawn(async move |this, cx| {
+                let folders = cx
+                    .background_executor()
+                    .spawn(async move { count_folders(&shared.index, &view, id) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.pending == Some(key) {
+                        this.pending = None;
+                    }
+                    this.counted = Some((key.0, key.1, folders));
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        "counting folders…".to_owned()
+    }
 }

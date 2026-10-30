@@ -78,6 +78,27 @@ fn locations_phrase(locations: &[Location]) -> String {
     format!("{count} {}", if count == 1 { "Location" } else { "Locations" })
 }
 
+/// The Overview's finding line for `count` Cleanables of `reclaim` bytes, `admin` of them freed
+/// only with administrator rights. No administrator share, no mention of it.
+fn finding_sentence(reclaim: u64, count: usize, admin: u64) -> String {
+    let mut sentence = format!(
+        "{} can be cleaned up across {} Cleanable{}",
+        format::size(reclaim),
+        format::count(count as u64),
+        if count == 1 { "" } else { "s" }
+    );
+    if admin > 0 {
+        let share = if admin >= reclaim {
+            "all of it".to_owned()
+        } else {
+            format!("{} of it", format::size(admin))
+        };
+        sentence.push_str(&format!("; {share} needs administrator"));
+    }
+    sentence.push('.');
+    sentence
+}
+
 /// The machine's name, when the system says it.
 fn hostname() -> Option<String> {
     let name = std::fs::read_to_string("/etc/hostname").ok()?;
@@ -366,6 +387,8 @@ enum Finding {
     Found {
         reclaim: u64,
         count: usize,
+        /// The part of `reclaim` that needs administrator rights.
+        admin: u64,
     },
     Nothing,
 }
@@ -379,17 +402,17 @@ impl Render for DashboardPage {
         let oldest_loc = oldest(&locations.iter().map(|l| l.last_synced).collect::<Vec<_>>()).map(|i| &locations[i]);
 
         // The Cleaner looks again only when the Index changed, so this follows every Clean.
-        let (reclaim, count, looking) = self.cleaner.update(cx, |c, cx| {
+        let (reclaim, admin, count, looking) = self.cleaner.update(cx, |c, cx| {
             c.refresh(cx);
             let (reclaim, count) = c.reclaimable();
-            (reclaim, count, c.looking())
+            (reclaim, c.admin_reclaimable(), count, c.looking())
         });
         let finding = if looking {
             Finding::Looking { spinning: true }
         } else if self.shared.is_loading() || self.shown.is_none() {
             Finding::Looking { spinning: false }
         } else if count > 0 {
-            Finding::Found { reclaim, count }
+            Finding::Found { reclaim, count, admin }
         } else {
             Finding::Nothing
         };
@@ -433,12 +456,7 @@ impl Render for DashboardPage {
 
         let sentence = match &finding {
             Finding::Looking { .. } => "Looking for Cleanables…".to_owned(),
-            Finding::Found { reclaim, count } => format!(
-                "{} can be cleaned up across {} Cleanable{}.",
-                format::size(*reclaim),
-                format::count(*count as u64),
-                if *count == 1 { "" } else { "s" }
-            ),
+            Finding::Found { reclaim, count, admin } => finding_sentence(*reclaim, *count, *admin),
             Finding::Nothing => "Nothing to clean up.".to_owned(),
         };
         let finding_line = panel(cx)
@@ -475,7 +493,7 @@ impl Render for DashboardPage {
         };
         let cleanable = match &finding {
             Finding::Looking { .. } => (dash(), Some("not looked yet".into())),
-            Finding::Found { reclaim, count } => (
+            Finding::Found { reclaim, count, .. } => (
                 format::size(*reclaim).into(),
                 Some(format!("{} Cleanable{}", format::count(*count as u64), if *count == 1 { "" } else { "s" }).into()),
             ),
@@ -501,7 +519,7 @@ impl Render for DashboardPage {
                         l.name.clone().into()
                     }),
                 ),
-                None => ("Not yet".into(), Some(format!("{} has not finished its first sync", l.name).into())),
+                None => (dash(), Some(format!("{} has not finished its first sync", l.name).into())),
             },
             None => (dash(), Some("no Locations yet".into())),
         };
@@ -543,10 +561,18 @@ impl Render for DashboardPage {
                     h_flex()
                         .items_start()
                         .gap(px(GAP))
-                        .child(self.locations_panel(&locations, now, cx))
+                        // Largest Owners sits under Locations, in the height Categories takes.
+                        .child(
+                            v_flex()
+                                .flex_grow(9.)
+                                .flex_basis(relative(0.))
+                                .min_w_0()
+                                .gap(px(GAP))
+                                .child(self.locations_panel(&locations, now, cx))
+                                .children(self.owners_panel(cx)),
+                        )
                         .child(self.categories_panel(cx)),
                 )
-                .children(self.owners_panel(cx))
                 .child(
                     h_flex()
                         .items_start()
@@ -593,7 +619,7 @@ impl DashboardPage {
                 div().text_color(p.muted).child(match (l.last_synced, l.online) {
                     (Some(at), true) => ago(now, at),
                     (Some(at), false) => format!("Last seen {}", ago(now, at)),
-                    (None, _) => "Never".to_owned(),
+                    (None, _) => "—".to_owned(),
                 })
             };
             rows = rows.child(
@@ -636,8 +662,6 @@ impl DashboardPage {
             rows = rows.child(empty_state("No Locations are indexed yet. Add one in Settings.", cx));
         }
         panel(cx)
-            .flex_grow(9.)
-            .flex_basis(relative(0.))
             .text_size(px(FS_BODY))
             .child(
                 h_flex()
@@ -795,29 +819,47 @@ impl DashboardPage {
             .child(list)
     }
 
-    /// The Largest Owners card: top Owners by Folder Size, each opening the Explorer on its Owner.
-    /// Nothing when the Index has no Owner roots.
+    /// The Largest Owners card: the Owners with the largest Folder Size, kind swatch, name over
+    /// kind, size. A click shows the Owner's (largest) root in the Inspector. Nothing when the
+    /// Index has no Owner roots.
     fn owners_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = palette(cx);
         let rows = self.shown.as_ref().map(|s| s.owners.clone()).filter(|r| !r.is_empty())?;
-        let list = rows.into_iter().enumerate().map(|(ix, r)| {
-            let query = format!("owner:\"{}\"", r.name.replace('"', ""));
-            h_flex()
-                .id(("owner", ix))
-                .items_center()
-                .gap(px(10.))
-                .py(px(6.))
-                .cursor_pointer()
-                .hover(|s| s.bg(p.control))
-                .child(div().flex_grow(1.).min_w_0().truncate().child(r.name))
-                .child(div().flex_none().text_xs().text_color(p.muted).child(r.kind.name()))
-                .child(div().flex_none().w(px(80.)).text_right().child(format::size(r.size)))
-                .on_click(cx.listener(move |_, _, _, cx| Self::explore(Some(query.clone()), cx)))
-        });
+        let mut list = v_flex().mt(px(GAP));
+        for (ix, r) in rows.into_iter().take(FILE_ROWS).enumerate() {
+            let root = r.root;
+            list = list.child(
+                h_flex()
+                    .id(("owner", ix))
+                    .h(px(ROW_H))
+                    .gap(px(10.))
+                    .items_center()
+                    .cursor_pointer()
+                    .when(ix > 0, |d| d.border_t_1().border_color(p.rule))
+                    .hover(move |s| s.bg(p.raised))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(Act::Inspect(Inspected::Entry(root)))))
+                    .child(swatch(p.owner_kind(Some(r.kind))))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().text_color(p.text).child(r.name))
+                            .child(div().text_size(px(FS_SMALL)).text_color(p.muted).child(r.kind.name())),
+                    )
+                    .child(div().flex_none().whitespace_nowrap().text_color(p.text).child(format::size(r.size))),
+            );
+        }
         Some(
             panel(cx)
-                .child(section_title("Largest Owners", cx))
-                .child(v_flex().mt(px(GAP)).children(list))
+                .text_size(px(FS_BODY))
+                .child(
+                    h_flex()
+                        .items_baseline()
+                        .justify_between()
+                        .child(section_title("Largest Owners", cx))
+                        .child(caption("Folder Size", cx)),
+                )
+                .child(list)
                 .into_any_element(),
         )
     }
@@ -947,5 +989,23 @@ mod bench {
             }
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::finding_sentence;
+
+    #[::core::prelude::v1::test]
+    fn the_finding_line_states_the_administrator_share_only_when_there_is_one() {
+        assert_eq!(finding_sentence(2048, 3, 0), "2.00 KB can be cleaned up across 3 Cleanables.");
+        assert_eq!(
+            finding_sentence(4096, 1, 1024),
+            "4.00 KB can be cleaned up across 1 Cleanable; 1.00 KB of it needs administrator."
+        );
+        assert_eq!(
+            finding_sentence(4096, 2, 4096),
+            "4.00 KB can be cleaned up across 2 Cleanables; all of it needs administrator."
+        );
     }
 }

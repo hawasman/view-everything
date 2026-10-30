@@ -34,11 +34,11 @@ A folder found by a platform convention and by a project marker keeps the platfo
 
 ## Seeing them
 
-- The Explorer's **Selection panel** has an **Owner** row, `<name> · <kind>`, with detail in brackets where there is some. It is left out when the item has no Owner.
+- The **Inspector** of an Entry has an **Owner** row, `<name> · <kind>`, or — when the Entry has no Owner.
 - The **Treemap** tooltip adds `Owner: <name> · <kind>`.
-- The flat list has an **Owner** column.
-- **Colour by**, at the right of the Treemap's legend, switches the tiles between **Category** and **Owner kind**. The choice is remembered. Under Owner kind the legend shows the four kinds and "No Owner" (grey).
-- The Dashboard's **Largest Owners** card lists the 10 Owners with the largest Folder Size. Click one to open the Explorer on `owner:"<name>"`. The card is hidden while the Index has no Owners.
+- Browse's flat list has an **Owner** column.
+- **Colour by**, under the Treemap's title, switches the tiles between **Category** and **Owner kind**. The choice is remembered. Under Owner kind the legend shows the four kinds and "No Owner" (grey).
+- The Overview's **Largest Owners** panel lists the 5 Owners with the largest Folder Size. Click one to show its Owner root (its largest, when it has several) in the Inspector. The panel is hidden while the Index has no Owners.
 - [CSV export](snapshots-and-export.md#export) has `Owner` and `Owner kind` columns.
 
 ## Searching
@@ -51,3 +51,5 @@ A folder found by a platform convention and by a project marker keeps the platfo
 | `ownerkind:none` | Entries with no Owner |
 
 Both match folders as well as files, and work in the [command line](command-line.md) too. For example, `ve top -n 10 ownerkind:project` ranks the largest folders inside code projects. A Cleanup Rule cannot use them: the check before a Clean reads the disk, where there is no Owner to compare against.
+
+They combine with the rest of a Query like any other term: `ownerkind:game ext:sav` is the save files of games, `size:>1gb ownerkind:none` the large files no Owner claims, `ownerkind:project | ownerkind:program` either kind.

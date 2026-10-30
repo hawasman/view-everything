@@ -562,6 +562,50 @@ fn owner_and_ownerkind_follow_the_nearest_owner_root_for_files_and_folders() {
 }
 
 #[test]
+fn owner_facets_compose_with_text_other_facets_or_and_not() {
+    use std::path::Path;
+    use ve_core::{EntryMeta, Filter, Index, Owner, OwnerKind, SyncState};
+    let dir = EntryMeta {
+        is_dir: true,
+        ..EntryMeta::default()
+    };
+    let sized = |bytes| EntryMeta {
+        logical: bytes,
+        on_disk: bytes,
+        ..EntryMeta::default()
+    };
+    let mut index = Index::new();
+    let vol = index.add_volume(Path::new("/m/loc"), "ext4", "loc", dir, SyncState::Walk);
+    let root = index.volume(vol).unwrap().root;
+    let game = index.insert(root, "Shock", dir);
+    let save = index.insert(game, "save.dat", sized(5_000_000));
+    let cfg = index.insert(game, "config.ini", sized(10));
+    let proj = index.insert(root, "proj", dir);
+    let src = index.insert(proj, "main.rs", sized(10));
+    let loose = index.insert(root, "save.dat", sized(5_000_000));
+    index.set_owners(
+        root,
+        vec![
+            (game, Owner::new(OwnerKind::Game, "Shock", "Steam")),
+            (proj, Owner::new(OwnerKind::Project, "proj", "Cargo.toml")),
+        ],
+    );
+    let files = [save, cfg, src, loose];
+    let matched = |q: &str| {
+        let query = Query::parse(q, &context()).unwrap();
+        let filter = Filter::compute(&index, Some(&query));
+        files.map(|id| filter.is_matched(id))
+    };
+    // With free text, ext: and size:, every term must hold.
+    assert_eq!(matched("ownerkind:game save"), [true, false, false, false]);
+    assert_eq!(matched("owner:shock ext:ini"), [false, true, false, false]);
+    assert_eq!(matched("size:>1mb ownerkind:none"), [false, false, false, true]);
+    // Either side of `|`, and negated with `!`.
+    assert_eq!(matched("ownerkind:project | ext:ini"), [false, true, true, false]);
+    assert_eq!(matched("save.dat !owner:shock"), [false, false, false, true]);
+}
+
+#[test]
 fn dc_matches_like_dm_and_never_an_unknown_creation_time() {
     let created = |y, mo, d, h| {
         let created = Local.with_ymd_and_hms(y, mo, d, h, 0, 0).unwrap().timestamp_nanos_opt().unwrap();
