@@ -4,10 +4,11 @@ use crate::{CategoryMap, EntryId, Filter, Index};
 use std::io::{self, Write};
 
 /// Writes one CSV row per live Entry of `ids`: path, name, Logical Size, On-disk Size, modified
-/// time (UTC, ISO 8601; empty when unknown) and Category (empty for folders). Sizes are Filtered
-/// Sizes under `filter`, as the Explorer shows them.
+/// time (UTC, ISO 8601; empty when unknown), Category (empty for folders), Owner and Owner kind
+/// (both empty when the Entry has no Owner). Sizes are Filtered Sizes under `filter`, as the
+/// Explorer shows them.
 pub fn write_csv(out: &mut impl Write, index: &Index, filter: &Filter, categories: &CategoryMap, ids: &[EntryId]) -> io::Result<()> {
-    out.write_all(b"path,name,Logical Size,On-disk Size,modified,Category\r\n")?;
+    out.write_all(b"path,name,Logical Size,On-disk Size,modified,Category,Owner,Owner kind\r\n")?;
     for &id in ids.iter().filter(|&&id| index.is_live(id)) {
         let totals = filter.totals(index, id);
         let name = index.name(id);
@@ -17,6 +18,7 @@ pub fn write_csv(out: &mut impl Write, index: &Index, filter: &Filter, categorie
             ns => chrono::DateTime::from_timestamp_nanos(ns).format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         };
         let category = if index.is_dir(id) { "" } else { categories.of_name(name).name() };
+        let owner = index.entry_owner(id);
         let path = index.path(id);
         write_row(
             out,
@@ -27,6 +29,8 @@ pub fn write_csv(out: &mut impl Write, index: &Index, filter: &Filter, categorie
                 &totals.on_disk.to_string(),
                 &modified,
                 category,
+                owner.map_or("", |o| o.name.as_str()),
+                owner.map_or("", |o| o.kind.name()),
             ],
         )?;
     }
@@ -85,12 +89,16 @@ mod tests {
             },
         );
         let g = index.insert(root, "unknown", EntryMeta::default());
+        index.set_owners(root, vec![(root, crate::Owner::new(crate::OwnerKind::Project, "w", ".git"))]);
         let mut out = Vec::new();
         write_csv(&mut out, &index, &Filter::compute(&index, None), &CategoryMap::builtin(), &[f, g]).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains(",2026-10-10T15:33:33Z,"), "{text}");
         let unknown = index.path(g);
-        assert!(text.contains(&format!("{},unknown,0,0,,", unknown.display())), "{text}");
+        assert!(
+            text.contains(&format!("{},unknown,0,0,,Other,w,Project", unknown.display())),
+            "{text}"
+        );
     }
 
     fn row(fields: &[&str]) -> String {

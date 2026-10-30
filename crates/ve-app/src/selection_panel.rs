@@ -227,6 +227,10 @@ impl Render for SelectionPanel {
             "1 file".to_owned()
         };
         let when = format::time(index.modified(id));
+        let owner = index.owner_of(id).map(|(_, o)| {
+            let o = index.owner(o);
+            (format!("{} · {}", o.name, o.kind.name()), o.detail.clone())
+        });
         let path = index.path(id).display().to_string();
         let buttons = h_flex()
             .flex_wrap()
@@ -273,7 +277,25 @@ impl Render for SelectionPanel {
                                 "Last write",
                                 if when.is_empty() { "unknown".into() } else { when },
                                 cx,
-                            ))),
+                            )))
+                            .when_some(owner, |d, (o, detail)| {
+                                d.child(
+                                    v_flex()
+                                        .min_w_0()
+                                        .gap(px(1.))
+                                        .child(div().text_size(px(11.)).text_color(p.muted).whitespace_nowrap().child("Owner"))
+                                        .child(
+                                            h_flex()
+                                                .gap(px(4.))
+                                                .text_xs()
+                                                .text_color(p.text)
+                                                .child(o)
+                                                .when(!detail.is_empty(), |r| {
+                                                    r.child(div().text_color(p.muted).child(format!("({detail})")))
+                                                }),
+                                        ),
+                                )
+                            }),
                     )
                     .child(buttons)
                     .when(!is_dir, |d| {

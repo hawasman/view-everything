@@ -13,17 +13,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use ve_core::EntryId;
 
-const COLUMNS: [(&str, f32, bool); 6] = [
+const COLUMNS: [(&str, f32, bool); 7] = [
     ("Name", 260., false),
     ("Folder", 380., false),
     ("On disk", 72., true),
     ("Size", 72., true),
     ("Files", 76., true),
     ("Modified", 136., true),
+    ("Owner", 110., false),
 ];
 
 /// Width of the columns after Name and Folder, which share what is left of the list's width.
-const FIXED_WIDTH: f32 = 72. + 72. + 76. + 136. + 28.;
+const FIXED_WIDTH: f32 = 72. + 72. + 76. + 136. + 110. + 28.;
 const MIN_FLEX_WIDTH: f32 = 80.;
 
 /// Rows kept in `FlatList::rows` before it starts over.
@@ -34,7 +35,7 @@ pub struct FlatList {
     pub view: Option<Arc<View>>,
     /// Cell texts of rows drawn recently, filled by `render_tr` so the Index is locked once per
     /// row rather than once per cell. Dropped when the View changes.
-    rows: HashMap<usize, [String; 6]>,
+    rows: HashMap<usize, [String; 7]>,
     pub selection: Selection,
     /// Builds the right-click menu; set by the Shell, which owns what the items act on.
     pub menu: Option<crate::entry_actions::MenuFn>,
@@ -171,6 +172,7 @@ impl TableDelegate for FlatList {
                         format::size(totals.logical),
                         files,
                         format::time(index.modified(id)),
+                        index.entry_owner(id).map(|o| o.name.clone()).unwrap_or_default(),
                     ],
                 );
             }
@@ -230,7 +232,7 @@ impl TableDelegate for FlatList {
         let muted = crate::theme::palette(cx).muted;
         let cell = h_flex().size_full().overflow_hidden().whitespace_nowrap().text_size(px(13.));
         match col {
-            1 => cell.text_color(muted),
+            1 | 6 => cell.text_color(muted),
             0 => cell,
             2 => cell.justify_end(),
             _ => cell.text_color(muted).justify_end(),

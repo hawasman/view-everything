@@ -32,7 +32,7 @@ One free, open-source app to see and manage everything about your device: its fi
 
 A **Module** is a top-level area of the app with its own pages. Modules ship in this order.
 
-### 5.1 Files — shipped (v0.1, v0.2), continuing
+### 5.1 Files — shipped (v0.1, v0.2, v0.3), continuing
 
 Shipped:
 - One shared Index of every Entry on local Volumes and Remotes (SSH/SFTP, S3, FTP, WebDAV, Azure Blob); Live updates (FSEvents, opt-in `fanotify` helper), Catch-up, Sync now per Location and per folder.
@@ -42,10 +42,8 @@ Shipped:
 - Daily Snapshots and Compare with.
 - Tasks with progress and cancel; tray and start at login; signed self-updates.
 - CLI: `ve find`, `ve top`/`du`, `ve export`.
-
-Next (v0.3):
-- **Owner** detection: the program, game, package or project a folder belongs to (Steam manifests, `Program Files\<Vendor>`, package databases, Flatpak ids, project markers), shown in tooltips and the Selection panel.
-- Treemap "Colour by: Category | Owner kind".
+- v0.3: **Owner** detection: the program, game, package or project a folder belongs to (Steam manifests, `Program Files\<Vendor>`, package databases, Flatpak ids, project markers), shown in the Selection panel, Treemap tooltips and the flat list, and matched by `owner:` and `ownerkind:`.
+- v0.3: Treemap "Colour by: Category | Owner kind"; a Largest Owners card on the Dashboard.
 
 ### 5.2 Search
 
@@ -63,7 +61,7 @@ Answers *why* the machine is slow, not only *what* is running: btop-style live v
 
 ### 5.4 Apps
 
-- Installed programs with their real On-disk Size (linked to their Owner folders), uninstall, and leftovers after uninstall.
+- Installed programs with their real On-disk Size (linked to their Owner folders), uninstall, and leftovers after uninstall. The read-only part, programs with their On-disk Size via Owners, shipped in v0.3 as the Largest Owners card on the Dashboard.
 - Startup items, with the same explain-then-approve rule for changes.
 
 ### 5.5 Network

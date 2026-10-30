@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.3.0
+
+### Owners
+- Every folder can now say which program, game, package or project it belongs to. That is its **Owner**, found at an **Owner root** (the game's install folder, the application's folder, the folder holding a project's marker files) and inherited by everything beneath it unless a nearer Owner root sits in between. An Owner has a **kind**: System, Program, Game or Project. Folders under no Owner root have no Owner.
+- **Projects** are recognised by their marker files, on every Location, Remotes and Offline Volumes included: `.git`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `CMakeLists.txt`, `build.gradle` and `build.gradle.kts`, `Package.swift`, `*.sln` and `*.csproj`. Markers inside dependency folders (`node_modules`, `vendor`, `site-packages`, `.venv` and similar) do not make a Project.
+- **Steam games** are read from `steamapps/appmanifest_*.acf`, on every platform.
+- **Windows:** `C:\Windows` is System; `Program Files` and `Program Files (x86)` folders (`\<App>` and `\<Vendor>\<App>`) and `AppData\Local\Programs\<App>` are Programs.
+- **Linux:** `/usr`, `/etc`, `/boot`, `/var/lib` and `/var/cache` are System, named after your distribution; `/opt/<app>` is a Program; so are Flatpak apps (`/var/lib/flatpak/app`, `~/.local/share/flatpak/app`, `~/.var/app`). A folder wholly owned by one pacman package is System, named after the package.
+- **macOS:** `/System` and `/usr` are System; `.app` bundles in `/Applications` and `~/Applications` are Programs.
+- Where a platform convention and a project marker find the same folder, the platform's Owner is kept.
+- Detection runs at the end of every Sync and Catch-up of a Location, inside the same Task. Steam, Windows, Linux and macOS detection read only mounted local Volumes; project markers are read from the Index alone. Live updates do not trigger it. The detectors are built in; you can't add your own Owner rules yet ([ADR-0014](docs/adr/0014-owners-live-in-the-index.md)).
+
+### Explorer
+- The Selection panel has an **Owner** row (`<name> · <kind>`, with detail in brackets where there is some). It is left out when the item has no Owner.
+- The Treemap tooltip adds `Owner: <name> · <kind>`, and the flat list has an **Owner** column.
+- **Colour by: Category | Owner kind**, at the right of the Treemap's legend, is remembered between runs. Under Owner kind, the legend shows the four kinds and "No Owner" (grey).
+- Two new Query modifiers: `owner:<text>` matches an Owner's name (a substring, ignoring case; quote a name with spaces: `owner:"Program Files"`), and `ownerkind:system|program|game|project|none`. Both match folders as well as files, and work in `ve find` and `ve top`.
+- CSV export gains `Owner` and `Owner kind` columns, in the app, in `ve export` and in `ve find --csv`.
+
+### Dashboard
+- A **Largest Owners** card lists the 10 Owners with the largest Folder Size. Clicking one opens the Explorer on `owner:"<name>"`. The card is hidden while the Index has no Owners.
+
+### Index format
+- The Index is now format 8. A format 7 file is converted when loaded, and every Location is detected once at launch, so Owners appear without waiting for a Sync.
+- A file saved by v0.3 can't be read by v0.2.
+
 ## v0.2.1
 
 ### Half the memory

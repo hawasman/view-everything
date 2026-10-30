@@ -21,7 +21,7 @@ A Snapshot is the Folder Size of every folder, by path, at one moment ([ADR-0010
 ## Export
 
 **Export CSV** writes what the flat list shows: every Entry matching the Query, including a folder you zoomed into.
-- Columns: path, name, Logical Size, On-disk Size, modified (UTC), Category.
+- Columns: path, name, Logical Size, On-disk Size, modified (UTC), Category, [Owner](owners.md) and Owner kind.
 - A name a spreadsheet could read as a formula (starting with `=`, `+`, `-`, `@`, tab or CR) gets a leading `'`.
 - **Export selection to CSV** in the right-click menu writes only the selected rows.
 

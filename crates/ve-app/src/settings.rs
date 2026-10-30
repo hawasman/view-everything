@@ -68,6 +68,9 @@ pub struct Settings {
     /// How many levels of folders the Treemap subdivides (Depth).
     #[serde(default = "default_treemap_depth")]
     pub treemap_depth: u8,
+    /// What the Treemap's tiles are coloured by.
+    #[serde(default)]
+    pub treemap_colour_by: crate::treemap::ColourBy,
     /// Closing the window leaves the app running in the system tray (needs a tray).
     #[serde(default)]
     pub keep_in_tray: bool,
@@ -158,6 +161,7 @@ impl Default for Settings {
             cleaner_build_days: default_build_days(),
             duplicate_exclusions: default_duplicate_exclusions(),
             treemap_depth: default_treemap_depth(),
+            treemap_colour_by: Default::default(),
             keep_in_tray: false,
             start_at_login: false,
             reduce_motion: false,
