@@ -519,7 +519,7 @@ impl FiltersPanel {
                 }))
             }))
             .when(bound.invalid(), |row| {
-                row.child(div().text_color(danger).text_sm().child("not a number"))
+                row.child(div().text_color(danger).text_size(px(crate::theme::FS_BODY)).child("not a number"))
             })
     }
 

@@ -9,7 +9,7 @@ use crate::format;
 use crate::settings::{Settings, cleanup_path};
 use crate::tasks::{Outcome, TaskKind};
 use crate::theme::palette;
-use crate::ui::{caption, panel, pill, task_progress};
+use crate::ui::{ButtonKind, button, caption, panel, task_progress};
 use crate::view::{CategoryRow, EXTENSIONS_PER_CATEGORY};
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::checkbox::Checkbox;
@@ -627,7 +627,7 @@ impl CleanerPage {
 
     fn show_button(&self, id: (&'static str, usize), c: &Cleanable, cx: &mut Context<Self>) -> impl IntoElement {
         let (path, command) = (c.path.clone(), c.rule.is_command());
-        pill(id, "Show in Explorer").small().build(
+        button(id, "Show in Explorer").small().build(
             cx,
             cx.listener(move |this, _, _, cx| this.show_in_explorer(&path, !command && !path.is_dir(), cx)),
         )
@@ -723,7 +723,7 @@ impl CleanerPage {
                             .flex_1()
                             .min_w_0()
                             .child(div().truncate().child(c.path.display().to_string()))
-                            .child(caption(by, cx)),
+                            .child(caption(by, cx).truncate()),
                     )
                     .child(
                         v_flex()
@@ -871,7 +871,7 @@ impl Render for CleanerPage {
                     .gap(px(8.))
                     .items_center()
                     .child(div().flex_1().child(summary))
-                    .child(pill("plan-advanced", "Advanced").small().selected(self.advanced).build(
+                    .child(button("plan-advanced", "Advanced").small().pressed(self.advanced).build(
                         cx,
                         cx.listener(|this, _, _, cx| {
                             this.advanced = !this.advanced;
@@ -879,8 +879,8 @@ impl Render for CleanerPage {
                         }),
                     ))
                     .child(
-                        pill("clean", "Clean")
-                            .primary()
+                        button("clean", "Clean")
+                            .kind(ButtonKind::Primary)
                             .busy(clean_busy)
                             .disabled(if clean_busy {
                                 None
@@ -890,7 +890,7 @@ impl Render for CleanerPage {
                             .build(cx, cx.listener(|this, _, window, cx| this.ask_clean(window, cx))),
                     )
                     .child(
-                        pill("admin-clean", "Clean as admin…")
+                        button("admin-clean", "Clean as admin…")
                             .busy(admin_busy)
                             .disabled(if admin_busy { None } else { clean_blocked.or(admin_why) })
                             .build(cx, cx.listener(|this, _, window, cx| this.ask_admin_clean(window, cx))),
@@ -931,7 +931,7 @@ impl Render for CleanerPage {
             .items_center()
             .child(div().flex_1().text_color(muted).children(status))
             .when(looking, |row| {
-                row.child(pill("cancel-search", "Cancel").small().build(
+                row.child(button("cancel-search", "Cancel").small().build(
                     cx,
                     cx.listener(|this, _, _, cx| {
                         this.look_cancel.store(true, Ordering::Relaxed);
@@ -941,7 +941,7 @@ impl Render for CleanerPage {
                 ))
             })
             .child(
-                pill("cleaner-rescan", "Look again")
+                button("cleaner-rescan", "Look again")
                     .small()
                     .busy(looking)
                     .disabled(looking.then_some("A search is already running"))
@@ -954,20 +954,27 @@ impl Render for CleanerPage {
                     ),
             );
 
-        let tab_bar = h_flex().gap(px(8.)).children(tabs.iter().enumerate().map(|(i, &(t, n))| {
-            let title = match t {
-                Tab::Group(g) => g.title(),
-                Tab::Admin => "Admin only",
-            };
-            pill(("tab", i), format!("{title} ({n})")).small().selected(t == tab).build(
-                cx,
-                cx.listener(move |this, _, _, cx| {
-                    this.tab = Some(t);
-                    this.page = 0;
-                    cx.notify();
-                }),
-            )
-        }));
+        let tab_titles: Vec<String> = tabs
+            .iter()
+            .map(|&(t, n)| {
+                let title = match t {
+                    Tab::Group(g) => g.title(),
+                    Tab::Admin => "Admin only",
+                };
+                format!("{title} ({n})")
+            })
+            .collect();
+        let tab_titles: Vec<&str> = tab_titles.iter().map(String::as_str).collect();
+        let tab_ids: Vec<Tab> = tabs.iter().map(|&(t, _)| t).collect();
+        let tab_ix = tab_ids.iter().position(|&t| t == tab).unwrap_or(0);
+        let me = cx.entity();
+        let tab_bar = crate::ui::tabs("tab", &tab_titles, tab_ix, cx, move |i, _, cx| {
+            me.update(cx, |this, cx| {
+                this.tab = Some(tab_ids[i]);
+                this.page = 0;
+                cx.notify();
+            })
+        });
         let admin_intro = (tab == Tab::Admin).then(|| {
             v_flex()
                 .gap_1()
@@ -996,22 +1003,25 @@ impl Render for CleanerPage {
                 div().child("Nothing to clean here.").into_any_element()
             }
         });
-        let size_pills = PAGE_SIZES.iter().map(|&n| {
-            pill(("page-size", n), n.to_string()).small().selected(n == self.page_size).build(
-                cx,
-                cx.listener(move |this, _, _, cx| {
-                    // Keep the first item on screen across a change of size.
-                    this.page = this.page * this.page_size / n;
-                    this.page_size = n;
-                    cx.notify();
-                }),
-            )
+        let page_size_labels: Vec<String> = PAGE_SIZES.iter().map(|n| n.to_string()).collect();
+        let page_size_labels: Vec<&str> = page_size_labels.iter().map(String::as_str).collect();
+        let page_size_ix = PAGE_SIZES.iter().position(|&n| n == self.page_size).unwrap_or(0);
+        let me = cx.entity();
+        let size_pills = crate::ui::segmented("page-size", &page_size_labels, page_size_ix, cx, move |i, _, cx| {
+            let n = PAGE_SIZES[i];
+            me.update(cx, |this, cx| {
+                // Keep the first item on screen across a change of size.
+                this.page = this.page * this.page_size / n;
+                this.page_size = n;
+                cx.notify();
+            })
         });
         let pager = h_flex()
             .gap(px(8.))
             .items_center()
             .child(
-                pill("page-prev", "‹ Previous")
+                button("page-prev", "‹ Previous")
+                    .kind(ButtonKind::Ghost)
                     .small()
                     .disabled((page == 0).then_some("This is the first page"))
                     .build(
@@ -1030,7 +1040,8 @@ impl Render for CleanerPage {
                 ixs.len()
             )))
             .child(
-                pill("page-next", "Next ›")
+                button("page-next", "Next ›")
+                    .kind(ButtonKind::Ghost)
                     .small()
                     .disabled((page + 1 >= pages).then_some("This is the last page"))
                     .build(
@@ -1043,7 +1054,7 @@ impl Render for CleanerPage {
             )
             .child(div().flex_1())
             .child(caption("Per page", cx))
-            .children(size_pills);
+            .child(size_pills);
 
         let list = panel(cx)
             .flex_1()
@@ -1068,45 +1079,52 @@ impl Render for CleanerPage {
             )
             .child(pager);
 
-        let scope = |plan_only: bool, label: &'static str| {
-            pill(if plan_only { "scope-plan" } else { "scope-all" }, label)
-                .small()
-                .selected(self.breakdown_plan == plan_only)
-                .build(
-                    cx,
-                    cx.listener(move |this, _, _, cx| {
-                        this.breakdown_plan = plan_only;
-                        this.rebuild_breakdown(cx);
-                        cx.notify();
-                    }),
-                )
-        };
+        let me = cx.entity();
+        let scope = crate::ui::segmented(
+            "breakdown-scope",
+            &["All Cleanables", "Cleanup Plan"],
+            usize::from(self.breakdown_plan),
+            cx,
+            move |i, _, cx| {
+                me.update(cx, |this, cx| {
+                    this.breakdown_plan = i == 1;
+                    this.rebuild_breakdown(cx);
+                    cx.notify();
+                })
+            },
+        );
         let side = v_flex()
-            .w(px(540.))
-            .flex_none()
+            .flex_grow(2.)
+            .flex_basis(relative(0.))
+            .min_w(px(320.))
             .gap(px(8.))
-            .child(
-                h_flex()
-                    .gap(px(8.))
-                    .child(scope(false, "All Cleanables"))
-                    .child(scope(true, "Cleanup Plan")),
-            )
+            .child(h_flex().child(scope))
             .child(div().h(px(301.)).child(self.breakdown.clone()));
 
         v_flex()
             .id("cleaner")
             .size_full()
             .gap(px(12.))
-            .p(px(16.))
-            .child(div().text_size(px(24.)).line_height(px(32.)).child("Cleaner"))
-            .child(div().text_color(muted).child(format!(
-                "Temporary files, caches and build artefacts, found in the Index and confirmed by Cleanup Rules (add your own in cleanup.toml). Pre-ticked: temporary files untouched for {} days and build artefacts whose project is untouched for {} days; the limits are in Settings.",
-                self.temp_days, self.build_days
-            )))
+            .child(crate::ui::title_row(
+                "Cleaner",
+                Some(format!(
+                    "Temporary files, caches and build artefacts, found in the Index and confirmed by Cleanup Rules (add your own in cleanup.toml). Pre-ticked: temporary files untouched for {} days and build artefacts whose project is untouched for {} days; the limits are in Settings.",
+                    self.temp_days, self.build_days
+                )),
+                cx,
+            ))
             .children(problems)
             .child(bar)
             .children(self.report_panel(cx).map(|r| div().id("report").max_h(px(160.)).overflow_y_scrollbar().child(r)))
-            .child(h_flex().flex_1().min_h_0().gap(px(12.)).items_start().child(list.h_full().flex_1().min_w_0()).child(side))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .gap(px(12.))
+                    .items_start()
+                    .child(list.h_full().flex_grow(3.).flex_basis(relative(0.)).min_w_0())
+                    .child(side),
+            )
     }
 }
 

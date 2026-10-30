@@ -2,8 +2,8 @@
 
 use crate::engine::Shared;
 use crate::format;
-use crate::theme::palette;
-use crate::ui::{caption, pill, swatch};
+use crate::theme::{FS_BODY, FS_SMALL, palette};
+use crate::ui::{ButtonKind, button, caption, swatch};
 use crate::view::{Focus, View};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{WindowExt as _, h_flex, v_flex};
@@ -855,7 +855,7 @@ impl Treemap {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(14.))
+                    .text_size(px(FS_BODY))
                     .font_weight(FontWeight::MEDIUM)
                     .child("Treemap"),
             )
@@ -873,19 +873,22 @@ impl Treemap {
                     .items_center()
                     .child(caption("Depth", cx))
                     .child(
-                        pill("depth-less", "−")
+                        button("depth-less", "−")
                             .small()
+                            .kind(ButtonKind::Ghost)
                             .build(cx, cx.listener(|this, _, _, cx| this.set_depth(this.depth.saturating_sub(1), cx))),
                     )
                     .child(div().w(px(12.)).text_xs().text_color(text).child(self.depth.to_string()))
                     .child(
-                        pill("depth-more", "+")
+                        button("depth-more", "+")
                             .small()
+                            .kind(ButtonKind::Ghost)
                             .build(cx, cx.listener(|this, _, _, cx| this.set_depth(this.depth + 1, cx))),
                     )
                     .child(
-                        pill("export-png", "Export PNG")
+                        button("export-png", "Export PNG")
                             .small()
+                            .kind(ButtonKind::Ghost)
                             .build(cx, cx.listener(|this, _, window, cx| this.export_png(window, cx))),
                     ),
             );
@@ -1215,12 +1218,12 @@ impl Render for Treemap {
                     .text_xs()
                     .line_height(px(16.))
                     .text_color(ink)
-                    .children(parent.map(|name| div().flex_none().text_size(px(11.)).opacity(0.8).child(name)))
+                    .children(parent.map(|name| div().flex_none().text_size(px(FS_SMALL)).opacity(0.8).child(name)))
                     .child(
                         div()
                             .flex_none()
                             .w_full()
-                            .text_size(px(13.))
+                            .text_size(px(FS_SMALL))
                             .font_weight(FontWeight::MEDIUM)
                             .whitespace_nowrap()
                             .truncate()
@@ -1249,7 +1252,8 @@ impl Render for Treemap {
                     .pt(px(if tile.level <= 1 { 2. } else { 0. }))
                     .gap(px(6.))
                     .items_center()
-                    .text_size(px(if tile.level <= 1 { 11. } else { 10. }))
+                    .text_size(px(FS_SMALL))
+                    .line_height(px(14.))
                     .text_color(text)
                     .child(
                         div()

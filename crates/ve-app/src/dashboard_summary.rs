@@ -5,7 +5,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashSet};
 use std::time::{Duration, Instant};
-use ve_core::{Candidate, Capacity, Category, CategoryMap, EntryId, Index, Query};
+use ve_core::{Candidate, Category, CategoryMap, EntryId, Index, Query};
 
 /// Rows in each of the Largest files and Recently modified tables.
 pub const LIST_LEN: usize = 6;
@@ -58,17 +58,6 @@ impl Summary {
     /// On-disk Size of every file in the Index.
     pub fn indexed(&self) -> u64 {
         self.categories.iter().map(|c| c.0).sum()
-    }
-
-    /// Categories with their (On-disk Size, files), largest first, empty ones left out.
-    pub fn by_size(&self) -> Vec<(Category, u64, u64)> {
-        let mut rows: Vec<_> = Category::ALL
-            .iter()
-            .map(|&c| (c, self.categories[c as usize].0, self.categories[c as usize].1))
-            .filter(|r| r.2 > 0)
-            .collect();
-        rows.sort_by_key(|r| Reverse(r.1));
-        rows
     }
 
     pub fn volume(&self, identity: &str) -> Option<&VolumeSummary> {
@@ -244,51 +233,6 @@ fn matches(index: &Index, query: &Query, id: EntryId, scratch: &mut (String, Vec
     })
 }
 
-/// A Location's bar: its Categories, the used space no Entry accounts for, and what is free.
-/// The parts add up to the capacity.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Lane {
-    pub categories: [u64; 8],
-    pub unindexed: u64,
-    pub free: u64,
-}
-
-impl Lane {
-    /// Splits a Volume of `capacity` given the On-disk Size of its files per Category. Without a
-    /// capacity (never synced) the bar is only the Categories. Free is always what the filesystem
-    /// reports.
-    pub fn new(mut categories: [u64; 8], capacity: Option<Capacity>) -> Lane {
-        let Some(capacity) = capacity else {
-            return Lane {
-                categories,
-                unindexed: 0,
-                free: 0,
-            };
-        };
-        let free = capacity.free.min(capacity.total);
-        let used = capacity.total - free;
-        let indexed: u64 = categories.iter().sum();
-        // More indexed than the filesystem uses (btrfs compression and shared extents count
-        // per file, a stale Index): scale the Categories into the used space.
-        if indexed > used {
-            for c in &mut categories {
-                *c = (*c as u128 * used as u128 / indexed as u128) as u64;
-            }
-        }
-        let indexed: u64 = categories.iter().sum();
-        // Whatever used space the Entries do not explain is Unindexed Space.
-        Lane {
-            categories,
-            unindexed: used - indexed,
-            free,
-        }
-    }
-
-    pub fn total(&self) -> u64 {
-        self.categories.iter().sum::<u64>() + self.unindexed + self.free
-    }
-}
-
 /// The filesystem a Volume identity belongs to. A btrfs subvolume or bind mount is the
 /// filesystem's UUID plus a path (`uuid:UUID:/@home`) and shares the filesystem's capacity; every
 /// other identity is a filesystem of its own.
@@ -321,15 +265,6 @@ pub fn ago(now: i64, at: i64) -> String {
         3600..86400 => format!("{} h ago", secs / 3600),
         86400..172800 => "1 day ago".to_owned(),
         _ => format!("{} days ago", secs / 86400),
-    }
-}
-
-/// "Every 15 min", "Every 2 h", or "Manual" for 0.
-pub fn every(minutes: u64) -> String {
-    match minutes {
-        0 => "Manual".to_owned(),
-        m if m % 60 == 0 => format!("Every {} h", m / 60),
-        m => format!("Every {m} min"),
     }
 }
 
@@ -397,7 +332,6 @@ mod tests {
         // one.txt and two.txt are one file: 50 bytes, once ("txt" is Document or Other).
         assert_eq!(s.indexed(), 1000 + 300 + 300 + 50);
         assert_eq!(s.entries, index().live_count() as u64);
-        assert_eq!(s.by_size()[0].0, Category::Video);
     }
 
     #[test]
@@ -446,28 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bar_adds_up_to_the_volume_capacity() {
-        let mut cats = [0u64; 8];
-        cats[0] = 300;
-        cats[1] = 100;
-        let lane = Lane::new(cats, Some(Capacity { total: 1000, free: 500 }));
-        assert_eq!((lane.unindexed, lane.free), (100, 500));
-        assert_eq!(lane.total(), 1000);
-        // Indexed more than used: no Unindexed Space, Categories scaled, free as reported.
-        let lane = Lane::new(cats, Some(Capacity { total: 1000, free: 700 }));
-        assert_eq!((lane.unindexed, lane.free), (0, 700));
-        assert_eq!(lane.categories.iter().sum::<u64>(), 300);
-        assert_eq!(lane.total(), 1000);
-        // Indexed more than the capacity: scaled to fit.
-        let lane = Lane::new(cats, Some(Capacity { total: 200, free: 0 }));
-        assert_eq!(lane.total(), 200);
-        assert_eq!(lane.free, 0);
-        // Never synced: just the Categories.
-        assert_eq!(Lane::new(cats, None).total(), 400);
-    }
-
-    #[test]
-    fn subvolumes_of_one_filesystem_group_and_count_its_capacity_once() {
+    fn subvolumes_of_one_filesystem_group_together() {
         let uuid = "d1894d9b-4d46-4135-b42b-f4e2f9062839";
         let ids = [
             format!("uuid:{uuid}"),
@@ -481,15 +394,6 @@ mod tests {
         assert_eq!(filesystem_of(ids[2]), format!("uuid:{uuid}"));
         assert_eq!(filesystem_of("dev:/dev/sda1@/mnt/x"), "dev:/dev/sda1@/mnt/x");
         assert_eq!(group_by_filesystem(&ids), vec![vec![0, 2, 3], vec![1], vec![4], vec![5]]);
-
-        // Three subvolumes of one 1000-byte filesystem, 700 used: 100 + 200 + 50 indexed.
-        let capacity = Capacity { total: 1000, free: 300 };
-        let mut sum = [0u64; 8];
-        for indexed in [100u64, 200, 50] {
-            sum[Category::Video as usize] += indexed;
-        }
-        let lane = Lane::new(sum, Some(capacity));
-        assert_eq!((lane.unindexed, lane.free, lane.total()), (350, 300, 1000));
     }
 
     /// A Remote reached through a stand-in ssh that runs the command locally appears in the
@@ -538,9 +442,5 @@ mod tests {
         assert_eq!(ago(1000 + 3 * 3600, 1000), "3 h ago");
         assert_eq!(ago(1000 + 86400, 1000), "1 day ago");
         assert_eq!(ago(1000 + 6 * 86400, 1000), "6 days ago");
-        assert_eq!(
-            (every(15), every(120), every(0)),
-            ("Every 15 min".into(), "Every 2 h".into(), "Manual".into())
-        );
     }
 }

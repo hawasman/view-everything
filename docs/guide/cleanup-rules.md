@@ -51,7 +51,7 @@ Command rules are never run with admin rights.
 
 - The Category breakdown shows how much of the reclaimable space each Category takes, for every Cleanable or for the ticked Cleanup Plan.
 - **Show in Explorer** on a Cleanable sets the Query to its folder.
-- The Dashboard's Cleaner card shows the total the Cleaner could reclaim and opens the Cleaner.
+- The Overview's finding line and its Cleanable figure show the total the Cleaner could reclaim; Open Cleaner and Review Cleanup Plan open the Cleaner.
 
 ## Write your own rules
 

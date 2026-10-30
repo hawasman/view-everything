@@ -4,7 +4,7 @@ A Remote is storage the app indexes over a network protocol without mounting it.
 
 Add a Remote in Settings. **Test** checks its details before you add it, and you can edit it later. A name is optional; without one the Remote shows its host or bucket.
 
-A Remote syncs when you press Sync now on it (Dashboard or Settings), or on a schedule you choose for it; the default is Manual. The Dashboard's Sync now for every Volume leaves Remotes out. Mounted network shares are a different thing: they are Volumes, and indexing them is opt-in in Settings.
+A Remote syncs when you press Sync now on it (in its Inspector from the Overview, or in Settings), or on a schedule you choose for it; the default is Manual. The tray's Sync now for every Volume leaves Remotes out. Mounted network shares are a different thing: they are Volumes, and indexing them is opt-in in Settings.
 
 ## Kinds
 

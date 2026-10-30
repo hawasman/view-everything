@@ -30,3 +30,17 @@ scripts/ui-sandbox.sh stop  NAME                 # always stop when done
 ## Domain language
 
 `CONTEXT.md` defines the project's terms (Index, Entry, Location, Module, ...). Use them in code, UI text and messages; architectural decisions are in `docs/adr/`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues for `hawasman/view-everything`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default triage labels, unchanged. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: the glossary is `CONTEXT.md` at the root, decisions in `docs/adr/`. See `docs/agents/domain.md`.

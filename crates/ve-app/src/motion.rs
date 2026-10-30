@@ -10,8 +10,6 @@ use std::time::Duration;
 
 /// How long a transition or fade lasts.
 pub const DURATION: Duration = Duration::from_millis(180);
-/// How far a panel slides in, in pixels.
-const SLIDE: f32 = 14.0;
 
 /// The operating system's Reduce motion preference, as read before the setting was applied.
 struct SystemChoice(bool);
@@ -40,14 +38,4 @@ pub fn apply(reduce: bool, cx: &mut App) {
 /// The length of a transition now: zero under Reduce motion, so it never starts.
 pub fn duration(cx: &App) -> Duration {
     if cx.reduce_motion() { Duration::ZERO } else { DURATION }
-}
-
-/// Fades and slides `el` in over `DURATION` when it first appears, then leaves it alone: no
-/// frames are requested once it has settled. Instant under Reduce motion (GPUI renders the end
-/// state and schedules nothing).
-pub fn slide_in(el: Div, id: impl Into<ElementId>) -> impl IntoElement {
-    el.relative()
-        .with_animation(id, Animation::new(DURATION).with_easing(ease_out), |el, t| {
-            el.opacity(t).top(px(SLIDE * (1.0 - t)))
-        })
 }

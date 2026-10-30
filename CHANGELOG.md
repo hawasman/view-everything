@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### One shell for every Module
+- The window has a new frame, built to hold the Modules to come (Search, Performance, Apps, Network) without filling up ([ADR-0015](docs/adr/0015-module-rail-inspector-and-timeline-dock.md)): a rail of Modules on the left (Overview; Files with Browse, Cleaner and Duplicates; Settings), one Query box in the top bar that works from every page (`/` focuses it; typing opens Browse), an **Inspector** on the right that shows whatever is selected (an Entry, a Location, a Task) with its facts and actions, a **Timeline** dock at the bottom, and a status strip on every page.
+- The Dashboard is now the **Overview**: what is indexed, what can be cleaned up, what is in the Trash and when the Index was last synced, then Locations, Categories, Largest files and Recently modified. Clicking a Location opens it in the Inspector, where Sync now, Open in Browse and Forget live.
+- **Duplicates** is its own page under Files, not a tab of the Explorer. **Work** is a page of every Task and every Location, opened from the rail's Work block, which shows the first running Task's progress and the Locations' health; the Tasks and Locations popovers are gone.
+- **Compare with** is the Timeline dock: on Browse it shows one tick per Snapshot; click one to compare, Back to Live to stop.
+- The Selection panel's facts and actions moved into the Inspector; the Treemap takes the whole right column.
+- One set of controls: buttons are flat and square-cornered (one dark primary per screen), tabs are underlined, choices are segmented; cards have a 1px edge and 8px corners; five type sizes; no serif. The chrome carries no colour; teal marks data only (used bars, progress, the Snapshot tick).
+- The Index box and the user block left the sidebar; Done Tasks are grey, not green.
+
 ## v0.2.1
 
 ### Half the memory

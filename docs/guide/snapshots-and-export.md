@@ -10,7 +10,7 @@ A Snapshot is the Folder Size of every folder, by path, at one moment ([ADR-0010
 
 ## Compare with
 
-**Compare with** in the Explorer tree picks a Snapshot date and adds a sortable **Change** column. The comparison runs in the background as a Task.
+On Browse, the Timeline dock at the foot of the window shows one tick per Snapshot. Click a tick to **Compare with** that Snapshot: the tree gains a sortable **Change** column and the dock reads "At <date>"; **Back to Live** ends the comparison. The comparison runs in the background as a Task.
 
 | Row | Change shows |
 | --- | --- |

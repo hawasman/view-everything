@@ -2,8 +2,8 @@
 
 use crate::engine::{Intervals, last_synced_label};
 use crate::settings::{Settings, ThemeChoice, default_duplicate_exclusions};
-use crate::theme::{self, SERIF_FAMILY, palette};
-use crate::ui::{Tone, caption, panel, pill, tag};
+use crate::theme::{self, CONTROL_H, RADIUS_CONTROL, palette};
+use crate::ui::{ButtonKind, Tone, button, caption, dialog_title, panel, tag};
 use chrono::Local;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::IndexPath;
@@ -752,7 +752,7 @@ impl SettingsPage {
             .when_some(error, |d, e| d.child(div().text_xs().text_color(palette(cx).negative).child(e)))
             .child(
                 h_flex().child(
-                    pill("exclusions-reset", "Reset to default")
+                    button("exclusions-reset", "Reset to default")
                         .small()
                         .disabled(
                             (self.settings.duplicate_exclusions == default_duplicate_exclusions() && self.exclusions_error.is_none())
@@ -966,7 +966,7 @@ impl SettingsPage {
             .flex_none()
             .px(px(14.))
             .items_center()
-            .rounded_full()
+            .rounded(px(RADIUS_CONTROL))
             .border_1()
             .border_color(p.control)
             .text_color(p.muted)
@@ -978,12 +978,13 @@ impl SettingsPage {
         let (rule, muted) = (p.rule, p.muted);
         let volume = &self.volumes[ix];
         let name = crate::app::volume_name(volume);
+        // A Local Volume is the default and needs no tag; the others say what they are.
         let kind = if volume.network {
-            "Network share"
+            Some("Network share")
         } else if volume.removable {
-            "Removable"
+            Some("Removable")
         } else {
-            "Local Volume"
+            None
         };
         let mut notes = vec![volume.mount.display().to_string(), volume.fs_type.clone()];
         if volume.read_only {
@@ -1004,8 +1005,10 @@ impl SettingsPage {
                         h_flex()
                             .gap(px(8.))
                             .items_center()
-                            .child(div().font_weight(FontWeight::MEDIUM).child(name))
-                            .child(tag(kind, Tone::Neutral, cx)),
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(div().font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(name))
+                            .when_some(kind, |d, kind| d.child(tag(kind, Tone::Neutral, cx).flex_none())),
                     )
                     .child(div().text_xs().text_color(muted).truncate().child(notes.join(" · "))),
             )
@@ -1028,7 +1031,6 @@ impl SettingsPage {
                 let identity = volume.identity.clone();
                 let busy = self.syncing.contains(&identity);
                 div()
-                    .id(("sync-volume", ix))
                     .w(px(84.))
                     .flex_none()
                     .text_xs()
@@ -1045,10 +1047,10 @@ impl SettingsPage {
                             .child("Syncing…")
                     })
                     .when(!busy, |d| {
-                        d.cursor_pointer()
-                            .text_color(p.accent)
-                            .child("Sync now")
-                            .on_click(cx.listener(move |_, _, _, cx| cx.emit(Refresh(identity.clone()))))
+                        d.child(
+                            crate::ui::link(("sync-volume", ix), "Sync now", cx)
+                                .on_click(cx.listener(move |_, _, _, cx| cx.emit(Refresh(identity.clone())))),
+                        )
                     })
             })
             .into_any_element()
@@ -1060,32 +1062,18 @@ impl SettingsPage {
             ("Light", ThemeChoice::Light),
             ("Dark", ThemeChoice::Dark),
         ];
-        let p = palette(cx);
-        let (ground, border, text, muted) = (p.ground, p.border, p.text, p.muted);
-        h_flex()
-            .p(px(3.))
-            .rounded_full()
-            .children(CHOICES.map(|(label, choice)| {
-                let on = self.settings.theme == choice;
-                div()
-                    .id(label)
-                    .h(px(32.))
-                    .px(px(16.))
-                    .flex()
-                    .items_center()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(if on { text } else { muted })
-                    .when(on, |d| d.bg(ground).border_1().border_color(border))
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings.theme = choice;
-                        theme::apply(choice, cx);
-                        this.commit(cx);
-                    }))
-            }))
-            .into_any_element()
+        let labels = CHOICES.map(|(label, _)| label);
+        let selected = CHOICES.iter().position(|&(_, c)| c == self.settings.theme).unwrap_or(0);
+        let me = cx.entity();
+        crate::ui::segmented("theme", &labels, selected, cx, move |i, _, cx| {
+            let choice = CHOICES[i].1;
+            me.update(cx, |this, cx| {
+                this.settings.theme = choice;
+                theme::apply(choice, cx);
+                this.commit(cx);
+            })
+        })
+        .into_any_element()
     }
 
     /// The Linux section: the switch that starts the `fanotify` helper (ADR-0009).
@@ -1202,7 +1190,7 @@ impl SettingsPage {
                     .gap(px(12.))
                     .items_center()
                     .child(div().id("update-status").child(caption(status, cx)))
-                    .child(pill("check-now", "Check now").small().build(
+                    .child(button("check-now", "Check now").small().build(
                         cx,
                         cx.listener(|this, _, _, cx| {
                             this.update_status = "Checking…".to_owned();
@@ -1250,7 +1238,7 @@ impl SettingsPage {
                 )
             });
             let p = palette(cx);
-            let (surface, ground, border, muted, text) = (p.surface, p.ground, p.border, p.muted, p.text);
+            let (ground, muted) = (p.ground, p.muted);
             let field = |label: &'static str, input: &Entity<InputState>| {
                 v_flex()
                     .flex_1()
@@ -1259,38 +1247,15 @@ impl SettingsPage {
                     .child(div().font_weight(FontWeight::MEDIUM).child(label))
                     .child(
                         h_flex()
-                            .h(px(38.))
+                            .h(px(CONTROL_H))
                             .px(px(6.))
                             .items_center()
-                            .rounded_full()
+                            .rounded(px(RADIUS_CONTROL))
                             .border_1()
                             .border_color(p.control)
                             .bg(ground)
                             .child(Input::new(input).appearance(false).bordered(false)),
                     )
-            };
-            let seg = |label: &'static str, on: bool| {
-                div()
-                    .h(px(32.))
-                    .px(px(16.))
-                    .flex()
-                    .items_center()
-                    .rounded_full()
-                    .font_weight(FontWeight::MEDIUM)
-                    .cursor_pointer()
-                    .text_color(if on { text } else { muted })
-                    .when(on, |d| d.bg(ground).border_1().border_color(border))
-                    .child(label)
-            };
-            let tab = |id: &'static str, label: &'static str, which: RemoteTab| {
-                let page = page.clone();
-                seg(label, shown_tab == which).id(id).on_click(move |_, window, cx| {
-                    page.update(cx, |page, cx| {
-                        page.remote_tab = which;
-                        page.forget_check(cx);
-                    });
-                    window.refresh();
-                })
             };
             let refresh = Select::new(&every).w_full();
             let refresh = v_flex()
@@ -1450,30 +1415,29 @@ impl SettingsPage {
                 let page = page.clone();
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| page.update(cx, |page, cx| page.test_remote(window, cx))
             };
-            let tabs = h_flex().child(
-                h_flex()
-                    .p(px(3.))
-                    .rounded_full()
-                    .bg(surface)
-                    .child(tab("tab-ssh", "SSH", RemoteTab::Ssh))
-                    .child(tab("tab-s3", "S3", RemoteTab::S3))
-                    .child(tab("tab-ftp", "FTP", RemoteTab::Ftp))
-                    .child(tab("tab-webdav", "WebDAV", RemoteTab::Webdav))
-                    .child(tab("tab-azure", "Azure", RemoteTab::Azure)),
+            let tab_ids = [RemoteTab::Ssh, RemoteTab::S3, RemoteTab::Ftp, RemoteTab::Webdav, RemoteTab::Azure];
+            let tabs = crate::ui::tabs(
+                "remote-tab",
+                &["SSH", "S3", "FTP", "WebDAV", "Azure"],
+                tab_ids.iter().position(|&t| t == shown_tab).unwrap_or(0),
+                cx,
+                {
+                    let page = page.clone();
+                    move |i, window, cx| {
+                        page.update(cx, |page, cx| {
+                            page.remote_tab = tab_ids[i];
+                            page.forget_check(cx);
+                        });
+                        window.refresh();
+                    }
+                },
             );
             dialog
                 .w(px(480.))
                 .centered()
                 .p(px(24.))
                 .close_button(false)
-                .title(
-                    div()
-                        .font_family(SERIF_FAMILY)
-                        .text_size(px(28.))
-                        .line_height(px(32.))
-                        .font_weight(FontWeight::NORMAL)
-                        .child(if editing { "Edit Remote" } else { "Add Remote" }),
-                )
+                .title(dialog_title(if editing { "Edit Remote" } else { "Add Remote" }, cx))
                 .child(
                     v_flex()
                         .gap(px(11.))
@@ -1499,15 +1463,15 @@ impl SettingsPage {
                             RemoteTab::Azure => "Account key or SAS token",
                             RemoteTab::Ssh => "Keys and ssh-agent only",
                         }))
-                        .child(pill("remote-cancel", "Cancel").build(cx, |_, window, cx| window.close_dialog(cx)))
+                        .child(button("remote-cancel", "Cancel").build(cx, |_, window, cx| window.close_dialog(cx)))
                         .child(
-                            pill("remote-test", "Test")
+                            button("remote-test", "Test")
                                 .disabled((check == Check::Running).then_some("Testing…"))
                                 .build(cx, test),
                         )
                         .child(
-                            pill("remote-add", if editing { "Save" } else { "Add Remote" })
-                                .primary()
+                            button("remote-add", if editing { "Save" } else { "Add Remote" })
+                                .kind(ButtonKind::Primary)
                                 .build(cx, save),
                         ),
                 )
@@ -1586,7 +1550,7 @@ fn section(title: &'static str, note: &'static str, body: impl IntoElement, cx: 
                 .pt(px(3.))
                 .flex_none()
                 .gap(px(6.))
-                .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(title))
+                .child(crate::ui::section_title(title, cx))
                 .child(div().text_color(palette(cx).muted).child(note)),
         )
         .child(div().flex_1().min_w_0().child(body))
@@ -1605,7 +1569,7 @@ impl Render for SettingsPage {
             .map(|ix| self.offline_row(ix, rows.is_empty() && remotes.is_empty() && ix == 0, cx))
             .collect();
         let indexed = self.volumes.iter().filter(|v| self.settings.is_indexed(v)).count();
-        let add = pill("add-remote", "Add Remote")
+        let add = button("add-remote", "Add Remote")
             .small()
             .build(cx, cx.listener(|this, _, window, cx| this.open_remote_dialog(None, window, cx)));
         let head = h_flex()
@@ -1680,11 +1644,9 @@ impl Render for SettingsPage {
             .pb(px(48.))
             .gap(px(24.))
             .child(
-                v_flex()
-                    .gap(px(6.))
-                    .mb(px(8.))
-                    .child(div().text_size(px(24.)).line_height(px(32.)).child("Settings"))
-                    .child(div().text_color(muted).child(format!(
+                crate::ui::title_row(
+                    "Settings",
+                    Some(format!(
                         "{indexed} of {} Volumes are indexed{}. Changes save as you make them.",
                         self.volumes.len(),
                         match self.settings.remotes.len() {
@@ -1692,7 +1654,10 @@ impl Render for SettingsPage {
                             1 => ", plus 1 Remote".to_owned(),
                             n => format!(", plus {n} Remotes"),
                         }
-                    ))),
+                    )),
+                    cx,
+                )
+                .mb(px(8.))
             )
             .child(section(
                 "Locations",

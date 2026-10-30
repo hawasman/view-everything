@@ -3,6 +3,7 @@
 
 use crate::engine::Shared;
 use crate::selection::Selection;
+use crate::theme::{FS_BODY, FS_SMALL};
 use crate::{format, view::View};
 use gpui_kit::component::h_flex;
 use gpui_kit::component::menu::PopupMenu;
@@ -214,7 +215,7 @@ impl TableDelegate for FlatList {
         let text = crate::theme::palette(cx).text;
         div()
             .size_full()
-            .text_size(px(12.))
+            .text_size(px(FS_SMALL))
             .when(col_ix == 2, |d| d.text_color(text).font_weight(FontWeight::MEDIUM))
             .child(self.column(col_ix, cx).name.clone())
     }
@@ -228,7 +229,7 @@ impl TableDelegate for FlatList {
             return div().into_any_element();
         };
         let muted = crate::theme::palette(cx).muted;
-        let cell = h_flex().size_full().overflow_hidden().whitespace_nowrap().text_size(px(13.));
+        let cell = h_flex().size_full().overflow_hidden().whitespace_nowrap().text_size(px(FS_BODY));
         match col {
             1 => cell.text_color(muted),
             0 => cell,

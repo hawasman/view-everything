@@ -47,7 +47,7 @@ Next (v0.3):
 - **Owner** detection: the program, game, package or project a folder belongs to (Steam manifests, `Program Files\<Vendor>`, package databases, Flatpak ids, project markers), shown in tooltips and the Selection panel.
 - Treemap "Colour by: Category | Owner kind".
 
-### 5.2 Search
+### 5.2 Launcher
 
 - A global hotkey opens a launcher over the Index, installed apps and app actions (in the manner of PowerToys Run).
 - Results within the keystroke budget (§7); keyboard-only operation.

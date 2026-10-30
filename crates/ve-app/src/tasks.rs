@@ -1,13 +1,14 @@
 //! Task registry: background work (Sync, Duplicate search, Cleaner search, Clean, Trash,
-//! Empty Trash, Compare) that the sidebar Tasks indicator lists. Cheap to clone; usable
+//! Empty Trash, Compare) that the Tasks page and the Inspector list. Cheap to clone; usable
 //! from any thread.
 
-use crate::theme::{RADIUS_CARD, palette};
-use crate::ui::{caption, pill, task_progress};
+use crate::theme::{RADIUS_CONTROL, palette};
+use crate::ui::{button, caption, empty_state, section_title, task_progress};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{Icon, IconName, Sizable as _, Size, h_flex, v_flex};
+use gpui_kit::component::{Sizable as _, Size, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -272,9 +273,25 @@ impl Drop for TaskHandle {
     }
 }
 
+impl Tasks {
+    /// A running or recently finished Task, by id.
+    pub fn find(&self, id: u64) -> Option<TaskInfo> {
+        let g = self.0.lock().unwrap();
+        g.running
+            .iter()
+            .find(|e| e.info.id == id)
+            .map(|e| {
+                let mut i = e.info.clone();
+                i.elapsed = e.started.elapsed();
+                i
+            })
+            .or_else(|| g.finished.iter().find(|t| t.id == id).cloned())
+    }
+}
+
 impl TaskKind {
     /// What the progress counter counts.
-    fn unit(self) -> &'static str {
+    pub fn unit(self) -> &'static str {
         match self {
             TaskKind::Sync | TaskKind::CatchUp => "Entries read",
             TaskKind::DuplicateSearch => "files",
@@ -285,7 +302,7 @@ impl TaskKind {
     }
 }
 
-fn duration_text(d: Duration) -> String {
+pub fn duration_text(d: Duration) -> String {
     let secs = d.as_secs();
     match secs {
         0 => format!("{} ms", d.as_millis()),
@@ -294,42 +311,35 @@ fn duration_text(d: Duration) -> String {
     }
 }
 
-/// The sidebar's Tasks row: a spinner and the count while any Task runs, the plain word otherwise.
-pub fn indicator_row(tasks: &Tasks, open: bool, cx: &App) -> Stateful<Div> {
-    let p = palette(cx);
-    let (muted, text, active) = (p.muted, p.text, p.active);
-    let running = tasks.running_count();
-    h_flex()
-        .id("nav-tasks")
-        .h(px(32.))
-        .my(px(1.))
-        .px(px(12.))
-        .gap(px(10.))
-        .items_center()
-        .rounded(px(10.))
-        .cursor_pointer()
-        .text_color(if running > 0 || open { text } else { muted })
-        .when(open, |d| d.bg(active))
-        .hover(move |s| s.text_color(text))
-        .child(if running > 0 {
-            Spinner::new().with_size(Size::Small).color(text).into_any_element()
-        } else {
-            Icon::new(IconName::Check).size(px(16.)).into_any_element()
-        })
-        .child(div().flex_1().child("Tasks"))
-        .when(running > 0, |d| d.child(div().text_xs().child(running.to_string())))
-}
+/// Called with a Task's id when its row is clicked.
+pub type Inspect = Rc<dyn Fn(u64, &mut Window, &mut App)>;
 
-/// The list of running Tasks and the last finished ones. Rebuilt on every render, so it stays
-/// live while the Shell repaints.
-pub fn list_panel<T: 'static>(tasks: &Tasks, cx: &mut Context<T>) -> Stateful<Div> {
+/// The Tasks page body: the running Tasks and the last finished ones, one row each. Rebuilt on
+/// every render, so it stays live while the Shell repaints. A click on a row inspects it.
+pub fn list<T: 'static>(tasks: &Tasks, selected: Option<u64>, inspect: Inspect, cx: &mut Context<T>) -> Div {
     let p = palette(cx);
-    let (muted, warning, positive) = (p.muted, p.warning, p.positive);
+    let (muted, warning) = (p.muted, p.warning);
     let running = tasks.running();
     let finished = tasks.finished();
-    let mut body = v_flex().gap(px(10.));
+    let mut body = v_flex().gap(px(4.));
     if running.is_empty() && finished.is_empty() {
-        body = body.child(caption("Nothing has run yet. Syncs, searches, Clean and Trash show here.", cx));
+        return body.child(empty_state("Nothing has run yet. Syncs, searches, Clean and Trash show here.", cx));
+    }
+    let raised = p.raised;
+    let row = |id: u64| {
+        let inspect = inspect.clone();
+        v_flex()
+            .id(("task-row", id as usize))
+            .gap(px(4.))
+            .p(px(10.))
+            .rounded(px(RADIUS_CONTROL))
+            .cursor_pointer()
+            .when(selected == Some(id), |d| d.bg(raised))
+            .hover(move |s| s.bg(raised))
+            .on_click(move |_, window, cx| inspect(id, window, cx))
+    };
+    if !running.is_empty() {
+        body = body.child(section_title("Running", cx).mb(px(4.)));
     }
     for t in running {
         let id = t.id;
@@ -341,21 +351,20 @@ pub fn list_panel<T: 'static>(tasks: &Tasks, cx: &mut Context<T>) -> Stateful<Di
                 .gap(px(10.))
                 .items_center()
                 .child(Spinner::new().with_size(Size::XSmall).color(muted))
-                .child(div().text_xs().text_color(muted).child("Working…"))
+                .child(caption("Working…", cx))
         };
         let tasks = tasks.clone();
         body = body.child(
-            v_flex()
-                .gap(px(4.))
+            row(id)
                 .child(
                     h_flex()
                         .gap(px(8.))
                         .items_center()
                         .child(div().flex_1().min_w_0().truncate().child(t.label.clone()))
-                        .child(div().text_xs().text_color(muted).child(duration_text(t.elapsed)))
+                        .child(caption(duration_text(t.elapsed), cx))
                         .when(t.cancellable, |d| {
                             d.child(
-                                pill(("task-cancel", id as usize), if t.cancelling { "Cancelling…" } else { "Cancel" })
+                                button(("task-cancel", id as usize), if t.cancelling { "Cancelling…" } else { "Cancel" })
                                     .small()
                                     .disabled(t.cancelling.then_some("Cancel was requested"))
                                     .build(cx, cx.listener(move |_, _, _, _| tasks.cancel(id))),
@@ -366,52 +375,46 @@ pub fn list_panel<T: 'static>(tasks: &Tasks, cx: &mut Context<T>) -> Stateful<Di
         );
     }
     if !finished.is_empty() {
-        body = body.child(div().mt(px(4.)).child(caption("Finished", cx)));
+        body = body.child(section_title("Finished", cx).mt(px(16.)).mb(px(4.)));
     }
     for t in finished {
         let id = t.id as usize;
+        // Grey for what went fine; colour only on the Task that needs a look.
         let (mark, tone, note) = match &t.outcome {
-            Some(Outcome::Done(m)) => ("Done", positive, m.clone()),
+            Some(Outcome::Done(m)) => ("Done", muted, m.clone()),
             Some(Outcome::Cancelled) => ("Cancelled", muted, String::new()),
             Some(Outcome::Failed(m)) => ("Failed", warning, m.clone()),
             None => ("", muted, String::new()),
         };
         let retry = t.retry.clone();
         body = body.child(
-            v_flex()
-                .gap(px(2.))
+            row(t.id)
                 .child(
                     h_flex()
                         .gap(px(8.))
                         .items_center()
-                        .child(div().text_color(tone).font_weight(FontWeight::MEDIUM).child(mark))
+                        .child(
+                            div()
+                                .w(px(72.))
+                                .flex_none()
+                                .text_color(tone)
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(mark),
+                        )
                         .child(div().flex_1().min_w_0().truncate().child(t.label.clone()))
-                        .child(div().text_xs().text_color(muted).child(duration_text(t.elapsed)))
+                        .child(caption(duration_text(t.elapsed), cx))
                         .when_some(retry, |d, retry| {
                             d.child(
-                                pill(("task-retry", id), "Retry")
+                                button(("task-retry", id), "Retry")
                                     .small()
                                     .build(cx, cx.listener(move |_, _, _, cx| retry(cx))),
                             )
                         }),
                 )
-                .when(!note.is_empty(), |d| d.child(div().text_xs().text_color(muted).child(note))),
+                .when(!note.is_empty(), |d| d.child(caption(note, cx))),
         );
     }
-    v_flex()
-        .id("tasks-panel")
-        .w(px(380.))
-        .max_h(px(480.))
-        .gap(px(12.))
-        .p(px(16.))
-        .rounded(px(RADIUS_CARD))
-        .border_1()
-        .border_color(p.border)
-        .bg(p.surface)
-        .shadow_lg()
-        .occlude()
-        .child(div().font_weight(FontWeight::SEMIBOLD).child("Tasks"))
-        .child(v_flex().id("tasks-scroll").flex_1().min_h_0().overflow_y_scroll().child(body))
+    body
 }
 
 #[cfg(test)]

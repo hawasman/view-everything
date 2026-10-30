@@ -67,7 +67,7 @@ Measurements recorded over time (performance, network), browsable by moment; a m
 _Avoid_: history, recording, log
 
 **Compare with**:
-The Explorer choice of a Snapshot date. The tree then gains a **Change** column: each folder's On-disk Size now minus its Size in the Snapshot, `new` for a folder the Snapshot lacked, and a muted `(removed)` row under the parent of a folder it had that is gone.
+The choice of a Snapshot date on the Timeline dock while on Browse. The tree then gains a **Change** column: each folder's On-disk Size now minus its Size in the Snapshot, `new` for a folder the Snapshot lacked, and a muted `(removed)` row under the parent of a folder it had that is gone. Back to Live ends it.
 
 ### Size
 
@@ -109,13 +109,35 @@ _Avoid_: app, vendor, source
 
 ### Views
 
-**Dashboard**:
-The home view: a glance at the state of the Index, its Locations and their Last Synced.
-_Avoid_: home, overview, summary
+**Overview**:
+The home view: what is indexed, what can be cleaned up, what is in the Trash and when the Index was last synced, then the Locations, the Categories, the largest and the most recently modified files.
+_Avoid_: dashboard, home, summary
 
-**Explorer**:
-The view for digging into Entries: the tree and flat lists, the Treemap and the Category breakdown, all following the Query.
+**Browse**:
+The Files page for digging into Entries: the tree and flat lists, the Treemap and the Category breakdown, all following the Query. "Explorer" names the same page in older text.
 _Avoid_: browser, main view, file view
+
+**Rail**:
+The column of Modules and their pages at the left of the window, with the Work block (Tasks, Locations) and Settings at its foot.
+_Avoid_: sidebar, menu
+
+**Inspector**:
+The pane at the right that shows whatever is selected (an Entry, a Location, a Task) with its facts and the actions it allows. It follows the selection; Esc clears it.
+_Avoid_: details pane, properties, selection panel
+
+**Timeline dock**:
+The strip at the foot of the window that holds the Moment and lets the user scrub each Module's Timeline or Snapshots.
+
+**Moment**:
+The one point in time the whole window shows: Live, or a chosen time. Each Module reads it its own way — Files shows the nearest Snapshot, Performance and Network the sample taken then.
+_Avoid_: date, time cursor, position
+
+**Launcher**:
+The window the global hotkey opens anywhere on the desktop: a single line that finds Entries, installed apps and app actions by name, keyboard only. Not the Query box, which is the Files Module's search.
+_Avoid_: search (for this), spotlight, palette
+
+**Work block**:
+The foot of the rail, one button: running Tasks with the first one's progress, and the Locations' state. It opens the Work page: every Task and every Location, each opening in the Inspector.
 
 **Query**:
 The search expression that selects which Entries count. Every panel in the Explorer (tree, flat list, Treemap, Category breakdown) shows only matching Entries; an empty Query matches everything.

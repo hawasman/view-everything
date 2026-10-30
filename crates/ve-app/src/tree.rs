@@ -3,7 +3,7 @@
 use crate::engine::Shared;
 use crate::format;
 use crate::selection::Selection;
-use crate::theme::palette;
+use crate::theme::{FS_BODY, FS_SMALL, palette};
 use crate::ui::swatch;
 use crate::view::{self, Focus, View};
 use gpui_kit::component::menu::PopupMenu;
@@ -403,7 +403,7 @@ impl TableDelegate for TreeList {
         let text = crate::theme::palette(cx).text;
         div()
             .size_full()
-            .text_size(px(12.))
+            .text_size(px(FS_SMALL))
             .when(
                 col_ix
                     == if self.sort.change {
@@ -528,7 +528,7 @@ impl TableDelegate for TreeList {
             .size_full()
             .overflow_hidden()
             .whitespace_nowrap()
-            .text_size(px(13.))
+            .text_size(px(FS_BODY))
             .when(root, |d| d.font_weight(FontWeight::MEDIUM));
         if col == 3 {
             return cell

@@ -6,7 +6,7 @@ The Index is saved between runs, so search and sizes never wait on a scan. Four 
 | --- | --- |
 | **Catch-up** | at launch, for Locations whose Last Synced is stale |
 | **Periodic Sync** | on each Location's schedule: every 30 minutes for local Volumes, 120 for network shares, Manual for Remotes (all adjustable in Settings) |
-| **Sync now** | when you ask: for every Volume (Dashboard, tray), one Location (Dashboard, Settings) or one folder (**Sync this folder** in the Explorer's right-click menu and the Selection panel) |
+| **Sync now** | when you ask: for every Volume (tray), one Location (the Inspector, Settings) or one folder (**Sync this folder** in Browse's right-click menu and the Inspector) |
 | **Live updates** | continuously while the app runs, where the platform allows it |
 
 Sync now re-reads in full, even a Volume Live updates is following. Every Sync shows up as a Task and can be cancelled. A cancelled Sync leaves the Location's earlier Entries in place.
@@ -44,7 +44,7 @@ Started as administrator, the app reads each local NTFS Volume's Master File Tab
 
 | Platform | How | Prompts |
 | --- | --- | --- |
-| Linux | XDG autostart entry | none. Live updates stay paused after a login start, so you aren't asked for a password; start them from the tray menu or the Dashboard |
+| Linux | XDG autostart entry | none. Live updates stay paused after a login start, so you aren't asked for a password; start them from the tray menu or the Overview |
 | Windows | scheduled task with highest privileges | one administrator prompt when you turn it on, none at login |
 | macOS | LaunchAgent | none |
 

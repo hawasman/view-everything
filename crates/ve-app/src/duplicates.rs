@@ -5,7 +5,7 @@ use crate::engine::{Shared, refresh_duplicates};
 use crate::format;
 use crate::theme::palette;
 use crate::trash::Trash;
-use crate::ui::{caption, pill, task_progress};
+use crate::ui::{ButtonKind, button, caption, task_progress};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Sizable as _, Size};
 use gpui_kit::component::{h_flex, v_flex};
@@ -107,7 +107,7 @@ impl DuplicatesPanel {
                             .font_weight(FontWeight::MEDIUM),
                     )
                     .child(caption(format!("{} wasted", format::size(group.wasted())), cx))
-                    .child(pill(("trash-others", gi), "Trash others").small().build(
+                    .child(button(("trash-others", gi), "Trash others").small().kind(ButtonKind::Danger).build(
                         cx,
                         cx.listener(move |this, _, window, cx| this.trash.ask_trash(&others, &this.volumes, window, cx)),
                     ))
@@ -169,6 +169,38 @@ enum Row {
     Copy(usize, usize),
 }
 
+impl DuplicatesPanel {
+    /// The page's facts line ("12 groups · 3 GB wasted"), and whether hashing runs. Brings the
+    /// groups up to date first.
+    pub fn facts(&mut self) -> (String, bool) {
+        refresh_duplicates(&self.shared);
+        self.rebuild();
+        if self.shared.hashing_now() {
+            return ("Looking for Duplicates…".to_owned(), true);
+        }
+        let skipped = self.shared.duplicates.lock().skipped;
+        let wasted: u64 = self.shown.iter().map(Shown::wasted).sum();
+        let mut line = format!(
+            "{} groups · {} wasted",
+            format::count(self.shown.len() as u64),
+            format::size(wasted)
+        );
+        if skipped > 0 {
+            line += &format!(
+                " · {} file{} skipped by Duplicate Exclusions",
+                format::count(skipped),
+                if skipped == 1 { "" } else { "s" }
+            );
+        }
+        (line, false)
+    }
+
+    /// Starts the search again.
+    pub fn rescan(&self) {
+        crate::engine::start_hashing(&self.shared);
+    }
+}
+
 impl Render for DuplicatesPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _span = crate::trace::span("DuplicatesPanel::render");
@@ -176,10 +208,8 @@ impl Render for DuplicatesPanel {
         self.rebuild();
         let muted = palette(cx).muted;
         let hashing = self.shared.hashing_now();
-        let skipped = self.shared.duplicates.lock().skipped;
-        let wasted: u64 = self.shown.iter().map(Shown::wasted).sum();
         let progress = &self.shared.hash_progress;
-        let status = if hashing {
+        let status = hashing.then(|| {
             let (done, total) = (progress.done.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed));
             if total == 0 {
                 h_flex()
@@ -196,46 +226,11 @@ impl Render for DuplicatesPanel {
                 };
                 task_progress("dupes-progress", done, Some(total), what, cx).into_any_element()
             }
-        } else {
-            let mut line = format!(
-                "{} groups · {} wasted",
-                format::count(self.shown.len() as u64),
-                format::size(wasted)
-            );
-            if skipped > 0 {
-                line += &format!(
-                    " · {} file{} skipped by Duplicate Exclusions",
-                    format::count(skipped),
-                    if skipped == 1 { "" } else { "s" }
-                );
-            }
-            line.into_any_element()
-        };
+        });
         v_flex()
             .id("duplicates")
             .size_full()
-            .px(px(8.))
-            .child(
-                h_flex()
-                    .flex_none()
-                    .gap(px(12.))
-                    .items_center()
-                    .pb(px(8.))
-                    .child(div().flex_1().text_color(muted).child(status))
-                    .child(
-                        pill("dupes-rescan", "Rescan")
-                            .small()
-                            .busy(hashing)
-                            .disabled(hashing.then_some("Hashing is running"))
-                            .build(
-                                cx,
-                                cx.listener(|this, _, _, cx| {
-                                    crate::engine::start_hashing(&this.shared);
-                                    cx.notify();
-                                }),
-                            ),
-                    ),
-            )
+            .children(status.map(|s| div().flex_none().pb(px(8.)).text_color(muted).child(s)))
             .child(if self.shown.is_empty() && !hashing {
                 div()
                     .text_color(muted)

@@ -18,6 +18,7 @@ mod export;
 mod filters;
 mod format;
 mod host;
+mod inspector;
 mod locations;
 mod motion;
 mod scope;

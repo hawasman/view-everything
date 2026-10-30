@@ -1,5 +1,5 @@
-//! The window: sidebar, the pages (Explorer with its Query bar, lists, panels and Treemap,
-//! Settings) and the status bar.
+//! The window: the Module rail, the top bar with the Query, the pages (Overview, Browse,
+//! Cleaner, Duplicates, Tasks, Settings), the Timeline dock, the status strip and the Inspector.
 
 use crate::categories::CategoryPanel;
 use crate::cleaner::{CleanerPage, ShowInExplorer};
@@ -11,17 +11,26 @@ use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
 use crate::format;
 use crate::host::{Attached, Host};
-use crate::selection_panel::{SelectionEvent, SelectionPanel};
+use crate::inspector::{self, Inspected, Item, Panel};
+use crate::locations;
+use crate::selection_panel::SelectionPanel;
 use crate::settings::Settings;
 #[cfg(feature = "updater")]
 use crate::settings_page::CheckNow;
 use crate::settings_page::{Changed, Forget, Refresh, SettingsPage};
-use crate::theme::{SERIF_FAMILY, palette, tabular};
+use crate::tasks::Outcome;
+use crate::theme::{CONTROL_H, FS_BODY, FS_SMALL, GAP, PAD, RADIUS_CARD, RADIUS_CONTROL, ROW_H, palette, tabular};
 use crate::trash::{self, Trash};
 use crate::tree::TreeList;
 use crate::treemap::{Treemap, TreemapEvent};
-use crate::ui::{caption, dot, pill};
+use crate::ui::{
+    ButtonKind, Tone, button, caption, dialog_title, dot, empty_state, group_label, nav_item, panel, section_title, tag, task_progress,
+    title_row,
+};
+use crate::view::Focus;
+use chrono::Local;
 use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::component::notification::Notification;
@@ -85,9 +94,12 @@ pub fn volume_name(v: &VolumeInfo) -> String {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
-    Dashboard,
-    Explorer,
+    Overview,
+    Browse,
     Cleaner,
+    Duplicates,
+    /// Tasks and Locations, from the rail's Work block.
+    Work,
     Settings,
 }
 
@@ -110,7 +122,6 @@ const QUERY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(120
 pub struct Remembered {
     page: Page,
     show_tree: bool,
-    show_duplicates: bool,
     compare: Option<chrono::NaiveDate>,
     expanded: HashSet<ve_core::EntryId>,
     tree_selection: crate::selection::Selection,
@@ -129,8 +140,6 @@ pub struct Shell {
     compare: Entity<Compare>,
     /// Whether the Explorer shows the tree rather than the flat list.
     show_tree: bool,
-    /// Whether the Explorer shows the Duplicates panel instead of a list.
-    show_duplicates: bool,
     duplicates: Entity<DuplicatesPanel>,
     filters: Entity<FiltersPanel>,
     show_filters: bool,
@@ -149,14 +158,6 @@ pub struct Shell {
     /// Identities of the Volumes already offered for indexing this session.
     offered: HashSet<String>,
     startup_problems: Vec<String>,
-    /// The Tasks list (opened from the sidebar) is showing.
-    tasks_open: bool,
-    /// When an outside click last closed the Tasks list.
-    tasks_closed: Option<std::time::Instant>,
-    /// The Locations list (opened from the sidebar) is showing.
-    locations_open: bool,
-    /// When an outside click last closed the Locations list.
-    locations_closed: Option<std::time::Instant>,
     /// A newer release than the running app, as the last update check found.
     #[cfg(feature = "updater")]
     update: Option<crate::update::Release>,
@@ -168,8 +169,12 @@ pub struct Shell {
     /// The selected size shown in the status bar, with what it was computed from: (tree shown,
     /// selection version, View id, Index generation).
     selected_size: Cell<Option<(SelectedSizeKey, u64)>>,
-    /// A repaint is already scheduled for the open Tasks list's elapsed times.
-    tasks_ticking: bool,
+    /// What the Inspector shows.
+    inspected: Option<Inspected>,
+    /// The Entry a list selection last put in the Inspector.
+    last_outlined: Option<ve_core::EntryId>,
+    /// The pending repaint of the Tasks page's elapsed times.
+    tick: Option<gpui::Task<()>>,
     #[cfg(feature = "bench")]
     demoed: bool,
 }
@@ -292,7 +297,9 @@ impl Shell {
                 }));
             }
             // Searching from anywhere shows the results.
-            this.page = Page::Explorer;
+            if !matches!(this.page, Page::Browse | Page::Cleaner | Page::Duplicates) {
+                this.page = Page::Browse;
+            }
             cx.notify();
         })
         .detach();
@@ -310,16 +317,8 @@ impl Shell {
         });
         let treemap = cx.new(|cx| Treemap::new(engine.shared.clone(), categories.clone(), treemap_depth, cx));
         let selection_panel = cx.new(|_| SelectionPanel::new(engine.shared.clone()));
-        cx.subscribe_in(
-            &selection_panel,
-            window,
-            |this, _, event: &SelectionEvent, window, cx| match event {
-                SelectionEvent::Scope(folder) => this.scope(Some(*folder), window, cx),
-                SelectionEvent::Trash(id) => this.trash.ask_trash(&[*id], &this.volumes, window, cx),
-                SelectionEvent::Sync(folder) => this.engine.sync_folder(*folder),
-            },
-        )
-        .detach();
+        // A finished folder count repaints the Inspector.
+        cx.observe(&selection_panel, |_, _, cx| cx.notify()).detach();
         let category_panel = cx.new(|_| CategoryPanel::new(Some(query.clone()), "All Locations · click a row to add type: to the Query"));
 
         let tree = cx.new(|cx| {
@@ -407,7 +406,7 @@ impl Shell {
         .detach();
         cx.subscribe_in(&treemap, window, |this, _, event: &TreemapEvent, window, cx| match event {
             TreemapEvent::Select(id) => {
-                this.selection_panel.update(cx, |p, cx| p.set_selected(Some(*id), cx));
+                this.inspected = Some(Inspected::Entry(*id));
                 this.reveal(*id, cx)
             }
             TreemapEvent::Scope(folder) => this.scope(*folder, window, cx),
@@ -428,15 +427,17 @@ impl Shell {
         #[cfg(feature = "bench")]
         let page = match std::env::var("VE_PAGE").as_deref() {
             Ok("settings") => Page::Settings,
-            Ok("explorer") => Page::Explorer,
+            Ok("browse" | "explorer") => Page::Browse,
             Ok("cleaner") => Page::Cleaner,
-            Ok("dashboard") => Page::Dashboard,
-            // The scroll measurement needs the Explorer's list on screen.
-            _ if std::env::var_os("VE_BENCH").is_some() => Page::Explorer,
-            _ => Page::Dashboard,
+            Ok("duplicates") => Page::Duplicates,
+            Ok("work" | "tasks") => Page::Work,
+            Ok("overview" | "dashboard") => Page::Overview,
+            // The scroll measurement needs the Browse list on screen.
+            _ if std::env::var_os("VE_BENCH").is_some() => Page::Browse,
+            _ => Page::Overview,
         };
         #[cfg(not(feature = "bench"))]
-        let page = Page::Dashboard;
+        let page = Page::Overview;
         #[cfg(feature = "bench")]
         if std::env::var_os("VE_OPEN_DIALOG").is_some() {
             cx.defer_in(window, |this, window, cx| {
@@ -501,7 +502,6 @@ impl Shell {
             dashboard,
             cleaner,
             duplicates,
-            show_duplicates: false,
             trash,
             treemap,
             selection_panel,
@@ -510,17 +510,15 @@ impl Shell {
             volumes,
             offered: HashSet::new(),
             startup_problems,
-            tasks_open: false,
-            tasks_closed: None,
-            locations_open: false,
-            locations_closed: None,
             #[cfg(feature = "updater")]
             update: None,
             #[cfg(feature = "updater")]
             self_update: SelfUpdate::Link,
             list_width: Rc::default(),
             selected_size: Cell::new(None),
-            tasks_ticking: false,
+            inspected: None,
+            last_outlined: None,
+            tick: None,
             #[cfg(feature = "bench")]
             demoed: false,
         };
@@ -547,7 +545,6 @@ impl Shell {
         Remembered {
             page: self.page,
             show_tree: self.show_tree,
-            show_duplicates: self.show_duplicates,
             compare: self.compare.read(cx).active(),
             expanded: tree.expanded().clone(),
             tree_selection: tree.selection.clone(),
@@ -559,7 +556,6 @@ impl Shell {
     fn restore(&mut self, r: Remembered, cx: &mut Context<Self>) {
         self.page = r.page;
         self.show_tree = r.show_tree;
-        self.show_duplicates = r.show_duplicates;
         if r.compare.is_some() {
             self.compare.update(cx, |c, cx| c.choose(r.compare, cx));
         }
@@ -716,24 +712,6 @@ impl Shell {
         None
     }
 
-    /// How far the sidebar's Tasks and Locations rows sit higher while the update notice (which
-    /// goes between them and Settings) shows: its margin, padding, border and text lines.
-    #[cfg(feature = "updater")]
-    fn update_row_height(&self) -> f32 {
-        const NOTICE: f32 = 16. + 16. + 2. + 20. + 16.;
-        const ACTION: f32 = 16.;
-        match (&self.update, &self.self_update) {
-            (None, _) => 0.,
-            (Some(_), SelfUpdate::Link) => NOTICE,
-            (Some(_), _) => NOTICE + ACTION,
-        }
-    }
-
-    #[cfg(not(feature = "updater"))]
-    fn update_row_height(&self) -> f32 {
-        0.
-    }
-
     /// The mounted Volumes changed: the Settings page re-applies them to the Engine, and each
     /// removable Volume never seen before is offered for indexing.
     fn mounts_changed(&mut self, now: Vec<VolumeInfo>, window: &mut Window, cx: &mut Context<Self>) {
@@ -786,8 +764,8 @@ impl Shell {
                         shell.update(cx, |shell, cx| shell.answer_offer(&volume, index_it, cx)).ok();
                         note.dismiss(window, cx);
                     });
-                    let button = pill(id, label).small();
-                    if index_it { button.primary() } else { button }.build(cx, click)
+                    let b = button(id, label).small();
+                    if index_it { b.kind(ButtonKind::Primary) } else { b }.build(cx, click)
                 };
                 h_flex()
                     .gap_2()
@@ -851,7 +829,7 @@ impl Shell {
     /// Outlines on the Treemap what the shown list selects, the last-clicked Entry boldest, and
     /// shows that Entry in the Selection panel. A list that cannot show what the Treemap selected
     /// leaves its outline alone.
-    fn outline_selection(&self, cx: &mut Context<Self>) {
+    fn outline_selection(&mut self, cx: &mut Context<Self>) {
         let ids = self.selected_entries(cx);
         let Some(last) = self.last_clicked(cx).or_else(|| ids.first().copied()) else {
             return;
@@ -861,7 +839,12 @@ impl Shell {
             t.set_selected(Some(last), cx);
             t.set_also_selected(rest, cx);
         });
-        self.selection_panel.update(cx, |p, cx| p.set_selected(Some(last), cx));
+        // A new selection on Browse is what the Inspector follows; a refresh of the same one,
+        // or a selection kept while another page is shown, leaves it alone.
+        if self.page == Page::Browse && self.last_outlined != Some(last) {
+            self.inspected = Some(Inspected::Entry(last));
+        }
+        self.last_outlined = Some(last);
     }
 
     /// The Entry last clicked in whichever list the Explorer shows.
@@ -1030,12 +1013,17 @@ impl Shell {
                             .child(div().text_xs().text_color(muted).truncate().child(q.query.clone())),
                     )
                     .child(
-                        pill(("saved-rename", i), "Rename")
+                        button(("saved-rename", i), "Rename")
                             .small()
-                            .selected(renaming == Some(i))
+                            .pressed(renaming == Some(i))
                             .build(cx, rename),
                     )
-                    .child(pill(("saved-delete", i), "Delete").small().build(cx, delete))
+                    .child(
+                        button(("saved-delete", i), "Delete")
+                            .small()
+                            .kind(ButtonKind::Danger)
+                            .build(cx, delete),
+                    )
             });
             let list = if saved.is_empty() {
                 div().py(px(8.)).text_color(muted).child("Nothing saved yet.").into_any_element()
@@ -1056,14 +1044,7 @@ impl Shell {
                 .centered()
                 .p(px(24.))
                 .close_button(false)
-                .title(
-                    div()
-                        .font_family(SERIF_FAMILY)
-                        .text_size(px(28.))
-                        .line_height(px(32.))
-                        .font_weight(FontWeight::NORMAL)
-                        .child("Saved Queries"),
-                )
+                .title(dialog_title("Saved Queries", cx))
                 .child(
                     v_flex()
                         .gap(px(12.))
@@ -1076,18 +1057,18 @@ impl Shell {
                                     h_flex()
                                         .flex_1()
                                         .min_w_0()
-                                        .h(px(38.))
+                                        .h(px(CONTROL_H))
                                         .px(px(6.))
                                         .items_center()
-                                        .rounded_full()
+                                        .rounded(px(RADIUS_CONTROL))
                                         .border_1()
                                         .border_color(p.control)
                                         .bg(p.ground)
                                         .child(Input::new(&name_input).appearance(false).bordered(false)),
                                 )
                                 .child(
-                                    pill("saved-save", if renaming.is_some() { "Rename" } else { "Save current" })
-                                        .primary()
+                                    button("saved-save", if renaming.is_some() { "Rename" } else { "Save current" })
+                                        .kind(ButtonKind::Primary)
                                         .build(cx, done_click),
                                 ),
                         )
@@ -1100,40 +1081,23 @@ impl Shell {
                 .footer(
                     h_flex()
                         .justify_end()
-                        .child(pill("saved-close", "Close").build(cx, |_, window, cx| window.close_dialog(cx))),
+                        .child(button("saved-close", "Close").build(cx, |_, window, cx| window.close_dialog(cx))),
                 )
         });
     }
 
-    /// What a click on the Dashboard asked for.
+    /// What a click on the Overview asked for.
     fn dashboard_act(&mut self, act: &Act, window: &mut Window, cx: &mut Context<Self>) {
         match act {
             Act::Explore(query) => {
                 if let Some(text) = query {
                     self.set_query_text(text, window, cx);
                 }
-                self.page = Page::Explorer;
+                self.page = Page::Browse;
             }
-            Act::OpenCleaner => {
-                self.page = Page::Cleaner;
-                cx.notify();
-            }
-            Act::Forget(identity, mount) => {
-                self.settings_page
-                    .update(cx, |page, cx| page.apply(|s| s.forget(identity, mount), cx));
-                self.engine.forget(identity.clone());
-            }
-            Act::Sync(identities) => {
-                for identity in identities {
-                    self.engine.sync_location(identity.clone());
-                }
-            }
-            Act::SyncAll => self.engine.sync_now(),
-            Act::StartLive => {
-                Host::start_live(cx);
-                cx.notify();
-            }
-            Act::MoveToTrash(id) => self.trash.ask_trash(&[*id], &self.volumes, window, cx),
+            Act::OpenCleaner => self.page = Page::Cleaner,
+            Act::Inspect(what) => self.inspected = Some(what.clone()),
+            Act::StartLive => Host::start_live(cx),
             Act::SaveQuery(text) => {
                 self.settings_page
                     .update(cx, |page, cx| page.apply(|s| s.recent_query = text.clone(), cx));
@@ -1153,7 +1117,8 @@ impl Shell {
         let item = || h_flex().gap(px(8.)).items_center();
         let mut bar = h_flex()
             .flex_none()
-            .h(px(36.))
+            .h(px(32.))
+            .bg(p.ground)
             .px(px(24.))
             .gap(px(16.))
             .items_center()
@@ -1530,7 +1495,10 @@ impl Shell {
             t.set_selected(None, cx);
             t.set_also_selected(Vec::new(), cx);
         });
-        self.selection_panel.update(cx, |p, cx| p.set_selected(None, cx));
+        if matches!(self.inspected, Some(Inspected::Entry(_))) {
+            self.inspected = None;
+        }
+        self.last_outlined = None;
         cx.notify();
     }
 
@@ -1568,184 +1536,152 @@ impl Shell {
         });
     }
 
-    fn nav_row(&self, id: &'static str, label: &'static str, icon: impl IntoElement, page: Page, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// A rail row that switches to `page`.
+    fn nav(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        icon: Option<&'static str>,
+        page: Page,
+        nested: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        nav_item(id, label, icon, self.page == page, nested, cx).on_click(cx.listener(move |this, _, _, cx| {
+            // What was selected belongs to the page being left; the new page selects anew.
+            if this.page != page {
+                this.inspected = None;
+            }
+            this.page = page;
+            cx.notify();
+        }))
+    }
+
+    /// A clickable block of the rail's Work section.
+    fn work_row(&self, id: &'static str, current: bool, cx: &App) -> Stateful<Div> {
         let p = palette(cx);
-        let (muted, text, active) = (p.muted, p.text, p.active);
-        let current = self.page == page;
-        h_flex()
+        v_flex()
             .id(id)
-            .h(px(32.))
-            .my(px(1.))
-            .px(px(12.))
-            .gap(px(10.))
-            .items_center()
-            .rounded(px(10.))
+            .gap(px(4.))
+            .px(px(10.))
+            .py(px(8.))
+            .rounded(px(RADIUS_CONTROL))
             .cursor_pointer()
-            .text_color(if current { text } else { muted })
-            .when(current, |d| d.bg(active))
-            .hover(move |s| s.text_color(text))
-            .child(icon)
-            .child(label)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.page = page;
+            .text_size(px(FS_BODY))
+            .when(current, |d| d.bg(p.active))
+            .when(!current, |d| d.hover(move |s| s.bg(p.raised)))
+    }
+
+    /// The Work block: running Tasks (the first one's progress) and the Locations' health, as
+    /// one button that opens the Work page.
+    fn work_block(&self, rows: &[locations::Row], now: i64, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let running = self.engine.shared.tasks.running();
+        let first = running.first().cloned();
+        let tasks_title = if running.is_empty() {
+            "Tasks".to_owned()
+        } else {
+            format!("Tasks · {} running", running.len())
+        };
+        let (health, tip) = locations::summary(rows, now);
+        let colour = match health {
+            locations::Health::Green => p.positive,
+            locations::Health::Yellow => p.warning,
+            locations::Health::Red => p.negative,
+        };
+        self.work_row("work", self.page == Page::Work, cx)
+            .gap(px(6.))
+            .child(v_flex().gap(px(4.)).child(div().child(tasks_title)).when_some(first, |d, t| {
+                let unit = t.kind.unit();
+                d.when(t.total.is_some() || !unit.is_empty(), |d| {
+                    d.child(task_progress("rail-task-progress", t.done, t.total, unit, cx))
+                })
+                .child(div().truncate().child(caption(t.label.clone(), cx)))
+            }))
+            .child(
+                v_flex()
+                    .gap(px(4.))
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .items_center()
+                            .child(div().flex_1().child(format!("Locations · {}", rows.len())))
+                            .child(dot(colour)),
+                    )
+                    .child(caption(locations::rail_status(rows), cx)),
+            )
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.page != Page::Work {
+                    this.inspected = None;
+                }
+                this.page = Page::Work;
                 cx.notify();
             }))
     }
 
-    /// Brand, scope switcher, pages, Locations and Tasks; Settings and the user at the bottom.
-    fn sidebar(&self, locations: &[crate::locations::Row], scale: f32, cx: &mut Context<Self>) -> impl IntoElement {
-        let _span = crate::trace::span("Shell::sidebar");
+    /// The Module rail: brand, Overview, Files (Browse, Cleaner, Duplicates), then Work, the
+    /// update notice and Settings at the bottom.
+    fn rail(&self, rows: &[locations::Row], now: i64, scale: f32, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("Shell::rail");
         let p = palette(cx);
-        let (border, ground) = (p.border, p.ground);
-        let avatar = p.avatar;
-        let count = locations.len();
-        let user = std::env::var("USER")
-            .or_else(|_| std::env::var("USERNAME"))
-            .unwrap_or_else(|_| "user".into());
-        let initial = user.chars().next().map_or('U', |c| c.to_ascii_uppercase());
-        let display_name = format!("{initial}{}", user.chars().skip(1).collect::<String>());
-        let entries = self.engine.shared.index.read().live_count() as u64;
-
         v_flex()
-            .w(px(224.))
+            .w(px(240.))
             .h_full()
             .flex_none()
             .pt(px(20.))
             .px(px(12.))
-            .pb(px(16.))
-            .bg(ground)
+            .pb(px(12.))
+            .bg(p.ground)
             .border_r_1()
-            .border_color(border)
+            .border_color(p.border)
             .child(
                 h_flex()
                     .h(px(32.))
                     .px(px(8.))
                     .gap(px(10.))
                     .items_center()
-                    .text_size(px(15.))
+                    .text_size(px(FS_BODY))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(img(app_icon(24., scale)).size(px(24.)).flex_none())
                     .child(APP_NAME),
             )
             .child(
-                h_flex()
-                    .h(px(36.))
-                    .mt(px(12.))
-                    .px(px(12.))
-                    .justify_between()
-                    .items_center()
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_color(border)
-                    .child("Index")
-                    .child(caption(format!("{count} Location{}", if count == 1 { "" } else { "s" }), cx)),
-            )
-            .child(
-                self.nav_row(
-                    "nav-dashboard",
-                    "Dashboard",
-                    Icon::new(IconName::LayoutDashboard).size(px(16.)),
-                    Page::Dashboard,
+                self.nav(
+                    "nav-overview",
+                    "Overview",
+                    Some("icons/layout-dashboard.svg"),
+                    Page::Overview,
+                    false,
                     cx,
                 )
                 .mt(px(12.)),
             )
-            .child(self.nav_row(
-                "nav-explorer",
-                "Explorer",
-                Icon::new(IconName::Folder).size(px(16.)),
-                Page::Explorer,
-                cx,
-            ))
-            // The same trash can as Move to Trash.
-            .child(self.nav_row(
-                "nav-cleaner",
-                "Cleaner",
-                Icon::empty().path("icons/trash.svg").size(px(16.)),
-                Page::Cleaner,
-                cx,
-            ))
+            .child(group_label("Files", cx))
+            .child(self.nav("nav-browse", "Browse", None, Page::Browse, true, cx))
+            .child(self.nav("nav-cleaner", "Cleaner", None, Page::Cleaner, true, cx))
+            .child(self.nav("nav-duplicates", "Duplicates", None, Page::Duplicates, true, cx))
             .child(div().flex_1().min_h_0())
-            .child({
-                let (health, tip) = crate::locations::summary(locations, chrono::Utc::now().timestamp());
-                crate::locations::indicator_row(health, tip, self.locations_open, cx).on_click(cx.listener(|this, _, _, cx| {
-                    // The press that closed the panel (an outside click) must not reopen it.
-                    let just_closed = this
-                        .locations_closed
-                        .take()
-                        .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(300));
-                    this.locations_open = !this.locations_open && !just_closed;
-                    this.tasks_open = false;
-                    cx.notify();
-                }))
-            })
-            .child(
-                crate::tasks::indicator_row(&self.engine.shared.tasks, self.tasks_open, cx).on_click(cx.listener(|this, _, _, cx| {
-                    // The press that closed the panel (an outside click) must not reopen it.
-                    let just_closed = this
-                        .tasks_closed
-                        .take()
-                        .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(300));
-                    this.tasks_open = !this.tasks_open && !just_closed;
-                    this.locations_open = false;
-                    cx.notify();
-                })),
-            )
+            .child(self.work_block(rows, now, cx))
             .children(self.update_row(cx))
             .child(
-                self.nav_row(
-                    "nav-settings",
-                    "Settings",
-                    Icon::new(IconName::Settings).size(px(16.)),
-                    Page::Settings,
-                    cx,
-                )
-                .mt(px(16.)),
-            )
-            .child(
-                h_flex()
-                    .mt(px(8.))
-                    .pt(px(12.))
-                    .px(px(12.))
-                    .gap(px(10.))
-                    .items_center()
-                    .border_t_1()
-                    .border_color(border)
-                    .child(
-                        div()
-                            .size(px(28.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(avatar.0)
-                            .text_color(avatar.1)
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(initial.to_string()),
-                    )
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .child(div().font_weight(FontWeight::MEDIUM).child(display_name))
-                            .child(caption(format!("{} Entries", format::count(entries)), cx)),
-                    ),
+                self.nav("nav-settings", "Settings", Some("icons/settings.svg"), Page::Settings, false, cx)
+                    .mt(px(8.)),
             )
     }
 
-    /// The Query: wide enough to read whole, before the Filters that edit it. `/` focuses it.
-    fn find_box(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The Query: wide enough to read whole. `/` focuses it from any page.
+    fn find_box(&self, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
         h_flex()
             .flex_1()
             .min_w_0()
-            .h(px(36.))
-            .pl(px(14.))
+            .max_w(px(720.))
+            .h(px(CONTROL_H))
+            .pl(px(8.))
             .pr(px(14.))
             .gap(px(8.))
             .items_center()
-            .rounded_full()
+            .rounded(px(RADIUS_CONTROL))
             .border_1()
             .border_color(p.border)
             .bg(p.surface)
@@ -1763,7 +1699,7 @@ impl Shell {
                 this.set_query_text(if kept == text { "" } else { &kept }, window, cx);
                 cx.stop_propagation();
             }))
-            .child(Icon::new(IconName::Search).small().text_color(p.muted))
+            .child(tag("Files · Index", Tone::Neutral, cx).flex_none())
             .child(
                 div()
                     .flex_1()
@@ -1780,58 +1716,129 @@ impl Shell {
                         .on_click(cx.listener(|this, _, window, cx| this.set_query_text("", window, cx))),
                 )
             })
-            .child(div().text_xs().text_color(p.muted).child("/"))
+            .child(div().text_size(px(FS_SMALL)).text_color(p.muted).child("/"))
     }
 
-    /// `.tabs`: underlined Tree / Flat list with the summary line at the right.
-    fn tabs(&self, summary: String, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The top bar: the global Query box.
+    fn top_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let (text, muted, border) = (p.text, p.muted, p.border);
-        let tab = |id: &'static str, label: &'static str, on: bool, tree: Option<bool>, cx: &mut Context<Self>| {
-            div()
-                .id(id)
-                .relative()
-                .h(px(36.))
-                .flex()
-                .items_center()
-                .cursor_pointer()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(if on { text } else { muted })
-                .child(label)
-                .when(on, |d| {
-                    d.child(div().absolute().left_0().right_0().bottom(px(-1.)).h(px(2.)).bg(text))
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.show_duplicates = tree.is_none();
-                    if let Some(tree) = tree {
-                        this.show_tree = tree;
-                    }
-                    cx.notify();
-                }))
-        };
         h_flex()
-            .gap(px(24.))
+            .h(px(48.))
+            .flex_none()
+            .px(px(PAD))
             .items_center()
+            .bg(p.ground)
             .border_b_1()
-            .border_color(border)
-            .child(tab("tab-tree", "Tree", self.show_tree && !self.show_duplicates, Some(true), cx))
-            .child(tab(
-                "tab-flat",
-                "Flat list",
-                !self.show_tree && !self.show_duplicates,
-                Some(false),
-                cx,
-            ))
-            .child(tab("tab-dupes", "Duplicates", self.show_duplicates, None, cx))
-            .child(div().ml_auto().text_xs().text_color(muted).child(summary))
+            .border_color(p.border)
+            .child(self.find_box(cx))
     }
 
-    fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let _span = crate::trace::span("Shell::explorer");
+    /// The Timeline dock: slim on every page; on Browse a days lane with a tick per Snapshot.
+    fn dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let (active, working, dates) = {
+            let c = self.compare.read(cx);
+            (c.active(), c.working(), c.dates().to_vec())
+        };
+        let browse = self.page == Page::Browse;
+        let moment = active.map_or_else(|| "Moment: Live".to_owned(), |d| format!("At {d}"));
+        let snapshots = match dates.first() {
+            Some(latest) => format!("Snapshots {} · latest {latest}", dates.len()),
+            None => "Snapshots 0".to_owned(),
+        };
+        let compare = self.compare.clone();
+        let header = h_flex()
+            .h(px(40.))
+            .flex_none()
+            .gap(px(16.))
+            .items_center()
+            .text_size(px(FS_BODY))
+            .child(div().font_weight(FontWeight::MEDIUM).child("Timeline"))
+            .child(div().text_color(if active.is_some() { p.text } else { p.muted }).child(moment))
+            .child(caption(snapshots, cx))
+            .child(div().flex_1())
+            .when(working, |d| d.child(caption("Comparing…", cx)))
+            .when(browse && active.is_some(), |d| {
+                d.child(
+                    button("back-to-live", "Back to Live")
+                        .small()
+                        .kind(ButtonKind::Ghost)
+                        .build(cx, move |_, _, cx| compare.update(cx, |c, cx| c.choose(None, cx))),
+                )
+            });
+        let lane = browse.then(|| {
+            let Some(&oldest) = dates.last() else {
+                return div()
+                    .h(px(48.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .child(empty_state("No Snapshots yet: the first is taken once every Location has synced.", cx).flex_1())
+                    .into_any_element();
+            };
+            let today = Local::now().date_naive().max(dates[0]);
+            let span = (today - oldest).num_days().max(1) as f32;
+            let ticks = dates.iter().enumerate().map(|(i, &date)| {
+                let at = ((date - oldest).num_days() as f32 / span).clamp(0., 1.);
+                let chosen = active == Some(date);
+                let compare = self.compare.clone();
+                div()
+                    .id(("snapshot-tick", i))
+                    .absolute()
+                    .top(px(0.))
+                    .left(relative(at))
+                    .ml(px(-6.))
+                    .w(px(12.))
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .tooltip(move |window, cx| Tooltip::new(date.to_string()).build(window, cx))
+                    .on_click(move |_, _, cx| compare.update(cx, |c, cx| c.choose(Some(date), cx)))
+                    .child(
+                        div()
+                            .w(px(2.))
+                            .h(px(if chosen { 24. } else { 18. }))
+                            .bg(if chosen { p.accent } else { p.text }),
+                    )
+            });
+            v_flex()
+                .h(px(48.))
+                .flex_none()
+                .px(px(6.))
+                .child(
+                    div()
+                        .relative()
+                        .h(px(28.))
+                        .child(div().absolute().top(px(14.)).left_0().right_0().h(px(1.)).bg(p.border))
+                        .children(ticks),
+                )
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .child(caption(oldest.to_string(), cx))
+                        .child(caption("Today", cx)),
+                )
+                .into_any_element()
+        });
+        v_flex()
+            .flex_none()
+            .px(px(PAD))
+            .bg(p.ground)
+            .border_t_1()
+            .border_color(p.border)
+            .child(header)
+            .children(lane)
+    }
+
+    /// The Browse page: title and actions, Tree / Flat list, then the list with the Categories
+    /// beside the Treemap.
+    fn browse(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let _span = crate::trace::span("Shell::browse");
         self.fit_lists(cx);
         let p = palette(cx);
         let (text, muted) = (p.text, p.muted);
-        let surface = p.surface;
         let (tree_sort, entries, total) = {
             let view = self.engine.shared.view.lock().clone();
             let sort = self.tree.read(cx).delegate().sort_label();
@@ -1900,19 +1907,15 @@ impl Shell {
         } else {
             "Filters".into()
         };
-        let filters = pill("filters", label)
-            .icon("icons/filters.svg")
-            .small()
-            .selected(self.show_filters)
-            .build(
-                cx,
-                cx.listener(|this, _, _, cx| {
-                    this.show_filters = !this.show_filters;
-                    cx.notify();
-                }),
-            );
+        let filters = button("filters", label).icon("icons/filters.svg").pressed(self.show_filters).build(
+            cx,
+            cx.listener(|this, _, _, cx| {
+                this.show_filters = !this.show_filters;
+                cx.notify();
+            }),
+        );
         let saved_count = self.settings_page.read(cx).settings().saved_queries.len();
-        let saved = pill(
+        let saved = button(
             "saved",
             if saved_count > 0 {
                 format!("Saved · {saved_count}")
@@ -1920,7 +1923,6 @@ impl Shell {
                 "Saved".into()
             },
         )
-        .small()
         .build(
             cx,
             cx.listener(|this, _, window, cx| {
@@ -1928,32 +1930,16 @@ impl Shell {
                 this.open_saved_dialog(window, cx);
             }),
         );
-        let comparing = self.compare.read(cx).active();
-        let compare = pill(
-            "compare",
-            comparing.map_or("Compare with".to_owned(), |d| format!("Compared with {d}")),
-        )
-        .small()
-        .busy(self.compare.read(cx).working())
-        .selected(comparing.is_some())
-        .build(
-            cx,
-            cx.listener(|this, _, window, cx| Compare::open_dialog(&this.compare, window, cx)),
-        );
-        let export = pill("export", "Export CSV")
-            .small()
-            .build(cx, cx.listener(|this, _, window, cx| this.export_csv(window, cx)));
+        let export = button("export", "Export CSV").build(cx, cx.listener(|this, _, window, cx| this.export_csv(window, cx)));
         let selection = (sel_len > 0).then(|| {
             h_flex()
                 .gap(px(4.))
-                .text_xs()
+                .text_size(px(FS_SMALL))
                 .text_color(muted)
                 .child(div().font_weight(FontWeight::MEDIUM).text_color(text).child(sel_len.to_string()))
                 .child(format!("selected · {}", format::size(selected_size)))
         });
-        let list = if self.show_duplicates {
-            self.duplicates.clone().into_any_element()
-        } else if self.show_tree {
+        let list = if self.show_tree {
             DataTable::new(&self.tree)
                 .small()
                 .bordered(false)
@@ -1970,166 +1956,521 @@ impl Shell {
         };
         // The list takes the width its columns need (plus its padding), shrinking Name on narrow
         // windows; the Treemap column takes everything else.
-        let natural = if self.show_tree || self.show_duplicates {
+        let natural = if self.show_tree {
             self.tree.read(cx).delegate().natural_width()
         } else {
             FlatList::natural_width()
         } + 24.;
         let left = v_flex()
-            .min_w(px(360.))
+            // Wide enough for the Categories' columns; the Treemap takes what is left.
+            .min_w(px(448.))
             .h_full()
-            .gap(px(16.))
+            .gap(px(GAP))
             .flex_shrink(1.)
             .flex_grow(0.)
-            .flex_basis(px(natural));
-        let left = left
+            .flex_basis(px(natural))
             .child(
                 div()
-                    .id("explorer-list")
+                    .id("browse-list")
                     .relative()
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .bg(surface)
-                    .rounded(px(22.))
-                    .pt(px(16.))
+                    .bg(p.surface)
+                    .border_1()
+                    .border_color(p.border)
+                    .rounded(px(RADIUS_CARD))
+                    .pt(px(12.))
                     .px(px(12.))
                     .pb(px(8.))
                     .child(measure)
                     .child(list),
             )
             .child(div().h(px(301.)).flex_none().child(self.categories.clone()));
-        let right = v_flex()
-            .min_w(px(440.))
-            .h_full()
-            .gap(px(16.))
-            .flex_1()
-            .child(if self.show_filters {
-                crate::motion::slide_in(div().flex_1().min_h_0().child(self.filters.clone()), "filters-slide").into_any_element()
-            } else {
-                div().flex_1().min_h_0().child(self.treemap.clone()).into_any_element()
-            })
-            .when(!self.show_filters, |d| d.child(self.selection_panel.clone()));
+        let right = v_flex().min_w(px(360.)).h_full().flex_1().child(if self.show_filters {
+            div().flex_1().min_h_0().child(self.filters.clone())
+        } else {
+            div().flex_1().min_h_0().child(self.treemap.clone())
+        });
+        let me = cx.entity();
+        let tabs = crate::ui::tabs(
+            "browse-tab",
+            &["Tree", "Flat list"],
+            if self.show_tree { 0 } else { 1 },
+            cx,
+            move |i, _, cx| {
+                me.update(cx, |this, cx| {
+                    this.show_tree = i == 0;
+                    cx.notify();
+                })
+            },
+        );
         v_flex()
             .size_full()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .pt(px(24.))
-                    .px(px(24.))
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                        let focus = if this.show_tree {
-                            this.tree.focus_handle(cx)
-                        } else {
-                            this.table.focus_handle(cx)
-                        };
-                        if !focus.is_focused(window) {
-                            return;
-                        }
-                        match event.keystroke.key.as_str() {
-                            "delete" => this.ask_trash_selected(window, cx),
-                            key @ ("up" | "down") if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
-                                let (down, extend) = (key == "down", event.keystroke.modifiers.shift);
-                                // Our Selection, not the Table's own index, says where the focus is.
-                                if this.show_tree {
-                                    this.tree.update(cx, |t, cx| {
-                                        let row = t.delegate_mut().step(down, extend);
-                                        if let Some(row) = row {
-                                            t.scroll_to_row(row, cx);
-                                        }
-                                        cx.notify();
-                                    });
-                                } else {
-                                    this.table.update(cx, |t, cx| {
-                                        if let Some(row) = t.delegate_mut().step(down, extend) {
-                                            t.scroll_to_row(row, cx);
-                                        }
-                                        cx.notify();
-                                    });
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let focus = if this.show_tree {
+                    this.tree.focus_handle(cx)
+                } else {
+                    this.table.focus_handle(cx)
+                };
+                if !focus.is_focused(window) {
+                    return;
+                }
+                match event.keystroke.key.as_str() {
+                    "delete" => this.ask_trash_selected(window, cx),
+                    key @ ("up" | "down") if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
+                        let (down, extend) = (key == "down", event.keystroke.modifiers.shift);
+                        // Our Selection, not the Table's own index, says where the focus is.
+                        if this.show_tree {
+                            this.tree.update(cx, |t, cx| {
+                                let row = t.delegate_mut().step(down, extend);
+                                if let Some(row) = row {
+                                    t.scroll_to_row(row, cx);
                                 }
-                                cx.stop_propagation();
-                            }
-                            "escape" => {
-                                this.clear_selection(cx);
-                                cx.stop_propagation();
-                            }
-                            "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
-                                this.select_all(cx);
-                                cx.stop_propagation();
-                            }
-                            "/" => this.query.focus_handle(cx).focus(window, cx),
-                            _ => {}
+                                cx.notify();
+                            });
+                        } else {
+                            this.table.update(cx, |t, cx| {
+                                if let Some(row) = t.delegate_mut().step(down, extend) {
+                                    t.scroll_to_row(row, cx);
+                                }
+                                cx.notify();
+                            });
                         }
-                    }))
+                        cx.stop_propagation();
+                    }
+                    "escape" => {
+                        this.clear_selection(cx);
+                        cx.stop_propagation();
+                    }
+                    "a" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
+                        this.select_all(cx);
+                        cx.stop_propagation();
+                    }
+                    _ => {}
+                }
+            }))
+            .child(
+                h_flex()
+                    .items_start()
+                    .justify_between()
+                    .gap(px(GAP))
+                    .child(title_row("Browse", Some(summary), cx).min_w_0())
                     .child(
                         h_flex()
-                            .h(px(36.))
-                            .mb(px(8.))
-                            .gap(px(16.))
+                            .flex_none()
+                            .gap(px(8.))
                             .items_center()
-                            .child(div().flex_none().text_size(px(24.)).line_height(px(32.)).child("Explorer"))
-                            .child(self.find_box(cx))
-                            .child(
-                                h_flex()
-                                    .flex_none()
-                                    .gap(px(12.))
-                                    .items_center()
-                                    .children(selection)
-                                    .child(saved)
-                                    .when(self.show_tree && !self.show_duplicates, |d| d.child(compare))
-                                    .child(filters)
-                                    .child(export),
-                            ),
-                    )
-                    .child(self.tabs(summary, cx))
-                    .child(
-                        h_flex()
-                            .flex_1()
-                            .min_h_0()
-                            .gap(px(16.))
-                            .pt(px(16.))
-                            .pb(px(16.))
-                            .child(left)
-                            .child(right),
+                            .children(selection)
+                            .child(saved)
+                            .child(filters)
+                            .child(export),
                     ),
             )
-            .child(self.status_bar(cx))
+            .child(div().mt(px(GAP)).child(tabs))
+            .child(h_flex().flex_1().min_h_0().gap(px(GAP)).pt(px(GAP)).child(left).child(right))
+    }
+
+    /// The Duplicates page: title with the search's state, Rescan, and the groups.
+    fn duplicates_page(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (facts, hashing) = self.duplicates.update(cx, |d, _| d.facts());
+        let duplicates = self.duplicates.clone();
+        v_flex()
+            .size_full()
+            .gap(px(GAP))
+            .child(
+                h_flex()
+                    .items_start()
+                    .justify_between()
+                    .gap(px(GAP))
+                    .child(title_row("Duplicates", Some(facts), cx).min_w_0())
+                    .child(
+                        button("dupes-rescan", "Rescan")
+                            .busy(hashing)
+                            .disabled(hashing.then_some("Hashing is running"))
+                            .build(cx, move |_, _, cx| {
+                                duplicates.read(cx).rescan();
+                                cx.refresh_windows();
+                            }),
+                    ),
+            )
+            .child(crate::ui::panel(cx).flex_1().min_h_0().p(px(12.)).child(self.duplicates.clone()))
+    }
+
+    /// The Work page: running and recently finished Tasks beside every Location and its state;
+    /// a click on either inspects it.
+    fn work_page(&self, rows: &[locations::Row], now: i64, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let tasks = self.engine.shared.tasks.clone();
+        let (running, finished) = (tasks.running_count(), tasks.finished().len());
+        let shell = cx.weak_entity();
+        let inspect: crate::tasks::Inspect = Rc::new(move |id, _, cx| {
+            shell
+                .update(cx, |s, cx| {
+                    s.inspected = Some(Inspected::Task(id));
+                    cx.notify();
+                })
+                .ok();
+        });
+        let selected_task = match &self.inspected {
+            Some(Inspected::Task(id)) => Some(*id),
+            _ => None,
+        };
+        let selected_location = match &self.inspected {
+            Some(Inspected::Location(id)) => Some(id.as_str()),
+            _ => None,
+        };
+        let offline = rows.iter().filter(|r| !r.online).count();
+        let facts = format!(
+            "{running} running · {finished} finished · {} Location{} · {offline} offline",
+            rows.len(),
+            if rows.len() == 1 { "" } else { "s" }
+        );
+        let locations: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let identity = r.identity.clone();
+                let current = selected_location == Some(r.identity.as_str());
+                let state = r.state.text(now);
+                let tone = match &r.state {
+                    locations::State::Failed(_) => p.warning,
+                    s if !s.healthy() => p.muted,
+                    _ if r.syncing => p.text,
+                    _ => p.muted,
+                };
+                h_flex()
+                    .id(("work-location", i))
+                    .h(px(ROW_H))
+                    .px(px(8.))
+                    .gap(px(12.))
+                    .items_center()
+                    .rounded(px(RADIUS_CONTROL))
+                    .cursor_pointer()
+                    .when(i > 0, |d| d.border_t_1().border_color(p.rule))
+                    .when(current, |d| d.bg(p.active))
+                    .when(!current, |d| d.hover(move |s| s.bg(p.raised)))
+                    .child(div().flex_1().min_w_0().truncate().child(r.name.clone()))
+                    .when(!r.online, |d| d.child(tag("Offline Volume", Tone::Warning, cx)))
+                    .child(div().flex_none().text_color(tone).child(state))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.inspected = Some(Inspected::Location(identity.clone()));
+                        cx.notify();
+                    }))
+            })
+            .collect();
+        v_flex().size_full().gap(px(GAP)).child(title_row("Work", Some(facts), cx)).child(
+            h_flex()
+                .flex_1()
+                .min_h_0()
+                .gap(px(GAP))
+                .items_start()
+                .child(
+                    div()
+                        .id("tasks-scroll")
+                        .flex_grow(3.)
+                        .flex_basis(relative(0.))
+                        .min_w_0()
+                        .h_full()
+                        .overflow_y_scroll()
+                        .child(crate::tasks::list(&tasks, selected_task, inspect, cx)),
+                )
+                .child(
+                    panel(cx)
+                        .id("work-locations")
+                        .flex_grow(2.)
+                        .flex_basis(relative(0.))
+                        .min_w(px(320.))
+                        .max_h_full()
+                        .overflow_y_scroll()
+                        .child(section_title("Locations", cx).mb(px(8.)))
+                        .children(locations),
+                ),
+        )
+    }
+
+    /// Forgets an Offline Volume: Settings drops its choices, the Engine drops its Entries.
+    fn forget_location(&mut self, identity: &str, mount: &std::path::Path, cx: &mut Context<Self>) {
+        self.settings_page
+            .update(cx, |page, cx| page.apply(|s| s.forget(identity, mount), cx));
+        self.engine.forget(identity.to_owned());
+        self.inspected = None;
+        cx.notify();
+    }
+
+    /// What the Inspector draws for what is inspected, or None when it is gone.
+    fn inspector_panel(&mut self, what: &Inspected, rows: &[locations::Row], now: i64, cx: &mut Context<Self>) -> Option<Panel> {
+        match what {
+            Inspected::Entry(id) => self.entry_panel(*id, cx),
+            Inspected::Location(identity) => self.location_panel(identity, rows, now, cx),
+            Inspected::Task(id) => self.task_panel(*id, cx),
+        }
+    }
+
+    /// An Entry: size, share, contents and last write; Open, Show in file manager, Sync this
+    /// folder and Move to Trash….
+    fn entry_panel(&mut self, id: ve_core::EntryId, cx: &mut Context<Self>) -> Option<Panel> {
+        let shared = self.engine.shared.clone();
+        let view = shared.view.lock().clone()?;
+        let (is_dir, totals, share, name, path, when, target, can_sync) = {
+            let index = shared.index.read();
+            if !index.is_live(id) {
+                return None;
+            }
+            let totals = view.filter.totals(&index, id);
+            // Share of what the Treemap draws; a selection outside it is measured against its Location.
+            let drawn = crate::treemap::zoom_root(&index, &view);
+            let inside = drawn
+                .folder()
+                .is_none_or(|root| std::iter::successors(Some(id), |&e| index.parent(e)).any(|e| e == root));
+            let base = if inside { drawn } else { Focus::Folder(index.root_of(id)) };
+            let whole = base.totals(&index, &view.filter).on_disk.max(1);
+            let target = crate::engine::folder_of(&index, id);
+            (
+                index.is_dir(id),
+                totals,
+                format!("{:.1}% of {}", totals.on_disk as f64 * 100.0 / whole as f64, base.name(&index)),
+                index.display_name(id).to_owned(),
+                index.path(id).display().to_string(),
+                format::time(index.modified(id)),
+                target,
+                crate::engine::can_sync_folder(&index, target),
+            )
+        };
+        let contains = if is_dir {
+            let folders = self.selection_panel.update(cx, |p, cx| p.folders_text(id, &view, cx));
+            format!("{} files · {folders}", format::count(totals.files))
+        } else {
+            "1 file".to_owned()
+        };
+        let blocker = self.trash.blocker_of(&[id], &self.volumes);
+        let sync_why = (!can_sync).then_some(crate::engine::WHOLE_ONLY);
+        let fact = |l: &'static str, v: String| (SharedString::from(l), SharedString::from(v));
+        Some(Panel {
+            kind: "Entry",
+            tag: Some((SharedString::from(if is_dir { "Folder" } else { "File" }), Tone::Neutral)),
+            title: name.into(),
+            subtitle: Some(path.into()),
+            facts: vec![
+                fact("On-disk Size", format::size(totals.on_disk)),
+                fact("Share", share),
+                fact("Contains", contains),
+                fact("Last write", if when.is_empty() { "—".into() } else { when }),
+            ],
+            actions: vec![
+                Item::new(
+                    "inspector-open",
+                    "Open",
+                    cx.listener(move |this, _, window, cx| this.menu_act(MenuAct::Open, &[id], id, window, cx)),
+                ),
+                Item::new(
+                    "inspector-reveal",
+                    "Show in file manager",
+                    cx.listener(move |this, _, window, cx| this.menu_act(MenuAct::Reveal, &[id], id, window, cx)),
+                ),
+                Item::new(
+                    "inspector-sync",
+                    "Sync this folder",
+                    cx.listener(move |this, _, _, _| this.engine.sync_folder(target)),
+                )
+                .busy(shared.folder_syncing(target))
+                .disabled(sync_why),
+                Item::new(
+                    "inspector-trash",
+                    "Move to Trash…",
+                    cx.listener(move |this, _, window, cx| this.trash.ask_trash(&[id], &this.volumes, window, cx)),
+                )
+                .kind(ButtonKind::Danger)
+                .disabled(blocker.as_deref()),
+            ],
+        })
+    }
+
+    /// A Location: state, Used, Capacity, Files, Last Synced; Sync now, Open in Browse and, for
+    /// an Offline Volume, Forget….
+    fn location_panel(&mut self, identity: &str, rows: &[locations::Row], now: i64, cx: &mut Context<Self>) -> Option<Panel> {
+        let row = rows.iter().find(|r| r.identity == identity)?;
+        let (root, mount, remote, capacity, last_synced, subtitle) = {
+            let index = self.engine.shared.index.read();
+            let v = index.volume(index.volume_with_identity(identity)?)?;
+            (
+                v.root,
+                v.mount.clone(),
+                v.is_remote(),
+                v.capacity,
+                v.last_synced,
+                v.remote().map_or_else(|| v.mount.display().to_string(), |r| r.label()),
+            )
+        };
+        let dash = || SharedString::from("—");
+        let files = self.dashboard.read(cx).files_on(identity);
+        let (kind_tag, tone) = if remote {
+            ("Remote", Tone::Neutral)
+        } else if !row.online {
+            ("Offline Volume", Tone::Warning)
+        } else {
+            ("Local Volume", Tone::Neutral)
+        };
+        let loading = self.engine.shared.is_loading();
+        let why = if loading {
+            Some("Loading the saved Index")
+        } else if !row.online {
+            Some("Offline")
+        } else {
+            None
+        };
+        let fact = |l: &'static str, v: Option<String>| (SharedString::from(l), v.map_or_else(dash, SharedString::from));
+        let mut actions = vec![
+            Item::new("inspector-sync-now", "Sync now", {
+                let identity = identity.to_owned();
+                cx.listener(move |this, _, _, _| this.engine.sync_location(identity.clone()))
+            })
+            .busy(row.syncing)
+            .disabled(why),
+            Item::new(
+                "inspector-open-browse",
+                "Open in Browse",
+                cx.listener(move |this, _, window, cx| {
+                    this.scope(Some(root), window, cx);
+                    this.page = Page::Browse;
+                    cx.notify();
+                }),
+            )
+            .disabled(self.engine.shared.is_loading().then_some("Loading the saved Index")),
+        ];
+        if !row.online && !remote {
+            let (identity, mount) = (identity.to_owned(), mount.clone());
+            let shell = cx.entity();
+            actions.push(
+                Item::new("inspector-forget", "Forget…", move |_, window, cx| {
+                    let (shell, identity, mount) = (shell.clone(), identity.clone(), mount.clone());
+                    window.open_alert_dialog(cx, move |dialog, _, _| {
+                        let (shell, identity, mount) = (shell.clone(), identity.clone(), mount.clone());
+                        dialog
+                            .confirm()
+                            .title("Forget this Offline Volume?")
+                            .description(
+                                "Its Entries leave the Index and it is no longer searchable. Plugging it in again indexes it afresh.",
+                            )
+                            .ok_text("Forget")
+                            .ok_variant(ButtonVariant::Danger)
+                            .on_ok(move |_, _, cx| {
+                                shell.update(cx, |s, cx| s.forget_location(&identity, &mount, cx));
+                                true
+                            })
+                    });
+                })
+                .kind(ButtonKind::Danger),
+            );
+        }
+        Some(Panel {
+            kind: "Location",
+            tag: Some((kind_tag.into(), tone)),
+            title: row.name.clone().into(),
+            subtitle: Some(subtitle.into()),
+            facts: vec![
+                fact("State", Some(row.state.text(now))),
+                fact("Used", capacity.map(|c| format::size(c.total.saturating_sub(c.free)))),
+                fact("Capacity", capacity.map(|c| format::size(c.total))),
+                fact("Files", files.map(format::count)),
+                fact("Last Synced", last_synced.map(|at| crate::dashboard_summary::ago(now, at))),
+            ],
+            actions,
+        })
+    }
+
+    /// A Task: kind, progress, elapsed time and result; Cancel while it runs.
+    fn task_panel(&mut self, id: u64, cx: &mut Context<Self>) -> Option<Panel> {
+        let t = self.engine.shared.tasks.find(id)?;
+        let unit = t.kind.unit();
+        let progress = match (t.total, unit) {
+            (Some(total), _) => Some(format!("{} of {}", format::count(t.done), format::count(total))),
+            (None, "") => None,
+            (None, unit) => Some(format!("{} {unit}", format::count(t.done))),
+        };
+        let (tag_label, tone, result) = match &t.outcome {
+            None => ("Running", Tone::Accent, None),
+            Some(Outcome::Done(m)) => ("Done", Tone::Neutral, Some(m.clone()).filter(|m| !m.is_empty())),
+            Some(Outcome::Cancelled) => ("Cancelled", Tone::Neutral, None),
+            Some(Outcome::Failed(m)) => ("Failed", Tone::Warning, Some(m.clone())),
+        };
+        let fact = |l: &'static str, v: Option<String>| (SharedString::from(l), SharedString::from(v.unwrap_or_else(|| "—".into())));
+        let mut actions = Vec::new();
+        if t.outcome.is_none() && t.cancellable {
+            let tasks = self.engine.shared.tasks.clone();
+            actions.push(
+                Item::new(
+                    "inspector-cancel",
+                    if t.cancelling { "Cancelling…" } else { "Cancel" },
+                    move |_, _, _| tasks.cancel(id),
+                )
+                .kind(ButtonKind::Danger)
+                .disabled(t.cancelling.then_some("Cancel was requested")),
+            );
+        }
+        let _ = cx;
+        Some(Panel {
+            kind: "Task",
+            tag: Some((tag_label.into(), tone)),
+            title: t.label.clone().into(),
+            subtitle: None,
+            facts: vec![
+                fact("Kind", Some(t.kind.name().to_owned())),
+                fact("Progress", progress),
+                fact("Elapsed", Some(crate::tasks::duration_text(t.elapsed))),
+                fact("Result", result),
+            ],
+            actions,
+        })
+    }
+
+    /// Whether no text field has the keyboard (so `/` and Escape are the window's): nothing
+    /// focused, or one of the lists.
+    fn keys_are_ours(&self, window: &Window, cx: &App) -> bool {
+        match window.focused(cx) {
+            None => true,
+            Some(h) => h == self.tree.focus_handle(cx) || h == self.table.focus_handle(cx),
+        }
     }
 }
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _span = crate::trace::span("Shell::render");
-        // One read lock for the whole frame: the status bar and the Locations rows read the Index
+        // One read lock for the whole frame: the status strip and the Locations rows read the Index
         // again (the lock is recursive), and no writer can slip in between them.
-        let _frame_index = self.engine.shared.index.read();
+        let shared = self.engine.shared.clone();
+        let _frame_index = shared.index.read();
         let now = chrono::Utc::now().timestamp();
-        let above = self.update_row_height();
-        // The Tasks list shows each running Task's elapsed time; nothing else repaints a Task that
-        // reports no progress, so tick once a second while it is open and Tasks run.
-        if self.tasks_open && !self.tasks_ticking && self.engine.shared.tasks.running_count() > 0 {
-            self.tasks_ticking = true;
-            cx.spawn(async move |this, cx| {
+        self.compare.update(cx, |c, _| c.refresh_dates());
+        // The Tasks page shows each running Task's elapsed time; nothing else repaints a Task that
+        // reports no progress, so tick once a second while it is shown and Tasks run.
+        if self.page == Page::Work && self.tick.is_none() && self.engine.shared.tasks.running_count() > 0 {
+            self.tick = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
                 let _ = this.update(cx, |this, cx| {
-                    this.tasks_ticking = false;
+                    this.tick = None;
                     cx.notify();
                 });
-            })
-            .detach();
+            }));
         }
-        let rows = crate::locations::rows(&self.engine.shared, &self.volumes, self.settings_page.read(cx).settings(), now);
+        let rows = locations::rows(&self.engine.shared, &self.volumes, self.settings_page.read(cx).settings(), now);
+        let inspector = self
+            .inspected
+            .clone()
+            .and_then(|what| self.inspector_panel(&what, &rows, now, cx))
+            .map(|panel| inspector::render(panel, cx));
         let page = match self.page {
-            Page::Dashboard => self.dashboard.clone().into_any_element(),
-            Page::Explorer => self.explorer(cx).into_any_element(),
+            Page::Overview => self.dashboard.clone().into_any_element(),
+            Page::Browse => self.browse(cx).into_any_element(),
             Page::Cleaner => self.cleaner.clone().into_any_element(),
+            Page::Duplicates => self.duplicates_page(cx).into_any_element(),
+            Page::Work => self.work_page(&rows, now, cx).into_any_element(),
             Page::Settings => self.settings_page.clone().into_any_element(),
         };
+        // Settings lays out its own column; every other page sits in the canvas gutter.
+        let gutter = self.page != Page::Settings;
         let p = palette(cx);
-        // Problems have no status bar to sit in outside the Explorer.
-        let problems =
-            self.page != Page::Explorer && (!self.startup_problems.is_empty() || !self.engine.shared.status.lock().problems.is_empty());
         h_flex()
             .size_full()
             .relative()
@@ -2137,62 +2478,42 @@ impl Render for Shell {
             .text_color(p.text)
             .font_features(tabular())
             .line_height(px(20.))
-            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if (this.tasks_open || this.locations_open) && event.keystroke.key == "escape" {
-                    this.tasks_open = false;
-                    this.locations_open = false;
-                    cx.stop_propagation();
-                    cx.notify();
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let m = &event.keystroke.modifiers;
+                if m.control || m.platform || m.alt || this.query.focus_handle(cx).is_focused(window) || !this.keys_are_ours(window, cx) {
+                    return;
+                }
+                match event.keystroke.key.as_str() {
+                    "escape" if this.inspected.is_some() => {
+                        this.clear_selection(cx);
+                        this.inspected = None;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    "/" => {
+                        this.query.focus_handle(cx).focus(window, cx);
+                        cx.stop_propagation();
+                    }
+                    _ => {}
                 }
             }))
-            .child(self.sidebar(&rows, window.scale_factor(), cx))
-            .when(self.tasks_open, |d| {
-                d.child(
-                    deferred(
-                        div()
-                            .absolute()
-                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                this.tasks_open = false;
-                                this.tasks_closed = Some(std::time::Instant::now());
-                                cx.notify();
-                            }))
-                            .left(px(232.))
-                            .bottom(px(60. + above))
-                            .child(crate::motion::slide_in(
-                                div().child(crate::tasks::list_panel(&self.engine.shared.tasks, cx)),
-                                "tasks-slide",
-                            )),
-                    )
-                    .with_priority(1),
-                )
-            })
-            .when(self.locations_open, |d| {
-                d.child(
-                    deferred(
-                        div()
-                            .absolute()
-                            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                this.locations_open = false;
-                                this.locations_closed = Some(std::time::Instant::now());
-                                cx.notify();
-                            }))
-                            .left(px(232.))
-                            .bottom(px(94. + above))
-                            .child(crate::motion::slide_in(
-                                div().child(crate::locations::panel(rows, now, &self.engine, cx)),
-                                "locations-slide",
-                            )),
-                    )
-                    .with_priority(1),
-                )
-            })
+            .child(self.rail(&rows, now, window.scale_factor(), cx))
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(div().flex_1().min_h_0().child(page))
-                    .when(problems, |c| c.child(self.status_bar(cx))),
+                v_flex().flex_1().min_w_0().h_full().child(self.top_bar(cx)).child(
+                    h_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .child(div().flex_1().min_h_0().when(gutter, |d| d.px(px(PAD)).pt(px(PAD))).child(page))
+                                .child(self.dock(cx))
+                                .child(self.status_bar(cx)),
+                        )
+                        .children(inspector),
+                ),
             )
     }
 }
