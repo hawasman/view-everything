@@ -288,6 +288,10 @@ impl Shell {
                 _ => return,
             };
             let text = query.read(cx).value().to_string();
+            // Another Query than Show in Browse set: its pending selection no longer applies.
+            if this.reveal_on_view.as_ref().is_some_and(|(_, wanted)| *wanted != text) {
+                this.reveal_on_view = None;
+            }
             this.filters.update(cx, |f, cx| f.reload(&text, window, cx));
             if now {
                 this.query_debounce = None;
@@ -839,16 +843,23 @@ impl Shell {
     }
 
     /// Show in Browse: zooms the Query to the folder holding `id` (a Location's root zooms to
-    /// itself) and, once that View is in, selects `id` among its siblings.
+    /// itself) and, once that View is in, selects `id` among its siblings. The rest of the Query
+    /// stays unless it hides the Entry; then the Query becomes the folder alone.
     fn show_in_browse(&mut self, id: ve_core::EntryId, window: &mut Window, cx: &mut Context<Self>) {
-        let folder = {
+        let (folder, term) = {
             let index = self.engine.shared.index.read();
             if !index.is_live(id) {
                 return;
             }
-            index.parent(id).unwrap_or(id)
+            let folder = index.parent(id).unwrap_or(id);
+            (folder, crate::scope::term(&index, folder))
         };
-        self.scope(Some(folder), window, cx);
+        let shown = self.engine.shared.view.lock().as_ref().is_some_and(|v| v.filter.is_shown(id));
+        if shown {
+            self.scope(Some(folder), window, cx);
+        } else {
+            self.set_query_text(term.as_deref().unwrap_or_default(), window, cx);
+        }
         // Not `go`: the Inspector keeps the Entry it was asked from.
         self.page = Page::Browse;
         let text = self.query.read(cx).value().to_string();
@@ -1598,6 +1609,7 @@ impl Shell {
     fn go(&mut self, page: Page, cx: &mut Context<Self>) {
         if self.page != page {
             self.inspected = None;
+            self.reveal_on_view = None;
         }
         self.page = page;
         cx.notify();
@@ -2534,8 +2546,9 @@ impl Render for Shell {
             .line_height(px(20.))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let m = &event.keystroke.modifiers;
-                // Ctrl+1/2/3 switch pages from anywhere, the Query box included.
-                if m.secondary(cx) && !m.alt && !m.shift {
+                // Ctrl+1/2/3 switch pages from anywhere, the Query box included; not from
+                // behind an open dialog.
+                if m.secondary(cx) && !m.alt && !m.shift && !window.has_active_dialog(cx) {
                     let page = match event.keystroke.key.as_str() {
                         "1" => Some(Page::Overview),
                         "2" => Some(Page::Browse),

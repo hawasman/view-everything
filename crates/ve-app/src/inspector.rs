@@ -1,7 +1,7 @@
 //! The Inspector: the right pane that follows what was clicked, whatever the page. One shape for
 //! an Entry, a Location or a Task: kind and tag, title, subtitle, facts, then actions. The
 //! Shell builds the [`Panel`] of the inspected thing (it owns the Engine and the actions) and
-//! this module draws it.
+//! this module draws it; [`Folders`] counts an inspected folder's folders off the UI thread.
 
 use crate::engine::Shared;
 use crate::format;

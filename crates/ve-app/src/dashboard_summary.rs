@@ -219,10 +219,10 @@ fn summarize_with(
     }
 }
 
-/// Owners kept for the Largest Owners card, as many as the other lists.
+/// Owners kept for the Largest Owners panel, as many as the other lists.
 pub const OWNER_LEN: usize = LIST_LEN;
 
-/// One Owner in the Largest Owners card.
+/// One Owner in the Largest Owners panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnerRow {
     pub name: String,
@@ -238,8 +238,13 @@ pub struct OwnerRow {
 /// the Folder Size of its roots, so an enclosing Owner includes what the nested one holds.
 /// Hard links count once per root.
 fn largest_owners(index: &Index, n: usize) -> Vec<OwnerRow> {
-    // Per Owner: the summed size, and its largest root with that root's size.
-    let mut sizes: HashMap<OwnerId, (u64, EntryId, u64)> = HashMap::new();
+    /// What one Owner adds up to so far.
+    struct Tally {
+        size: u64,
+        largest_root: EntryId,
+        largest_root_size: u64,
+    }
+    let mut tallies: HashMap<OwnerId, Tally> = HashMap::new();
     for (root, owner) in index.owner_roots() {
         let mut seen_links = HashSet::new();
         let mut total = 0u64;
@@ -251,21 +256,26 @@ fn largest_owners(index: &Index, n: usize) -> Vec<OwnerRow> {
                 total += index.on_disk(id);
             }
         }
-        let entry = sizes.entry(owner).or_insert((0, root, 0));
-        entry.0 += total;
-        if total > entry.2 {
-            (entry.1, entry.2) = (root, total);
+        let tally = tallies.entry(owner).or_insert(Tally {
+            size: 0,
+            largest_root: root,
+            largest_root_size: 0,
+        });
+        tally.size += total;
+        if total > tally.largest_root_size {
+            tally.largest_root = root;
+            tally.largest_root_size = total;
         }
     }
-    let mut rows: Vec<OwnerRow> = sizes
+    let mut rows: Vec<OwnerRow> = tallies
         .into_iter()
-        .map(|(o, (size, root, _))| {
+        .map(|(o, tally)| {
             let owner = index.owner(o);
             OwnerRow {
                 name: owner.name.clone(),
                 kind: owner.kind,
-                size,
-                root,
+                size: tally.size,
+                root: tally.largest_root,
             }
         })
         .collect();

@@ -88,12 +88,7 @@ fn finding_sentence(reclaim: u64, count: usize, admin: u64) -> String {
         if count == 1 { "" } else { "s" }
     );
     if admin > 0 {
-        let share = if admin >= reclaim {
-            "all of it".to_owned()
-        } else {
-            format!("{} of it", format::size(admin))
-        };
-        sentence.push_str(&format!("; {share} needs administrator"));
+        sentence.push_str(&format!("; {} of it needs administrator", format::size(admin)));
     }
     sentence.push('.');
     sentence
@@ -819,7 +814,7 @@ impl DashboardPage {
             .child(list)
     }
 
-    /// The Largest Owners card: the Owners with the largest Folder Size, kind swatch, name over
+    /// The Largest Owners panel: the Owners with the largest Folder Size, kind swatch, name over
     /// kind, size. A click shows the Owner's (largest) root in the Inspector. Nothing when the
     /// Index has no Owner roots.
     fn owners_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1002,10 +997,6 @@ mod tests {
         assert_eq!(
             finding_sentence(4096, 1, 1024),
             "4.00 KB can be cleaned up across 1 Cleanable; 1.00 KB of it needs administrator."
-        );
-        assert_eq!(
-            finding_sentence(4096, 2, 4096),
-            "4.00 KB can be cleaned up across 2 Cleanables; all of it needs administrator."
         );
     }
 }

@@ -11,7 +11,7 @@
 - One set of controls: buttons are flat and square-cornered (one dark primary per screen), tabs are underlined, choices are segmented; cards have a 1px edge and 8px corners; five type sizes; no serif. The chrome carries no colour; teal marks data only (used bars, progress, the Snapshot tick).
 - The Index box and the user block left the sidebar; Done Tasks are grey, not green.
 - `Ctrl+1`, `Ctrl+2` and `Ctrl+3` (`Cmd` on macOS) switch to Overview, Browse and Work from any page, the Query box included.
-- The Entry Inspector has **Show in Browse**: it zooms the Query to the folder the Entry is in and selects the Entry there, among its siblings.
+- The Entry Inspector has **Show in Browse**: it zooms the Query to the folder the Entry is in and selects the Entry there, among its siblings. The rest of the Query stays, unless it would hide the Entry.
 - The Overview's finding line says how much of the Cleanable total needs administrator ("…; 1.2 GB of it needs administrator"); with none, it says nothing about it.
 - A Location in its first Sync shows Last Synced as "—" everywhere (Overview, Locations, Inspector) until that Sync finishes.
 
