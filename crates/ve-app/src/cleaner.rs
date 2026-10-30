@@ -8,13 +8,13 @@ use crate::engine::{Repaint, Shared};
 use crate::format;
 use crate::settings::{Settings, cleanup_path};
 use crate::tasks::{Outcome, TaskKind};
-use crate::theme::palette;
+use crate::theme::{FS_SMALL, palette};
 use crate::ui::{ButtonKind, button, caption, panel, task_progress};
 use crate::view::{CategoryRow, EXTENSIONS_PER_CATEGORY};
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::scroll::{ScrollableElement as _, Scrollbar};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, Size, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -32,6 +32,12 @@ use ve_core::{Category, CategoryMap, EntryId, Totals};
 use ve_scan::VolumeInfo;
 
 type Key = (String, PathBuf);
+
+/// Height of a Cleanable row (path and rule, 20px lines) and of an admin-only one (with its
+/// command too), padding and rule included: the list is virtualised, so every row of a tab must
+/// have the height the list measures.
+const ROW_HEIGHT: f32 = 53.;
+const ADMIN_ROW_HEIGHT: f32 = 73.;
 
 /// What the plan bar and the tabs show, counted when the Cleanables or the ticks change rather
 /// than every frame, so a list of hundreds of thousands scrolls without recounting it.
@@ -702,7 +708,7 @@ impl CleanerPage {
     }
 
     /// Rows of the admin-only Cleanables at `ixs` of `admin`, each with the command that would
-    /// remove it. Every line truncates, so each row has the height the virtualised list measures.
+    /// remove it. Every line truncates, so each row fits `ADMIN_ROW_HEIGHT`.
     fn admin_rows(&self, ixs: &[usize], cx: &mut Context<Self>) -> Vec<AnyElement> {
         let p = palette(cx);
         let mono = cx.theme().mono_font_family.clone();
@@ -722,7 +728,7 @@ impl CleanerPage {
                 h_flex()
                     .w_full()
                     .gap(px(12.))
-                    .py(px(6.))
+                    .h(px(ADMIN_ROW_HEIGHT))
                     .border_b_1()
                     .border_color(p.rule)
                     .items_center()
@@ -748,7 +754,7 @@ impl CleanerPage {
                             .min_w_0()
                             .child(div().truncate().child(c.path.display().to_string()))
                             .child(caption(format!("{}: {}", c.rule.name, c.rule.group.title()), cx).truncate())
-                            .child(div().font_family(mono.clone()).text_xs().truncate().child(command)),
+                            .child(div().font_family(mono.clone()).text_size(px(FS_SMALL)).truncate().child(command)),
                     )
                     .child(div().flex_none().child(format::size(c.on_disk)))
                     .child(self.show_button(("admin-show", ix), c, cx))
@@ -772,7 +778,7 @@ impl CleanerPage {
                 h_flex()
                     .w_full()
                     .gap(px(12.))
-                    .py(px(6.))
+                    .h(px(ROW_HEIGHT))
                     .border_b_1()
                     .border_color(rule)
                     .items_center()
@@ -1059,26 +1065,8 @@ impl Render for CleanerPage {
                     Tab::Group(_) => this.rows(&this.shown[range], cx),
                     Tab::Admin => this.admin_rows(&this.shown[range], cx),
                 }),
-            )
-            .size_full()
-            // Clear of the scrollbar, which overlays the right edge.
-            .pr(px(22.))
-            .track_scroll(&self.list_scroll);
-            div()
-                .relative()
-                .flex_1()
-                .min_h_0()
-                .child(rows)
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .right_0()
-                        .bottom_0()
-                        .w(Scrollbar::width())
-                        .child(Scrollbar::vertical(&self.list_scroll).viewport_from_layout().max_fps(60)),
-                )
-                .into_any_element()
+            );
+            crate::ui::scrolling_list(rows, &self.list_scroll).into_any_element()
         };
 
         let list = panel(cx)

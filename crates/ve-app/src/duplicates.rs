@@ -5,7 +5,6 @@
 use crate::engine::{Shared, refresh_duplicates};
 use crate::format;
 use crate::theme::{FS_SMALL, palette};
-use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Sizable as _, Size};
 use gpui_kit::component::{h_flex, v_flex};
@@ -34,9 +33,14 @@ pub struct GroupView {
     pub kept: EntryId,
 }
 
+/// Space taken by every copy but one.
+fn wasted(size: u64, copies: usize) -> u64 {
+    size * (copies as u64).saturating_sub(1)
+}
+
 impl GroupView {
     pub fn wasted(&self) -> u64 {
-        self.size * (self.copies.len() as u64 - 1)
+        wasted(self.size, self.copies.len())
     }
 
     /// Every copy but the one kept.
@@ -70,19 +74,19 @@ impl DuplicatesPanel {
         }
     }
 
-    /// Copies trashed since the search are already gone from the Index: drop them.
+    /// Copies trashed since the search are already gone from the Index: drop them. The groups
+    /// are copied out only when the search, the Index or the View moved on.
     fn rebuild(&mut self) {
-        let (groups, version) = {
-            let state = self.shared.duplicates.lock();
-            (state.groups.clone(), state.version)
-        };
+        let version = self.shared.duplicates.lock().version;
         let view = self.shared.view.lock().clone();
-        let index = self.shared.index.read();
-        let built = (version, index.generation(), view.as_ref().map(|v| v.id));
+        let generation = self.shared.index.read().generation();
+        let built = (version, generation, view.as_ref().map(|v| v.id));
         if self.built_from == Some(built) {
             return;
         }
         self.built_from = Some(built);
+        let groups = self.shared.duplicates.lock().groups.clone();
+        let index = self.shared.index.read();
         // The list follows the Query: a group is shown when any copy counts under it, and then
         // holds every copy.
         let follows = |ids: &[EntryId]| view.as_ref().is_none_or(|v| ids.iter().any(|&id| v.filter.is_counted(id)));
@@ -99,7 +103,6 @@ impl DuplicatesPanel {
 
     /// The group whose first copy is `first`, if it is still shown.
     pub fn group(&mut self, first: EntryId) -> Option<GroupView> {
-        refresh_duplicates(&self.shared);
         self.rebuild();
         let group = self.shown.iter().find(|g| g.copies[0] == first)?;
         Some(GroupView {
@@ -170,7 +173,7 @@ struct Shown {
 
 impl Shown {
     fn wasted(&self) -> u64 {
-        self.size * (self.copies.len() as u64 - 1)
+        wasted(self.size, self.copies.len())
     }
 }
 
@@ -248,31 +251,15 @@ impl Render for DuplicatesPanel {
                     })
                     .into_any_element()
             } else {
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        uniform_list(
-                            "duplicates-list",
-                            self.shown.len(),
-                            cx.processor(|this, range: Range<usize>, _, cx| range.map(|row| this.row(row, cx)).collect::<Vec<_>>()),
-                        )
-                        .size_full()
-                        // Clear of the scrollbar, which overlays the right edge.
-                        .pr(px(16.))
-                        .track_scroll(&self.scroll),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .right_0()
-                            .bottom_0()
-                            .w(Scrollbar::width())
-                            .child(Scrollbar::vertical(&self.scroll).viewport_from_layout().max_fps(60)),
-                    )
-                    .into_any_element()
+                crate::ui::scrolling_list(
+                    uniform_list(
+                        "duplicates-list",
+                        self.shown.len(),
+                        cx.processor(|this, range: Range<usize>, _, cx| range.map(|row| this.row(row, cx)).collect::<Vec<_>>()),
+                    ),
+                    &self.scroll,
+                )
+                .into_any_element()
             })
     }
 }

@@ -123,6 +123,14 @@ const FILTERS_WIDTH: f32 = 260.;
 /// Least width of the Treemap beside the open Filters column.
 const TREEMAP_MIN_WIDTH: f32 = 160.;
 
+/// Width the Treemap column asks for, and its least with Filters closed.
+const TREEMAP_WIDTH: f32 = 360.;
+
+/// Least width of the Browse list: room for the Categories' columns, a little less beside the
+/// open Filters so the Treemap keeps room.
+const LIST_MIN_WIDTH: f32 = 448.;
+const LIST_MIN_WIDTH_BESIDE_FILTERS: f32 = 400.;
+
 /// How the Explorer looked when its window closed to the tray; a reopened window starts there.
 /// The Query itself is the Engine's ([`crate::engine::Shared::query`]).
 pub struct Remembered {
@@ -1978,9 +1986,11 @@ impl Shell {
             FlatList::natural_width()
         } + 24.;
         let left = v_flex()
-            // Wide enough for the Categories' columns, a little less beside the open Filters so
-            // the Treemap keeps room; the Treemap takes what is left.
-            .min_w(px(if self.show_filters { 400. } else { 448. }))
+            .min_w(px(if self.show_filters {
+                LIST_MIN_WIDTH_BESIDE_FILTERS
+            } else {
+                LIST_MIN_WIDTH
+            }))
             .h_full()
             .gap(px(GAP))
             .flex_shrink(1.)
@@ -2017,9 +2027,9 @@ impl Shell {
             .map(|d| {
                 if self.show_filters {
                     d.min_w(px(FILTERS_WIDTH + GAP + TREEMAP_MIN_WIDTH))
-                        .flex_basis(px(FILTERS_WIDTH + GAP + 360.))
+                        .flex_basis(px(FILTERS_WIDTH + GAP + TREEMAP_WIDTH))
                 } else {
-                    d.min_w(px(360.))
+                    d.min_w(px(TREEMAP_WIDTH))
                 }
             })
             .children(filters_column)
@@ -2251,12 +2261,11 @@ impl Shell {
     /// A Duplicate group: size, copies and wasted space; Open, Show in Browse and Trash others…
     fn duplicates_panel(&mut self, first: ve_core::EntryId, cx: &mut Context<Self>) -> Option<Panel> {
         let group = self.duplicates.update(cx, |d, _| d.group(first))?;
+        let kept = group.kept;
         let (name, folder) = {
             let index = self.engine.shared.index.read();
-            let kept = group.kept;
             (index.display_name(kept).to_owned(), index.parent(kept))
         };
-        let kept = group.kept;
         let others = group.others();
         let blocker = self.trash.blocker_of(&others, &self.volumes);
         let fact = |l: &'static str, v: String| (SharedString::from(l), SharedString::from(v));
