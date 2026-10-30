@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.1
 
 ### Half the memory
 - The Index takes about half the memory it did: on a 5.6M-Entry Index, 211 MiB instead of 424 MiB, and the app sits at about 270 MiB after a Sync instead of 400 MiB. Each distinct name is stored once (1.8M names for 5.6M Entries), a folder's children are one run of ids rather than a list, and On-disk Size and creation time are stored only where they differ from the usual (Logical Size rounded to 4 KiB; the modification time). The saved file is 208 MB instead of 470 MB and loads in a quarter of a second.
@@ -11,6 +11,11 @@
 ### Smooth while syncing
 - The window no longer stutters while a Sync runs. Each frame read the Index behind every walker thread that had a folder ready to write, up to 0.7 s on a 24-thread machine; writers now queue on a gate, so a frame waits for one write at most.
 - `VE_FRAME_TRACE=<ms>` prints the views whose render took longer than that, for finding slow frames.
+
+### Fixes
+- The Treemap draws the whole Index, one tile per Location, when the Query matches Entries on more than one Location or is empty, so it shows what the tree shows. An Offline Volume's tile is marked "(offline)". The Index crumb and Zoom out reach that level.
+- Reopening the window from the tray brings back the Query (in the box and the Filters button), the page and tab, the Compare with date, and the tree's open folders and selection.
+- The Cleaner shows a spinner while it looks for Cleanables, in the list and on the Dashboard card, and says it once.
 
 ## v0.2.0
 

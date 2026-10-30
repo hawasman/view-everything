@@ -177,7 +177,7 @@ fn key_map(index: &Index, root: EntryId) -> HashMap<u64, Vec<EntryId>> {
         if id != root {
             map.entry(index.key(id)).or_default().push(id);
         }
-        stack.extend_from_slice(index.children(id));
+        stack.extend(index.children(id));
     }
     map.insert(ROOT_RECORD, vec![root]);
     map

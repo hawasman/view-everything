@@ -48,6 +48,9 @@ pub struct Shared {
     pub status: Mutex<Status>,
     /// The latest View; replaced whole when recomputed.
     pub view: Mutex<Option<Arc<View>>>,
+    /// The Query text last asked for, as typed even when it does not parse; a reopened window
+    /// shows it again.
+    pub query: Mutex<String>,
     /// Why the current Query text could not be parsed.
     pub query_error: Mutex<Option<String>>,
     busy: AtomicBool,
@@ -179,6 +182,7 @@ impl Engine {
                 problems: Vec::new(),
             }),
             view: Mutex::new(None),
+            query: Mutex::new(String::new()),
             query_error: Mutex::new(None),
             busy: AtomicBool::new(true),
             duplicates: Mutex::new(DuplicateState::default()),
@@ -230,6 +234,7 @@ impl Engine {
 
     pub fn set_query(&self, text: String) {
         self.newest_query.fetch_add(1, Ordering::Relaxed);
+        self.shared.query.lock().clone_from(&text);
         let _ = self.queries.send(text);
     }
 
@@ -1282,6 +1287,7 @@ mod tests {
                 problems: Vec::new(),
             }),
             view: Mutex::new(None),
+            query: Mutex::new(String::new()),
             query_error: Mutex::new(None),
             busy: AtomicBool::new(false),
             duplicates: Mutex::new(DuplicateState::default()),

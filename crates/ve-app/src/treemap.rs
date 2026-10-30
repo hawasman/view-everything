@@ -4,11 +4,12 @@ use crate::engine::Shared;
 use crate::format;
 use crate::theme::palette;
 use crate::ui::{caption, pill, swatch};
-use crate::view::View;
+use crate::view::{Focus, View};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
@@ -93,9 +94,9 @@ fn fraction(since: Instant, total: Duration) -> f32 {
 /// Where each tile of a zoom starts from: its rectangle in the previous layout, else the zoomed
 /// folder's rectangle (tiles grow out of the folder that was clicked), else its own rectangle
 /// fully transparent (zooming out shows new tiles fading in). The second field is the start opacity.
-fn zoom_from(old: &[Tile], new: &[Tile], new_root: EntryId) -> Vec<(Rect, f32)> {
+fn zoom_from(old: &[Tile], new: &[Tile], new_root: Focus) -> Vec<(Rect, f32)> {
     let before: HashMap<EntryId, Rect> = old.iter().filter(|t| t.more.is_none()).map(|t| (t.id, t.rect)).collect();
-    let origin = before.get(&new_root).copied();
+    let origin = new_root.folder().and_then(|id| before.get(&id).copied());
     new.iter()
         .map(|t| match (before.get(&t.id).filter(|_| t.more.is_none()), origin) {
             (Some(&r), _) | (None, Some(r)) => (r, 1.0),
@@ -162,11 +163,11 @@ fn shade(color: Hsla, level: u8, dark: bool) -> Hsla {
 }
 
 /// What a set of tiles is laid out for: the View id, the zoom root, the pixel size and the Depth.
-type LayoutKey = (u64, EntryId, [i32; 2], u8);
+type LayoutKey = (u64, Focus, [i32; 2], u8);
 
 struct Request {
     view: Arc<View>,
-    root: EntryId,
+    root: Focus,
     size: (f32, f32),
     depth: u8,
 }
@@ -220,7 +221,7 @@ impl Layouter {
     }
 
     /// Asks for tiles of `root` in a `size` area under `view`, unless already asked.
-    fn request(&mut self, view: &Arc<View>, root: EntryId, size: (f32, f32), depth: u8) {
+    fn request(&mut self, view: &Arc<View>, root: Focus, size: (f32, f32), depth: u8) {
         let key = key_of(view, root, size, depth);
         if self.requested == Some(key) {
             return;
@@ -235,7 +236,7 @@ impl Layouter {
     }
 }
 
-fn key_of(view: &View, root: EntryId, size: (f32, f32), depth: u8) -> LayoutKey {
+fn key_of(view: &View, root: Focus, size: (f32, f32), depth: u8) -> LayoutKey {
     (view.id, root, [size.0.round() as i32, size.1.round() as i32], depth)
 }
 
@@ -282,7 +283,7 @@ fn snap(r: Rect, area: Rect) -> Rect {
 /// the Depth when it has room. The tile cap (a safety net) stops the layout mid-level: folders
 /// reached earlier in the queue keep all their children, later ones get none.
 #[cfg(test)]
-fn layout(index: &Index, filter: &Filter, categories: &CategoryMap, root: EntryId, rect: Rect, depth: u8) -> Vec<Tile> {
+fn layout(index: &Index, filter: &Filter, categories: &CategoryMap, root: Focus, rect: Rect, depth: u8) -> Vec<Tile> {
     let mut tiles = layout_tiles(index, filter, categories, root, rect, depth);
     colour_folders(&mut tiles, index, filter, categories);
     tiles
@@ -297,22 +298,26 @@ fn colour_folders(tiles: &mut [Tile], index: &Index, filter: &Filter, categories
 }
 
 /// [`layout`] without the folder colours (they cost the most, and need no consistent Index).
-fn layout_tiles(index: &Index, filter: &Filter, categories: &CategoryMap, root: EntryId, rect: Rect, depth: u8) -> Vec<Tile> {
+fn layout_tiles(index: &Index, filter: &Filter, categories: &CategoryMap, root: Focus, rect: Rect, depth: u8) -> Vec<Tile> {
     let mut tiles: Vec<Tile> = Vec::new();
     // A folder to subdivide: the folder, the area for its children, the tile that stands for it
     // and the level of its children.
     let mut queue = VecDeque::from([(root, rect, None::<usize>, 1u8)]);
     'layout: while let Some((dir, area, parent, level)) = queue.pop_front() {
         // `parent` is marked subdivided when its first child tile is pushed, below.
-        let mut items: Vec<(f64, Option<EntryId>)> = index
-            .children(dir)
-            .filter(|&c| filter.is_shown(c))
-            .map(|c| (filter.totals(index, c).on_disk as f64, Some(c)))
+        let mut items: Vec<(f64, Option<EntryId>)> = dir
+            .children(index)
+            .iter()
+            .filter(|&&c| filter.is_shown(c))
+            .map(|&c| (filter.totals(index, c).on_disk as f64, Some(c)))
             .filter(|(size, _)| *size > 0.0)
             .collect();
         items.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        // The tail merges into one tile standing for its folder. The whole Index has no folder to
+        // stand for, and keeps every Location.
         let mut more = None;
-        if items.len() > MAX_CHILDREN + 1 {
+        let merged_into = dir.folder().filter(|_| items.len() > MAX_CHILDREN + 1);
+        if merged_into.is_some() {
             let tail = items.split_off(MAX_CHILDREN);
             let size: f64 = tail.iter().map(|t| t.0).sum();
             more = Some((tail.len(), size as u64));
@@ -330,18 +335,22 @@ fn layout_tiles(index: &Index, filter: &Filter, categories: &CategoryMap, root: 
             if let Some(parent) = parent {
                 tiles[parent].subdivided = true;
             }
-            let Some(id) = slot else {
-                tiles.push(Tile {
-                    rect: cell,
-                    id: dir,
-                    is_dir: false,
-                    category: Category::Other,
-                    subdivided: false,
-                    level,
-                    more,
-                    parent,
-                });
-                continue;
+            let id = match (slot, merged_into) {
+                (Some(id), _) => id,
+                (None, Some(folder)) => {
+                    tiles.push(Tile {
+                        rect: cell,
+                        id: folder,
+                        is_dir: false,
+                        category: Category::Other,
+                        subdivided: false,
+                        level,
+                        more,
+                        parent,
+                    });
+                    continue;
+                }
+                (None, None) => unreachable!("only a merged tail has no Entry"),
             };
             let is_dir = index.is_dir(id);
             let category = if is_dir {
@@ -360,7 +369,7 @@ fn layout_tiles(index: &Index, filter: &Filter, categories: &CategoryMap, root: 
                 parent,
             });
             if is_dir && let Some(inner) = plan_folder(cell, level, depth) {
-                queue.push_back((id, inner, Some(tiles.len() - 1), level + 1));
+                queue.push_back((Focus::Folder(id), inner, Some(tiles.len() - 1), level + 1));
             }
         }
     }
@@ -542,17 +551,27 @@ fn folder_of(index: &Index, id: EntryId) -> Option<EntryId> {
     if index.is_dir(id) { Some(id) } else { index.parent(id) }
 }
 
-/// The folder the Treemap shows for `view`: its focus, else the Volume with the most Filtered Size.
-pub fn zoom_root(index: &Index, view: &View) -> Option<EntryId> {
-    let usable = |id: EntryId| index.is_live(id) && index.is_dir(id) && view.filter.is_shown(id);
-    view.focus.filter(|&id| usable(id)).or_else(|| {
-        index
-            .volumes()
-            .map(|(_, v)| v.root)
-            .filter(|&id| usable(id))
-            .max_by_key(|&id| view.filter.totals(index, id).on_disk)
-            .or_else(|| index.volumes().map(|(_, v)| v.root).next())
-    })
+/// What the Treemap draws for `view`: its focus while that folder is still there and shown,
+/// else the whole Index.
+pub fn zoom_root(index: &Index, view: &View) -> Focus {
+    match view.focus {
+        Focus::Folder(id) if index.is_live(id) && index.is_dir(id) && view.filter.is_shown(id) => view.focus,
+        _ => Focus::Index,
+    }
+}
+
+/// A tile's name: an Entry's, or for a Location its name, marked when it is an Offline Volume.
+/// A Remote is never mounted, so it is never Offline.
+fn tile_name(index: &Index, id: EntryId) -> Cow<'_, str> {
+    let offline = index
+        .volume_with_root(id)
+        .and_then(|v| index.volume(v))
+        .is_some_and(|v| !v.online && !v.is_remote());
+    if offline {
+        format!("{} (offline)", index.display_name(id)).into()
+    } else {
+        index.display_name(id).into()
+    }
 }
 
 /// What a click on the Treemap asks of the rest of the Explorer.
@@ -641,11 +660,6 @@ impl Treemap {
         }
     }
 
-    /// The folder shown: the View's focus, else the Volume with the most Filtered Size.
-    fn root(&self, index: &Index, view: &View) -> Option<EntryId> {
-        zoom_root(index, view)
-    }
-
     fn set_depth(&mut self, depth: u8, cx: &mut Context<Self>) {
         let depth = depth.clamp(MIN_DEPTH, MAX_DEPTH);
         if depth != self.depth {
@@ -707,10 +721,8 @@ impl Treemap {
             && self.asked != Some(asked)
         {
             self.asked = Some(asked);
-            let root = self.root(&self.shared.index.read(), view);
-            if let Some(root) = root {
-                self.layouter.request(view, root, (w, h), self.depth);
-            }
+            let root = zoom_root(&self.shared.index.read(), view);
+            self.layouter.request(view, root, (w, h), self.depth);
         }
         if let Some((key, tiles)) = self.layouter.results.try_iter().last() {
             // Zooming (same size and Depth, another root) glides from the old tiles to the new.
@@ -799,13 +811,10 @@ impl Treemap {
         });
     }
 
-    /// Panel title, then the path of the folder shown: Index / home / mohammed 109 GB.
-    fn header(&self, index: &Index, view: &View, root: EntryId, cx: &mut Context<Self>) -> Div {
+    /// Panel title, then the path of what is shown: Index / home / mohammed 109 GB.
+    fn header(&self, index: &Index, view: &View, root: Focus, cx: &mut Context<Self>) -> Div {
         let (muted, text) = (palette(cx).muted, palette(cx).text);
-        let mut chain = vec![root];
-        while let Some(parent) = index.parent(*chain.last().unwrap()) {
-            chain.push(parent);
-        }
+        let chain: Vec<EntryId> = std::iter::successors(root.folder(), |&id| index.parent(id)).collect();
         // On a deep path the folders above the last shrink and truncate; the last one and the
         // size always show.
         let crumb = |label: String, last: bool| {
@@ -824,16 +833,15 @@ impl Treemap {
             .text_color(muted)
             .mb(px(12.));
         row = row.child(
-            crumb("Index".into(), false)
+            crumb("Index".into(), chain.is_empty())
                 .flex_none()
                 .id("crumb-index")
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| this.scope(None, cx))),
         );
-        let last = chain.len() - 1;
         for (i, &id) in chain.iter().rev().enumerate() {
             row = row.child("/").child(
-                crumb(index.display_name(id).to_owned(), i == last)
+                crumb(index.display_name(id).to_owned(), i + 1 == chain.len())
                     .id(("crumb", id.0 as usize))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| this.scope(Some(id), cx))),
@@ -886,7 +894,7 @@ impl Treemap {
                 div()
                     .flex_none()
                     .ml(px(6.))
-                    .child(format::size(view.filter.totals(index, root).on_disk)),
+                    .child(format::size(root.totals(index, &view.filter).on_disk)),
             ),
         )
     }
@@ -919,10 +927,10 @@ impl Treemap {
 
     /// The pointer's tooltip (`.tip`): inverted; the Volume-relative path as a breadcrumb, the
     /// tile's sizes and share of the zoomed folder, then the folders around it with theirs.
-    fn tooltip(&self, index: &Index, view: &View, root: EntryId, tile: usize, at: Point<Pixels>, cx: &App) -> Div {
+    fn tooltip(&self, index: &Index, view: &View, root: Focus, tile: usize, at: Point<Pixels>, cx: &App) -> Div {
         let id = self.tiles[tile].id;
         let totals = view.filter.totals(index, id);
-        let whole = view.filter.totals(index, root).on_disk.max(1);
+        let whole = root.totals(index, &view.filter).on_disk.max(1);
         let share = |on_disk: u64| on_disk as f64 * 100.0 / whole as f64;
         let mut names: Vec<&str> = std::iter::successors(Some(id), |&e| index.parent(e))
             .map(|e| index.display_name(e))
@@ -942,12 +950,12 @@ impl Treemap {
             )
         };
         let second = match more {
-            Some((_, size)) => format!("{:.1}% of {}", share(size), index.display_name(root)),
+            Some((_, size)) => format!("{:.1}% of {}", share(size), root.name(index)),
             None => format!(
                 "{} size · {:.1}% of {}",
                 format::size(totals.logical),
                 share(totals.on_disk),
-                index.display_name(root)
+                root.name(index)
             ),
         };
         let around: Vec<String> = enclosing(&self.tiles, tile)
@@ -956,7 +964,7 @@ impl Treemap {
             .map(|i| {
                 let t = &self.tiles[i];
                 let on_disk = view.filter.totals(index, t.id).on_disk;
-                format!("{} · {} · {:.1}%", index.name(t.id), format::size(on_disk), share(on_disk))
+                format!("{} · {} · {:.1}%", tile_name(index, t.id), format::size(on_disk), share(on_disk))
             })
             .collect();
         let p = palette(cx);
@@ -984,7 +992,7 @@ impl Treemap {
             .child(div().opacity(0.8).child(crumb))
             .child(div().font_weight(FontWeight::MEDIUM).child(match more {
                 Some((count, _)) => format!("{} more", format::count(count as u64)),
-                None => index.name(id).to_owned(),
+                None => tile_name(index, id).into_owned(),
             }))
             .child(first)
             .child(second)
@@ -1023,10 +1031,10 @@ impl Render for Treemap {
         let panel = crate::ui::panel(cx).size_full().flex().flex_col();
         let shared = self.shared.clone();
         let index = shared.index.read();
-        let root = self.view.as_ref().and_then(|v| self.root(&index, v));
-        let (Some(view), Some(root)) = (self.view.clone(), root) else {
+        let Some(view) = self.view.clone().filter(|_| index.volumes().next().is_some()) else {
             return panel.child(div().text_color(muted).child("No Volume indexed yet."));
         };
+        let root = zoom_root(&index, &view);
 
         let tiles = self.tiles.clone();
         // The selected Entry's own tile, else the nearest folder of it that is drawn.
@@ -1191,7 +1199,7 @@ impl Render for Treemap {
             }
             let parent = index
                 .parent(tile.id)
-                .filter(|&p| p != root && !tile.is_dir)
+                .filter(|&p| Some(p) != root.folder() && !tile.is_dir)
                 .map(|p| format!("{}/", index.name(p)));
             let on_disk = view.filter.totals(&index, tile.id).on_disk;
             labels.push(
@@ -1216,7 +1224,7 @@ impl Render for Treemap {
                             .font_weight(FontWeight::MEDIUM)
                             .whitespace_nowrap()
                             .truncate()
-                            .child(index.name(tile.id).to_owned()),
+                            .child(tile_name(&index, tile.id).into_owned()),
                     )
                     .child(div().flex_none().child(format::size(on_disk))),
             );
@@ -1250,7 +1258,7 @@ impl Render for Treemap {
                             .font_weight(FontWeight::MEDIUM)
                             .whitespace_nowrap()
                             .truncate()
-                            .child(index.name(tile.id).to_owned()),
+                            .child(tile_name(&index, tile.id).into_owned()),
                     )
                     .when(vis.width() >= 110.0, |band| {
                         band.child(div().flex_none().text_color(muted).child(format::size(on_disk)))
@@ -1470,7 +1478,7 @@ mod tests {
 
     fn lay(index: &Index, root: EntryId, w: f32, h: f32, depth: u8) -> Vec<Tile> {
         let filter = Filter::compute(index, None);
-        layout(index, &filter, &CategoryMap::default(), root, rect(w, h), depth)
+        layout(index, &filter, &CategoryMap::default(), Focus::Folder(root), rect(w, h), depth)
     }
 
     #[::core::prelude::v1::test]
@@ -1503,6 +1511,27 @@ mod tests {
                 assert!(r.x0 >= o.x0 && r.y0 >= o.y0 && r.x1 <= o.x1 && r.y1 <= o.y1);
             }
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn the_whole_index_draws_one_tile_per_location_by_its_size() {
+        let (mut index, a) = world(|index, root| {
+            index.insert(root, "big.bin", file(3000));
+        });
+        let dir = ve_core::EntryMeta {
+            is_dir: true,
+            ..Default::default()
+        };
+        let other = index.add_volume(std::path::Path::new("/m/w"), "ext4", "w", dir, ve_core::SyncState::Walk);
+        let b = index.volume(other).unwrap().root;
+        index.insert(b, "small.bin", file(1000));
+        let filter = Filter::compute(&index, None);
+        let tiles = layout(&index, &filter, &CategoryMap::default(), Focus::Index, rect(400.0, 100.0), 3);
+        let top: Vec<(EntryId, f32)> = tiles.iter().filter(|t| t.parent.is_none()).map(|t| (t.id, t.rect.area())).collect();
+        assert_eq!(top.iter().map(|t| t.0).collect::<Vec<_>>(), vec![a, b]);
+        // Each Location's tile is subdivided into what it holds, sized 3:1.
+        assert!((top[0].1 / top[1].1 - 3.0).abs() < 0.1);
+        assert!(tiles.iter().any(|t| t.parent == Some(0) && !t.is_dir));
     }
 
     #[::core::prelude::v1::test]
@@ -1592,10 +1621,10 @@ mod tests {
             tile(9, rect(20.0, 20.0), None),
             tile(7, rect(30.0, 30.0), Some((3, 5))),
         ];
-        let from = zoom_from(&old, &new, EntryId(1));
+        let from = zoom_from(&old, &new, Focus::Folder(EntryId(1)));
         assert_eq!(from, vec![(b, 1.0), (a, 1.0), (a, 1.0)]);
         // Zooming out to a root that was not drawn: unknown tiles fade in where they are.
-        let from = zoom_from(&old, &new, EntryId(5));
+        let from = zoom_from(&old, &new, Focus::Folder(EntryId(5)));
         assert_eq!(from, vec![(b, 1.0), (rect(20.0, 20.0), 0.0), (rect(30.0, 30.0), 0.0)]);
     }
 
