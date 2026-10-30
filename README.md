@@ -101,7 +101,7 @@ cargo build --release
 ./target/release/view-everything
 ```
 
-The workspace has `ve-core` (Index, Query, Filter), `ve-scan` (scanning Volumes and Remotes, watching mounts), `ve-app` (the GPUI app), `ve-cli` (`ve`) and `ve-fanotify` (the Linux Live updates helper). Packaging scripts are in [packaging](packaging): the AppImage and `.dmg` builds, the WiX source for the MSI, and an AUR `PKGBUILD`.
+The workspace has `ve-core` (Index, Query, Filter), `ve-scan` (scanning Volumes and Remotes, watching mounts), `ve-engine` (the engine the app hosts: Index, Tasks, Locations, Live updates, Sync scheduling, Snapshots), `ve-app` (the GPUI app), `ve-cli` (`ve`) and `ve-fanotify` (the Linux Live updates helper). Packaging scripts are in [packaging](packaging): the AppImage and `.dmg` builds, the WiX source for the MSI, and an AUR `PKGBUILD`.
 
 To contribute, enable the pre-commit hook once per clone. It runs the same checks as CI (rustfmt, clippy with warnings denied, and the tests):
 

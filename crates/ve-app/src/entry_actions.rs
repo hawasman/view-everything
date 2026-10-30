@@ -66,7 +66,7 @@ pub fn open_terminal(dir: &Path) -> io::Result<()> {
 
 /// The folder a terminal opens in for `id`: the folder itself, or a file's parent.
 pub fn terminal_folder(index: &Index, id: EntryId) -> Option<std::path::PathBuf> {
-    index.is_live(id).then(|| index.path(crate::engine::folder_of(index, id)))
+    index.is_live(id).then(|| index.path(ve_engine::folder_of(index, id)))
 }
 
 /// One line per Entry: its path.

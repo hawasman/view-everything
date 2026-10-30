@@ -1,10 +1,9 @@
 //! The Explorer's flat list: every Entry that matches the Query, largest first, as a
 //! virtualised table.
 
-use crate::engine::Shared;
+use crate::format;
 use crate::selection::Selection;
 use crate::theme::{FS_BODY, FS_SMALL};
-use crate::{format, view::View};
 use gpui_kit::component::h_flex;
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::table::{Column, TableDelegate, TableState};
@@ -13,6 +12,8 @@ use gpui_kit::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use ve_core::EntryId;
+use ve_engine::Shared;
+use ve_engine::view::View;
 
 const COLUMNS: [(&str, f32, bool); 7] = [
     ("Name", 260., false),
@@ -109,7 +110,7 @@ impl FlatList {
 
     /// Shows `view`; false when it already was the one shown.
     pub fn set_view(&mut self, view: Option<Arc<View>>) -> bool {
-        if crate::view::same(&self.view, &view) {
+        if ve_engine::view::same(&self.view, &view) {
             return false;
         }
         self.view = view;

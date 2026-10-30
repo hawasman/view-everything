@@ -4,13 +4,10 @@
 mod rules;
 
 use crate::categories::CategoryPanel;
-use crate::engine::{Repaint, Shared};
 use crate::format;
 use crate::settings::{Settings, cleanup_path};
-use crate::tasks::{Outcome, TaskKind};
 use crate::theme::palette;
 use crate::ui::{ButtonKind, button, caption, panel, task_progress};
-use crate::view::{CategoryRow, EXTENSIONS_PER_CATEGORY};
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::notification::Notification;
@@ -25,6 +22,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime};
+use ve_engine::tasks::{Outcome, TaskKind};
+use ve_engine::view::{CategoryRow, EXTENSIONS_PER_CATEGORY};
+use ve_engine::{Repaint, Shared};
 
 /// Least time between two looks that only follow the Index moving on.
 const RELOOK_THROTTLE: std::time::Duration = std::time::Duration::from_secs(5);

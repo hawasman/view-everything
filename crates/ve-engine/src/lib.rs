@@ -1,10 +1,12 @@
-//! Background work: loading, syncing and saving the Index, and computing Views for the UI.
+//! The engine (ADR-0016): loading, syncing and saving the Index, Tasks, Locations, Live
+//! updates, Sync scheduling and Snapshots, and the Views computed for a Query. It knows nothing
+//! of a GUI; its clients hold an [`Engine`] and are told to redraw through [`Repaint`].
 
+pub mod format;
 mod live;
+pub mod tasks;
+pub mod view;
 
-use crate::settings;
-use crate::tasks::{Outcome, TaskKind, Tasks};
-use crate::view::{FileOrder, View};
 use chrono::{Local, Utc};
 use live::Live;
 use parking_lot::Mutex;
@@ -15,11 +17,13 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use tasks::{Outcome, TaskKind, Tasks};
 use ve_core::owners::{self, LocalDisk, Platform};
 use ve_core::snapshot::{self, Snapshot};
 use ve_core::{BitSet, CategoryMap, EntryId, Filter, Index, Query, QueryContext, Remote, SyncState, Volume, VolumeId};
 use ve_scan::duplicates::{self, Group, HashCache, HashProgress};
 use ve_scan::{Progress, SharedIndex, VolumeInfo};
+use view::{FileOrder, View};
 
 /// How often a Volume kept current by the NTFS change journal is polled while the app runs.
 const JOURNAL_POLL: Duration = Duration::from_secs(5);
@@ -39,11 +43,29 @@ const MIN_WAIT: Duration = Duration::from_secs(60);
 /// Per-Volume refresh interval by mount point.
 pub type Intervals = HashMap<PathBuf, Duration>;
 
-/// Tells whichever GUI is showing the Engine that it should draw again.
+/// Tells whichever client is showing the Engine that it should draw again.
 pub type Repaint = Arc<dyn Fn() + Send + Sync>;
 
-/// State shared between the UI and the background threads.
+/// What an Engine starts with.
+pub struct Config {
+    /// Where the Index is saved, with the Snapshots, the hash cache and the macOS event id
+    /// beside it; `None` keeps the Index in memory only.
+    pub index_path: Option<PathBuf>,
+    /// Every Volume mounted now.
+    pub mounted: Vec<VolumeInfo>,
+    /// The mounted Volumes to index.
+    pub volumes: Vec<VolumeInfo>,
+    pub remotes: Vec<Remote>,
+    pub intervals: Intervals,
+    pub categories: CategoryMap,
+    /// Whether the Linux `fanotify` helper follows Live updates.
+    pub live_helper: bool,
+}
+
+/// State shared between the clients and the background threads.
 pub struct Shared {
+    /// Where the Index is saved (see [`Config::index_path`]).
+    index_path: Option<PathBuf>,
     pub index: SharedIndex,
     pub progress: Progress,
     pub status: Mutex<Status>,
@@ -84,8 +106,8 @@ pub struct Shared {
     folders_syncing: Mutex<Vec<EntryId>>,
     /// Background work the sidebar lists (Sync, Duplicate search, Cleaner, ...).
     pub tasks: Tasks,
-    /// Called from the background threads whenever something the GUI shows has changed.
-    pub(crate) repaint: Repaint,
+    /// Called from the background threads whenever something a client shows has changed.
+    pub repaint: Repaint,
 }
 
 /// The Duplicates found so far; replaced whole when a search finishes.
@@ -150,6 +172,7 @@ enum Command {
     Shutdown,
 }
 
+/// The one in-process handle on the engine: every client reads and asks through it.
 pub struct Engine {
     pub shared: Arc<Shared>,
     commands: Sender<Command>,
@@ -160,22 +183,25 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Starts loading the saved Index, then Catch-up or a first scan of `volumes`.
-    pub fn start(
-        repaint: Repaint,
-        mounted: Vec<VolumeInfo>,
-        volumes: Vec<VolumeInfo>,
-        remotes: Vec<Remote>,
-        intervals: Intervals,
-        categories: CategoryMap,
-        live_helper: bool,
-    ) -> Engine {
+    /// Starts loading the saved Index, then Catch-up or a first scan of the Volumes to index.
+    /// `repaint` is called from the engine's threads whenever something a client shows changed.
+    pub fn start(config: Config, repaint: Repaint) -> Engine {
+        let Config {
+            index_path,
+            mounted,
+            volumes,
+            remotes,
+            intervals,
+            categories,
+            live_helper,
+        } = config;
         let tasks = Tasks::new();
         {
             let repaint = repaint.clone();
             tasks.set_repaint(move || repaint());
         }
         let shared = Arc::new(Shared {
+            index_path,
             index: SharedIndex::new(Index::new()),
             progress: Progress::default(),
             status: Mutex::new(Status {
@@ -306,9 +332,9 @@ impl Engine {
     /// saved without waiting for it: the next launch's Catch-up completes it.
     pub fn shutdown(&self) {
         if self.is_busy() {
-            if let Some(path) = settings::index_path() {
+            if let Some(path) = &self.shared.index_path {
                 let _saving = self.shared.saving.lock();
-                if let Err(e) = self.shared.index.read().save(&path) {
+                if let Err(e) = self.shared.index.read().save(path) {
                     eprintln!("Could not save the Index to {}: {e}", path.display());
                 }
             }
@@ -401,7 +427,7 @@ fn run_indexer(
     commands: &Receiver<Command>,
     command_tx: Sender<Command>,
 ) {
-    let index_path = settings::index_path();
+    let index_path = shared.index_path.clone();
     if let Some(path) = &index_path {
         match Index::load(path) {
             Ok(index) => {
@@ -827,12 +853,14 @@ fn spawn_folder_sync(shared: &Arc<Shared>, folder: EntryId) {
                 done.store(true, Ordering::Relaxed);
                 result
             });
+            // The nudges stop with the walk: the finished Task holds the final count.
+            task.set_progress(progress.entries(), None);
             let outcome = match result {
                 _ if progress.cancelled() || task.is_cancelled() => Outcome::Cancelled,
-                Ok(()) => Outcome::Done(format!("{} Entries read", crate::format::count(progress.entries()))),
+                Ok(()) => Outcome::Done(format!("{} Entries read", format::count(progress.entries()))),
                 Err(e) => {
                     let retry_shared = shared.clone();
-                    task.set_retry(Arc::new(move |_| spawn_folder_sync(&retry_shared, folder)));
+                    task.set_retry(Arc::new(move || spawn_folder_sync(&retry_shared, folder)));
                     Outcome::Failed(e.to_string())
                 }
             };
@@ -961,19 +989,21 @@ fn sync_volumes(
     });
     if let Some(task) = task {
         let entries = shared.progress.entries();
+        // The nudges stop with the walk: the finished Task holds the final count.
+        task.set_progress(entries, None);
         let failed = failed.into_inner();
         let outcome = if shared.progress.cancelled() {
             Outcome::Cancelled
         } else if !failed.is_empty() {
             let retry = retry.clone();
-            task.set_retry(Arc::new(move |_| {
+            task.set_retry(Arc::new(move || {
                 for identity in &failed {
                     let _ = retry.send(Command::SyncLocation(identity.clone()));
                 }
             }));
             Outcome::Failed("A Location could not be read".into())
         } else {
-            Outcome::Done(format!("{} Entries read", crate::format::count(entries)))
+            Outcome::Done(format!("{} Entries read", format::count(entries)))
         };
         task.finish(outcome);
     }
@@ -1049,9 +1079,16 @@ fn save_if_changed(shared: &Arc<Shared>, path: Option<&Path>, saved_generation: 
 
 const SNAPSHOTS: &str = "snapshots";
 
-/// The folder of Snapshots, beside the Index.
-pub fn snapshots_dir() -> Option<PathBuf> {
-    Some(settings::index_path()?.with_file_name(SNAPSHOTS))
+impl Shared {
+    /// The folder of Snapshots, beside the Index.
+    pub fn snapshots_dir(&self) -> Option<PathBuf> {
+        Some(self.index_path.as_ref()?.with_file_name(SNAPSHOTS))
+    }
+
+    /// The cache of file hashes, beside the Index.
+    fn hashes_path(&self) -> Option<PathBuf> {
+        Some(self.index_path.as_ref()?.with_file_name("hashes.bin"))
+    }
 }
 
 /// After the first Index save of a day (once every Location has synced), stores that day's Snapshot on a thread of its own, so
@@ -1079,11 +1116,6 @@ fn snapshot_first_save_of_day(shared: &Arc<Shared>, index_path: &Path) {
     if spawned.is_err() {
         shared.snapshotting.store(false, Ordering::Release);
     }
-}
-
-/// The cache of file hashes, beside the Index.
-fn hashes_path() -> Option<PathBuf> {
-    Some(settings::index_path()?.with_file_name("hashes.bin"))
 }
 
 /// Starts a search for Duplicates unless the last one is current for the Index, or the Index
@@ -1175,7 +1207,7 @@ pub fn start_hashing(shared: &Arc<Shared>) {
             let done = HashingDone(shared.clone());
             let exclusions = shared.duplicate_exclusions.lock().clone();
             let (excluded, exclusion_error) = excluded_files(&shared, &exclusions);
-            let path = hashes_path();
+            let path = shared.hashes_path();
             let mut cache = path.as_deref().map(HashCache::load).unwrap_or_default();
             let (groups, stats) = duplicates::find(
                 &shared.index,
@@ -1217,10 +1249,7 @@ pub fn start_hashing(shared: &Arc<Shared>) {
                 task.finish(if cancelled {
                     Outcome::Cancelled
                 } else if stats.excluded > 0 {
-                    Outcome::Done(format!(
-                        "{} files skipped by Duplicate Exclusions",
-                        crate::format::count(stats.excluded)
-                    ))
+                    Outcome::Done(format!("{} files skipped by Duplicate Exclusions", format::count(stats.excluded)))
                 } else {
                     Outcome::Done(String::new())
                 });
@@ -1321,6 +1350,7 @@ mod tests {
 
     fn shared() -> Shared {
         Shared {
+            index_path: None,
             index: SharedIndex::new(Index::new()),
             progress: Progress::default(),
             status: Mutex::new(Status {

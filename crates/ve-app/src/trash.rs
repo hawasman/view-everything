@@ -1,8 +1,6 @@
 //! Trash and Empty Trash. The app never deletes permanently except through Empty Trash.
 
-use crate::engine::{Repaint, Shared};
 use crate::format;
-use crate::tasks::{Outcome, TaskKind};
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, WindowExt as _, v_flex};
@@ -12,6 +10,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use ve_core::{EntryId, Index};
+use ve_engine::tasks::{Outcome, TaskKind};
+use ve_engine::{Repaint, Shared};
 use ve_scan::VolumeInfo;
 
 /// Moves `paths` to the operating system's trash.

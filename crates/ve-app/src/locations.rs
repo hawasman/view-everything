@@ -2,8 +2,8 @@
 //! for all of them.
 
 use crate::dashboard_summary::ago;
-use crate::engine::{Phase, Shared};
 use crate::settings::Settings;
+use ve_engine::{Phase, Shared};
 use ve_scan::VolumeInfo;
 
 /// What is known about one Location, enough to say how it is doing.

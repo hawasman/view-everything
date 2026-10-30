@@ -11,7 +11,6 @@ mod compare;
 mod dashboard;
 mod dashboard_summary;
 mod duplicates;
-mod engine;
 mod entry_actions;
 mod explorer;
 mod export;
@@ -37,7 +36,6 @@ mod treemap;
 mod ui;
 #[cfg(feature = "updater")]
 mod update;
-mod view;
 
 use gpui_kit::*;
 use settings::Settings;
