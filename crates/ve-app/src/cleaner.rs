@@ -905,31 +905,30 @@ impl Render for CleanerPage {
         let search_task = self.shared.tasks.running().into_iter().find(|t| t.kind == TaskKind::CleanerSearch);
         // While looking, the empty list says so with a spinner; this row adds only the progress.
         let status = if looking {
-            match search_task.filter(|t| t.total.is_some_and(|n| n > 0)) {
-                Some(t) => {
-                    let what = if self.sizing.load(Ordering::Relaxed) {
-                        "Cleanables measured"
-                    } else {
-                        "Entries checked"
-                    };
-                    task_progress("cleaner-progress", t.done, t.total, what, cx).into_any_element()
-                }
-                None => div().into_any_element(),
-            }
+            search_task.filter(|t| t.total.is_some_and(|n| n > 0)).map(|t| {
+                let what = if self.sizing.load(Ordering::Relaxed) {
+                    "Cleanables measured"
+                } else {
+                    "Entries checked"
+                };
+                task_progress("cleaner-progress", t.done, t.total, what, cx).into_any_element()
+            })
         } else if self.paused {
-            "The search was cancelled.".into_any_element()
+            Some("The search was cancelled.".into_any_element())
         } else {
-            format!(
-                "{} Cleanables found",
-                format::count((self.cleanables.len() + self.admin.len()) as u64)
+            Some(
+                format!(
+                    "{} Cleanables found",
+                    format::count((self.cleanables.len() + self.admin.len()) as u64)
+                )
+                .into_any_element(),
             )
-            .into_any_element()
         };
         let search_row = h_flex()
             .flex_none()
             .gap(px(10.))
             .items_center()
-            .child(div().flex_1().text_color(muted).child(status))
+            .child(div().flex_1().text_color(muted).children(status))
             .when(looking, |row| {
                 row.child(pill("cancel-search", "Cancel").small().build(
                     cx,

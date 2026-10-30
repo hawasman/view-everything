@@ -313,11 +313,11 @@ fn layout_tiles(index: &Index, filter: &Filter, categories: &CategoryMap, root: 
             .filter(|(size, _)| *size > 0.0)
             .collect();
         items.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        // The tail merges into one tile standing for its folder. The whole Index has no folder to
+        // stand for, and keeps every Location.
         let mut more = None;
-        // The tail merges into a tile standing for its folder, so the whole Index keeps every Location.
-        if items.len() > MAX_CHILDREN + 1
-            && let Focus::Folder(_) = dir
-        {
+        let merged_into = dir.folder().filter(|_| items.len() > MAX_CHILDREN + 1);
+        if merged_into.is_some() {
             let tail = items.split_off(MAX_CHILDREN);
             let size: f64 = tail.iter().map(|t| t.0).sum();
             more = Some((tail.len(), size as u64));
@@ -335,21 +335,22 @@ fn layout_tiles(index: &Index, filter: &Filter, categories: &CategoryMap, root: 
             if let Some(parent) = parent {
                 tiles[parent].subdivided = true;
             }
-            let Some(id) = slot else {
-                let Focus::Folder(dir) = dir else {
+            let id = match (slot, merged_into) {
+                (Some(id), _) => id,
+                (None, Some(folder)) => {
+                    tiles.push(Tile {
+                        rect: cell,
+                        id: folder,
+                        is_dir: false,
+                        category: Category::Other,
+                        subdivided: false,
+                        level,
+                        more,
+                        parent,
+                    });
                     continue;
-                };
-                tiles.push(Tile {
-                    rect: cell,
-                    id: dir,
-                    is_dir: false,
-                    category: Category::Other,
-                    subdivided: false,
-                    level,
-                    more,
-                    parent,
-                });
-                continue;
+                }
+                (None, None) => unreachable!("only a merged tail has no Entry"),
             };
             let is_dir = index.is_dir(id);
             let category = if is_dir {
@@ -560,12 +561,12 @@ pub fn zoom_root(index: &Index, view: &View) -> Focus {
 }
 
 /// A tile's name: an Entry's, or for a Location its name, marked when it is an Offline Volume.
+/// A Remote is never mounted, so it is never Offline.
 fn tile_name(index: &Index, id: EntryId) -> Cow<'_, str> {
-    let offline = index.parent(id).is_none()
-        && index
-            .volume_with_root(id)
-            .and_then(|v| index.volume(v))
-            .is_some_and(|v| !v.online && !v.is_remote());
+    let offline = index
+        .volume_with_root(id)
+        .and_then(|v| index.volume(v))
+        .is_some_and(|v| !v.online && !v.is_remote());
     if offline {
         format!("{} (offline)", index.display_name(id)).into()
     } else {

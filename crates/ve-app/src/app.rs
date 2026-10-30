@@ -528,6 +528,10 @@ impl Shell {
             shell.restore(remembered, cx);
         }
         cx.on_release(|this, cx| {
+            // Text typed within the debounce has not reached the Engine yet; send it now.
+            if this.query_debounce.take().is_some() {
+                this.engine.set_query(this.query.read(cx).value().to_string());
+            }
             if cx.has_global::<Host>() {
                 let remembered = this.remember(cx);
                 cx.global_mut::<Host>().remembered = Some(remembered);

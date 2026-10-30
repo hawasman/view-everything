@@ -191,11 +191,9 @@ impl TreeList {
                 // With an empty Query every Location is shown: opening them all would bury the list.
                 Focus::Index if !view.query.trim().is_empty() => {
                     let index = self.shared.index.read();
-                    for (_, volume) in index.volumes() {
-                        if index.is_live(volume.root) && view.filter.is_shown(volume.root) {
-                            let folder = view::descend(&index, &view.filter, volume.root);
-                            self.expanded.extend(std::iter::successors(Some(folder), |&p| index.parent(p)));
-                        }
+                    for root in view::shown_location_roots(&index, &view.filter) {
+                        let folder = view::descend(&index, &view.filter, root);
+                        self.expanded.extend(std::iter::successors(Some(folder), |&p| index.parent(p)));
                     }
                 }
                 Focus::Index => {}

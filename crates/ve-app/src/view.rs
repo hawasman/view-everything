@@ -42,8 +42,20 @@ pub struct View {
 /// What the Treemap draws: one folder, or the whole Index with one tile per Location.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Focus {
+    /// Every Location side by side: what is shown spans several of them, or the Query is empty.
     Index,
+    /// The deepest folder holding everything shown, all of it on one Location.
     Folder(EntryId),
+}
+
+/// The root of every Location still in the Index.
+fn location_roots(index: &Index) -> impl Iterator<Item = EntryId> + '_ {
+    index.volumes().map(|(_, v)| v.root).filter(|&id| index.is_live(id))
+}
+
+/// The roots of the Locations `filter` shows something of.
+pub fn shown_location_roots<'a>(index: &'a Index, filter: &'a Filter) -> impl Iterator<Item = EntryId> + 'a {
+    location_roots(index).filter(|&id| filter.is_shown(id))
 }
 
 impl Focus {
@@ -58,7 +70,7 @@ impl Focus {
     /// What is drawn directly inside: the folder's children, or the root of every Location.
     pub fn children(self, index: &Index) -> std::borrow::Cow<'_, [EntryId]> {
         match self {
-            Focus::Index => index.volumes().map(|(_, v)| v.root).filter(|&id| index.is_live(id)).collect(),
+            Focus::Index => location_roots(index).collect(),
             Focus::Folder(id) => index.children(id).into(),
         }
     }
@@ -68,7 +80,7 @@ impl Focus {
         match self {
             Focus::Index => {
                 let mut total = Totals::default();
-                for &root in self.children(index).iter() {
+                for root in location_roots(index) {
                     total.add(filter.totals(index, root));
                 }
                 total
@@ -258,10 +270,7 @@ impl View {
 /// See [`View::focus`]. With shown Entries on one Location only, the focus is [`descend`] from
 /// its root.
 fn focus(index: &Index, filter: &Filter) -> Focus {
-    let mut shown = index
-        .volumes()
-        .map(|(_, v)| v.root)
-        .filter(|&id| index.is_live(id) && filter.is_shown(id));
+    let mut shown = shown_location_roots(index, filter);
     match (shown.next(), shown.next()) {
         (Some(root), None) => Focus::Folder(descend(index, filter, root)),
         _ => Focus::Index,
