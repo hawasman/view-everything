@@ -376,15 +376,21 @@ mod portal {
     /// Binds the Launcher's shortcut, preferring `trigger`, keeping its session in `kept`.
     /// Returns its presses and the trigger the desktop chose, or why none was bound.
     pub async fn bind(trigger: &str, kept: &Kept) -> Result<(Presses, String), String> {
-        let refused = |e: ashpd::Error| format!("The desktop refused a global shortcut ({e})");
         // A connection of its own: the portal ties an app id to a connection once, and GPUI's
         // connection may have talked to the portal already.
         let connection = ashpd::zbus::Connection::session()
             .await
             .map_err(|e| format!("The desktop offers no global shortcuts ({e})"))?;
         let app_id = ashpd::AppID::try_from(APP_ID).expect("APP_ID is a valid app id");
-        // An older portal without the host registry finds the app another way.
-        let _ = ashpd::register_host_app_with_connection(connection.clone(), app_id).await;
+        // An older portal without the host registry finds the app another way, so a failure
+        // here is only told if the shortcut is then refused: the portal registers the id only
+        // when it finds the app's desktop file (`<APP_ID>.desktop`, installed by the packages).
+        let unregistered = ashpd::register_host_app_with_connection(connection.clone(), app_id)
+            .await
+            .err()
+            .map(|e| format!("; it did not register the app ({e}), which needs {APP_ID}.desktop installed"))
+            .unwrap_or_default();
+        let refused = |e: ashpd::Error| format!("The desktop refused a global shortcut ({e}){unregistered}");
         let portal = GlobalShortcuts::with_connection(connection)
             .await
             .map_err(|e| format!("The desktop offers no global shortcuts ({e})"))?;

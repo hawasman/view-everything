@@ -35,7 +35,8 @@ fn post(title: &str, body: &str) -> Result<(), String> {
     // Servers that support body markup read `<`, `>` and `&` as markup; the agent names itself.
     let body = body.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     let connection = zbus::blocking::Connection::session().map_err(|e| e.to_string())?;
-    let hints: HashMap<&str, Value<'_>> = HashMap::new();
+    // Ties the notification to the app's desktop file, so the desktop shows its name and icon.
+    let hints = HashMap::from([("desktop-entry", Value::from(crate::app::APP_ID))]);
     connection
         .call_method(
             Some("org.freedesktop.Notifications"),

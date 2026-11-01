@@ -30,7 +30,7 @@ The Launcher belongs to the app's tray process, not to the main window. With **S
 - **Your desktop bound … to the Launcher**: on Wayland the desktop decides through its global shortcuts portal and may choose another key, or keep the one it bound before; change it in the desktop's shortcut settings.
 - **… is already taken by another program**, or another reason the desktop refused: the Launcher still opens from the tray menu, and you can bind the command `view-everything --launcher` to a key in your desktop's own shortcut settings.
 
-On X11, Windows and macOS the app takes the key itself. On Wayland it asks the desktop through the GlobalShortcuts portal, which KDE Plasma offers; a desktop without it refuses. The portal knows the app by its id, `io.github.hawasman.view-everything`, the name the packages install its desktop file under.
+On X11, Windows and macOS the app takes the key itself. On Wayland it asks the desktop through the GlobalShortcuts portal, which KDE Plasma offers; a desktop without it refuses. The portal knows the app by its id, `io.github.hawasman.view-everything`, and accepts it only when it finds the desktop file of that name, which the packages install; a build run without it (from source, or an AppImage your desktop integrated under another name) is refused with "An app id is required".
 
 ## `view-everything --launcher`
 
