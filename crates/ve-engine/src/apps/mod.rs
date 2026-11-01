@@ -218,8 +218,10 @@ mod tests {
     }
 
     /// Owner detection's files, from memory: `(path, text)`.
+    #[cfg(unix)]
     struct Files(&'static [(&'static str, &'static str)]);
 
+    #[cfg(unix)]
     impl owners::Disk for Files {
         fn read(&self, path: &Path) -> Option<String> {
             self.0
@@ -238,6 +240,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     const MANIFEST: &str = "\"AppState\"\n{\n\t\"appid\"\t\t\"70\"\n\t\"name\"\t\t\"Half-Life\"\n\t\"installdir\"\t\t\"HL\"\n}\n";
 
     /// The readers name each program's Owner as Owner detection does, so every source's

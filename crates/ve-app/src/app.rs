@@ -2740,6 +2740,9 @@ impl Render for Shell {
         }
         // Live readings repaint each second only while the Performance page shows them.
         self.engine.perf.set_watched(self.page == Page::Performance);
+        // The Apps sizes walk program folders under the Index lock: redone only while shown.
+        let apps_shown = self.page == Page::Apps;
+        self.apps.update(cx, |apps, cx| apps.set_shown(apps_shown, cx));
         // The Tasks page shows each running Task's elapsed time; nothing else repaints a Task that
         // reports no progress, so tick once a second while it is shown and Tasks run.
         if self.page == Page::Work && self.tick.is_none() && self.engine.shared.tasks.running_count() > 0 {

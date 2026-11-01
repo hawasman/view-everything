@@ -18,9 +18,10 @@ use std::time::Duration;
 use ve_engine::Engine;
 use ve_engine::apps::App as InstalledApp;
 
-/// How often the list is asked for again. The Engine answers with the same list while the
-/// Index is unchanged, re-reads the sources only after Owner detection, and otherwise only
-/// redoes the sizes.
+/// How often the list is asked for again while the page shows, or until a first program is
+/// known (the rail shows Apps only then). The Engine answers with the same list while the Index
+/// is unchanged, re-reads the sources only after Owner detection, and otherwise redoes the
+/// sizes, which walks every program's folders under the Index lock: hidden, the page skips it.
 const REFRESH: Duration = Duration::from_secs(5);
 
 /// What stands in for a value no source gives or no Index folder holds.
@@ -202,8 +203,11 @@ impl TableDelegate for AppList {
 
 pub struct AppsPage {
     table: Entity<TableState<AppList>>,
+    engine: Arc<Engine>,
     /// Whether the first list has arrived.
     loaded: bool,
+    /// Whether the Shell shows this page.
+    shown: bool,
     _refresh: Task<()>,
 }
 
@@ -225,12 +229,12 @@ impl AppsPage {
             )
             .col_resizable(false)
         });
-        // The Engine works off the UI thread, and any wait for the Index lock happens there too.
         let refresh = cx.spawn(async move |this, cx| {
             loop {
-                let engine = engine.clone();
-                let apps = cx.background_spawn(async move { engine.apps_list() }).await;
-                if this.update(cx, |page, cx| page.set_apps(apps, cx)).is_err() {
+                let Ok(wanted) = this.update(cx, |page, cx| page.shown || !page.has_apps(cx)) else {
+                    return;
+                };
+                if wanted && !Self::fetch(this.clone(), cx).await {
                     return;
                 }
                 cx.background_executor().timer(REFRESH).await;
@@ -238,9 +242,30 @@ impl AppsPage {
         });
         Self {
             table,
+            engine,
             loaded: false,
+            shown: false,
             _refresh: refresh,
         }
+    }
+
+    /// Asks the Engine for the list and shows it. The Engine works off the UI thread, and any
+    /// wait for the Index lock happens there too. False once the page is gone.
+    async fn fetch(this: WeakEntity<Self>, cx: &mut AsyncApp) -> bool {
+        let Ok(engine) = this.read_with(cx, |page, _| page.engine.clone()) else {
+            return false;
+        };
+        let apps = cx.background_spawn(async move { engine.apps_list() }).await;
+        this.update(cx, |page, cx| page.set_apps(apps, cx)).is_ok()
+    }
+
+    /// Follows whether the Shell shows this page; on showing, the list is brought up to date
+    /// at once.
+    pub fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if shown && !self.shown {
+            cx.spawn(async move |this, cx| Self::fetch(this, cx).await).detach();
+        }
+        self.shown = shown;
     }
 
     /// Shows `apps`; nothing is redrawn when the Engine answered with the list shown.
