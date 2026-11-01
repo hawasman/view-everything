@@ -241,6 +241,19 @@ fn a_counter_reset_is_unsupported_for_that_second() {
     assert_eq!(rate(&at(&perf, 2).disks, "sda").0, Reading::Unsupported);
 }
 
+#[test]
+fn a_reset_of_a_small_counter_is_no_wrap() {
+    let dir = tempfile::tempdir().unwrap();
+    machine(dir.path());
+    // About 500 MB read, then the disk came back counting from zero again.
+    counters(dir.path(), 0, 1_000_000);
+    let perf = linux(dir.path());
+    perf.tick(1);
+    put(dir.path(), "proc/diskstats", &disk(8, 0, "sda", 10, 0));
+    perf.tick(2);
+    assert_eq!(rate(&at(&perf, 2).disks, "sda").0, Reading::Unsupported);
+}
+
 /// Counters that move by a fixed amount each reading, for driving the Timeline fast.
 struct Steady {
     readings: u64,
@@ -311,7 +324,7 @@ fn samples_older_than_an_hour_are_evicted() {
     assert!(perf.at(Moment::At(400)).is_none());
     assert!(perf.at(Moment::At(401)).is_some(), "the last 3600 seconds are kept");
     assert!(perf.at(Moment::At(4000)).is_some());
-    assert_eq!(perf.series(0, 4000, |s| s.cpu.value().map(|_| 1.)).len(), 3600);
+    assert_eq!(perf.count(0, 4000), 3600);
 }
 
 #[test]
@@ -334,12 +347,26 @@ fn seconds_not_recorded_are_gaps() {
     assert!(perf.at(Moment::At(20)).is_none(), "the first reading of a run only primes");
     assert!(perf.at(Moment::At(30)).is_none());
     assert_eq!(perf.gaps(10, 31), vec![(10, 10), (13, 20), (23, 30)]);
-    let busy: Vec<i64> = perf
-        .series(10, 31, |s| s.cpu.value().map(|_| 1.))
-        .into_iter()
-        .map(|(t, _)| t)
-        .collect();
-    assert_eq!(busy, [11, 12, 21, 22, 31]);
+    assert_eq!(perf.count(10, 31), 5);
+    // Drawn two seconds to a column: a column with no sample stays empty, never zero.
+    let s = Some(0.3);
+    assert_eq!(
+        perf.peaks(10, 31, 11, |s| s.cpu.value().and_then(|c| c.busy.value().copied())),
+        [s, s, None, None, None, s, s, None, None, None, s]
+    );
+}
+
+#[test]
+fn a_resumed_recorder_drops_what_is_older_than_an_hour_at_once() {
+    let perf = steady();
+    perf.tick(100);
+    perf.tick(101);
+    perf.set_recording(false);
+    perf.set_recording(true);
+    // Two hours later the first reading only primes, yet the old run is gone already.
+    perf.tick(7300);
+    assert!(!perf.has_samples());
+    assert!(perf.at(Moment::Live).is_none());
 }
 
 #[test]

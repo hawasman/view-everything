@@ -35,7 +35,13 @@ impl<T> Timeline<T> {
             self.samples.pop_back();
         }
         self.samples.push_back((time, sample));
-        let oldest_kept = time - self.span + 1;
+        self.expire(time);
+    }
+
+    /// Drops the samples older than the span before second `now`, whether or not a sample was
+    /// taken then (a recorder resumed after a pause).
+    pub fn expire(&mut self, now: i64) {
+        let oldest_kept = now - self.span + 1;
         while self.samples.front().is_some_and(|&(t, _)| t < oldest_kept) {
             self.samples.pop_front();
         }
@@ -50,10 +56,6 @@ impl<T> Timeline<T> {
     /// The newest sample and its second.
     pub fn latest(&self) -> Option<(i64, &Arc<T>)> {
         self.samples.back().map(|(t, s)| (*t, s))
-    }
-
-    pub fn len(&self) -> usize {
-        self.samples.len()
     }
 
     pub fn is_empty(&self) -> bool {

@@ -22,6 +22,9 @@ const UNKNOWN: &str = "—";
 /// Height of the CPU lane on the dock.
 const LANE_H: f32 = 28.;
 
+/// Columns the hour is drawn in: three seconds each, about a pixel at the window's width.
+const COLUMNS: usize = 1200;
+
 /// Moves the Moment to the given second; the dock's lane calls it while scrubbing.
 pub type Scrub = Rc<dyn Fn(i64, &mut App)>;
 
@@ -235,27 +238,9 @@ fn memory_panel(memory: &Reading<Memory>, cx: &App) -> Div {
                         .child(div().h_full().w(relative(part(m.used))).bg(p.accent))
                         .child(div().h_full().w(relative(part(m.cache))).bg(cache_tint)),
                 )
-                .child(
-                    h_flex()
-                        .gap(px(8.))
-                        .items_center()
-                        .child(swatch(p.accent))
-                        .child(fact_row("Used", format::size(m.used), cx).flex_1()),
-                )
-                .child(
-                    h_flex()
-                        .gap(px(8.))
-                        .items_center()
-                        .child(swatch(cache_tint))
-                        .child(fact_row("Cache and buffers", format::size(m.cache), cx).flex_1()),
-                )
-                .child(
-                    h_flex()
-                        .gap(px(8.))
-                        .items_center()
-                        .child(swatch(p.rule))
-                        .child(fact_row("Free", format::size(m.free), cx).flex_1()),
-                )
+                .child(legend_row(p.accent, "Used", m.used, cx))
+                .child(legend_row(cache_tint, "Cache and buffers", m.cache, cx))
+                .child(legend_row(p.rule, "Free", m.free, cx))
                 .child(fact_row(
                     "Available",
                     m.available.value().map_or_else(|| UNKNOWN.to_owned(), |&a| format::size(a)),
@@ -274,6 +259,15 @@ fn memory_panel(memory: &Reading<Memory>, cx: &App) -> Div {
         }
     };
     panel(cx).child(v_flex().gap(px(GAP)).child(section_title("Memory", cx)).child(body))
+}
+
+/// A part of the memory bar: its swatch, name and size.
+fn legend_row(color: Hsla, label: &'static str, bytes: u64, cx: &App) -> Div {
+    h_flex()
+        .gap(px(8.))
+        .items_center()
+        .child(swatch(color))
+        .child(fact_row(label, format::size(bytes), cx).flex_1())
 }
 
 fn disks_panel(disks: &Reading<Vec<Disk>>, cx: &App) -> Div {
@@ -325,8 +319,9 @@ fn sensors_panel(s: &Sample, cx: &App) -> Div {
 pub fn lane(perf: &Perf, moment: Moment, now: i64, scrub: Scrub, cx: &App) -> AnyElement {
     let p = palette(cx);
     let from = now - SPAN + 1;
-    let points = perf.series(from, now, |s| s.cpu.value().and_then(|c| c.busy.value().copied()));
-    let recorded = SPAN - perf.gaps(from, now).iter().map(|(a, b)| b - a + 1).sum::<i64>();
+    // The busiest second of each column; the engine leaves a column with no sample empty.
+    let peaks = perf.peaks(from, now, COLUMNS, |s| s.cpu.value().and_then(|c| c.busy.value().copied()));
+    let recorded = perf.count(from, now);
     let bounds: Rc<Cell<Bounds<Pixels>>> = Rc::default();
     let time_at = {
         let bounds = bounds.clone();
@@ -350,24 +345,18 @@ pub fn lane(perf: &Perf, moment: Moment, now: i64, scrub: Scrub, cx: &App) -> An
         move |b, _, window, _| {
             let width = f32::from(b.size.width);
             let height = f32::from(b.size.height);
-            let columns = width.floor().max(1.) as usize;
-            let column = |t: i64| (((t - from) as f32 / SPAN as f32) * columns as f32) as usize;
-            // The busiest second each pixel column holds; none is a gap.
-            let mut peak: Vec<Option<f32>> = vec![None; columns];
-            for &(t, v) in &points {
-                let slot = &mut peak[column(t).min(columns - 1)];
-                *slot = Some(slot.map_or(v, |p| p.max(v)));
-            }
-            for (x, v) in peak.iter().enumerate() {
+            let column = width / COLUMNS as f32;
+            for (i, v) in peaks.iter().enumerate() {
+                // No sample in the column: a gap, left blank.
                 let Some(v) = *v else { continue };
-                let left = b.origin.x + px(x as f32);
+                let left = b.origin.x + px(i as f32 * column);
                 window.paint_quad(fill(
-                    Bounds::new(point(left, b.origin.y + px(height - 1.)), size(px(1.), px(1.))),
+                    Bounds::new(point(left, b.origin.y + px(height - 1.)), size(px(column), px(1.))),
                     base,
                 ));
                 let h = (v * (height - 2.)).max(1.);
                 window.paint_quad(fill(
-                    Bounds::new(point(left, b.origin.y + px(height - 1. - h)), size(px(1.), px(h))),
+                    Bounds::new(point(left, b.origin.y + px(height - 1. - h)), size(px(column), px(h))),
                     accent,
                 ));
             }
@@ -417,7 +406,7 @@ pub fn lane(perf: &Perf, moment: Moment, now: i64, scrub: Scrub, cx: &App) -> An
 }
 
 /// "42 min", "18 s".
-fn recorded_text(seconds: i64) -> String {
+fn recorded_text(seconds: usize) -> String {
     if seconds >= 60 {
         format!("{} min", seconds / 60)
     } else {

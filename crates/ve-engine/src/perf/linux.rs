@@ -90,32 +90,47 @@ fn cpu_counters(text: &str) -> Option<CpuCounters> {
             cores.push((id, times));
         }
     }
+    cores.sort_unstable_by_key(|&(id, _)| id);
     Some(CpuCounters { total: total?, cores })
 }
 
-/// `/proc/meminfo`, in bytes. Cache is what the kernel can give back (buffers, page cache,
-/// reclaimable slab) less shared memory, which it cannot; used is what is left.
+/// `/proc/meminfo`, in bytes, read in one pass. Cache is what the kernel can give back
+/// (buffers, page cache, reclaimable slab) less shared memory, which it cannot; used is what
+/// is left.
 fn memory(text: &str) -> Option<Memory> {
-    let field = |name: &str| -> Option<u64> {
-        text.lines().find_map(|line| {
-            let rest = line.strip_prefix(name)?.strip_prefix(':')?;
-            let kb: u64 = rest.split_ascii_whitespace().next()?.parse().ok()?;
-            Some(kb * 1024)
-        })
-    };
-    let total = field("MemTotal")?;
-    let free = field("MemFree")?;
-    let cache = (field("Buffers").unwrap_or(0) + field("Cached").unwrap_or(0) + field("SReclaimable").unwrap_or(0))
-        .saturating_sub(field("Shmem").unwrap_or(0));
-    let swap_total = field("SwapTotal").unwrap_or(0);
+    const NAMES: [&str; 9] = [
+        "MemTotal",
+        "MemFree",
+        "MemAvailable",
+        "Buffers",
+        "Cached",
+        "SReclaimable",
+        "Shmem",
+        "SwapTotal",
+        "SwapFree",
+    ];
+    let mut fields = [None::<u64>; NAMES.len()];
+    for line in text.lines() {
+        let Some((name, rest)) = line.split_once(':') else { continue };
+        let Some(i) = NAMES.iter().position(|&n| n == name) else { continue };
+        fields[i] = rest
+            .split_ascii_whitespace()
+            .next()
+            .and_then(|kb| kb.parse::<u64>().ok())
+            .map(|kb| kb * 1024);
+    }
+    let [total, free, available, buffers, cached, reclaimable, shmem, swap_total, swap_free] = fields;
+    let (total, free) = (total?, free?);
+    let cache = (buffers.unwrap_or(0) + cached.unwrap_or(0) + reclaimable.unwrap_or(0)).saturating_sub(shmem.unwrap_or(0));
+    let swap_total = swap_total.unwrap_or(0);
     Some(Memory {
         total,
         used: total.saturating_sub(free).saturating_sub(cache),
         cache,
         free,
-        available: field("MemAvailable").into(),
+        available: available.into(),
         swap_total,
-        swap_used: swap_total.saturating_sub(field("SwapFree").unwrap_or(0)),
+        swap_used: swap_total.saturating_sub(swap_free.unwrap_or(0)),
     })
 }
 

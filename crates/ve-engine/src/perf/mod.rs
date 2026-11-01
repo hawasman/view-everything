@@ -12,8 +12,9 @@ use crate::Repaint;
 use crate::timeline::{Moment, Timeline};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How long samples are kept: one hour of seconds.
 pub const SPAN: i64 = 3600;
@@ -38,13 +39,6 @@ impl<T> Reading<T> {
         match self {
             Reading::Value(v) => Some(v),
             Reading::Unsupported => None,
-        }
-    }
-
-    fn map<U>(&self, f: impl FnOnce(&T) -> U) -> Reading<U> {
-        match self {
-            Reading::Value(v) => Reading::Value(f(v)),
-            Reading::Unsupported => Reading::Unsupported,
         }
     }
 }
@@ -75,12 +69,14 @@ pub struct CpuTimes {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CpuCounters {
     pub total: CpuTimes,
+    /// Sorted by id, as `/proc/stat` lists them.
     pub cores: Vec<(u32, CpuTimes)>,
 }
 
 /// One block device's cumulative sector counts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiskCounters {
+    /// The same `Arc` in every reading, so samples share one copy of each name.
     pub name: Arc<str>,
     pub sectors_read: u64,
     pub sectors_written: u64,
@@ -105,7 +101,7 @@ pub struct Memory {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Counters {
     pub cpu: Reading<CpuCounters>,
-    /// The kind of each logical CPU by id; unlisted ids are [`CoreKind::Unknown`].
+    /// The kind of each logical CPU, sorted by id; unlisted ids are [`CoreKind::Unknown`].
     pub core_kinds: Arc<[(u32, CoreKind)]>,
     pub memory: Reading<Memory>,
     pub disks: Reading<Vec<DiskCounters>>,
@@ -144,6 +140,7 @@ pub struct Cpu {
 /// One block device's throughput over the second, in bytes per second.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Disk {
+    /// One allocation per device, shared by every sample that names it.
     pub name: Arc<str>,
     pub read: Reading<u64>,
     pub write: Reading<u64>,
@@ -164,27 +161,24 @@ pub struct Sample {
 }
 
 impl Sample {
-    /// Bytes this sample holds, for the memory budget.
+    /// Bytes this sample holds, for the memory budget. Disk names are shared by every sample
+    /// (see [`Disk::name`]), so they are not counted here.
     pub fn heap_size(&self) -> usize {
         let cores = self.cpu.value().map_or(0, |c| c.cores.capacity() * size_of::<Core>());
-        let disks = self.disks.value().map_or(0, |d| {
-            d.capacity() * size_of::<Disk>() + d.iter().map(|d| d.name.len()).sum::<usize>()
-        });
+        let disks = self.disks.value().map_or(0, |d| d.capacity() * size_of::<Disk>());
         size_of::<Self>() + cores + disks
     }
 }
 
-/// How far a cumulative counter moved from `prev` to `now`. One that went back past a 32-bit
-/// limit wrapped there; any other step back is a reset (the device came back), which says
-/// nothing about the second.
+/// How far a cumulative counter moved from `prev` to `now`. A 32-bit counter (a 32-bit
+/// kernel's) that passed its limit wrapped, which shows as a small step past it; any other
+/// step back is a reset (the device came back), which says nothing about the second.
 fn delta(prev: u64, now: u64) -> Option<u64> {
     if now >= prev {
-        Some(now - prev)
-    } else if prev <= u64::from(u32::MAX) {
-        Some(now + (1 << 32) - prev)
-    } else {
-        None
+        return Some(now - prev);
     }
+    let wrapped = (now + (1 << 32)).checked_sub(prev)?;
+    (prev <= u64::from(u32::MAX) && wrapped < 1 << 31).then_some(wrapped)
 }
 
 fn busy_share(prev: CpuTimes, now: CpuTimes) -> Reading<f32> {
@@ -199,11 +193,9 @@ fn busy_share(prev: CpuTimes, now: CpuTimes) -> Reading<f32> {
 
 /// The sample of second `time` from the readings `prev` (taken `seconds` earlier) and `now`.
 fn sample(time: i64, seconds: i64, prev: &Counters, now: &Counters) -> Sample {
-    let kind_of = |id: u32| {
-        now.core_kinds
-            .iter()
-            .find(|&&(i, _)| i == id)
-            .map_or(CoreKind::Unknown, |&(_, k)| k)
+    let kind_of = |id: u32| match now.core_kinds.binary_search_by_key(&id, |&(i, _)| i) {
+        Ok(i) => now.core_kinds[i].1,
+        Err(_) => CoreKind::Unknown,
     };
     let cpu = match (&prev.cpu, &now.cpu) {
         (Reading::Value(p), Reading::Value(n)) => Reading::Value(Cpu {
@@ -214,11 +206,10 @@ fn sample(time: i64, seconds: i64, prev: &Counters, now: &Counters) -> Sample {
                 .map(|&(id, times)| Core {
                     id,
                     kind: kind_of(id),
-                    busy: p
-                        .cores
-                        .iter()
-                        .find(|&&(i, _)| i == id)
-                        .map_or(Reading::Unsupported, |&(_, before)| busy_share(before, times)),
+                    busy: match p.cores.binary_search_by_key(&id, |&(i, _)| i) {
+                        Ok(i) => busy_share(p.cores[i].1, times),
+                        Err(_) => Reading::Unsupported,
+                    },
                 })
                 .collect(),
         }),
@@ -248,7 +239,7 @@ fn sample(time: i64, seconds: i64, prev: &Counters, now: &Counters) -> Sample {
     Sample {
         time,
         cpu,
-        memory: now.memory.map(Memory::clone),
+        memory: now.memory.clone(),
         disks,
         gpu: Reading::Unsupported,
         temperature: Reading::Unsupported,
@@ -256,20 +247,26 @@ fn sample(time: i64, seconds: i64, prev: &Counters, now: &Counters) -> Sample {
     }
 }
 
-struct State {
+/// The backend and its previous reading, locked apart from the Timeline so a slow read never
+/// holds up a client looking at samples.
+struct Reader {
     backend: Box<dyn Backend>,
     /// The previous reading and its second; dropped when recording pauses, so a resumed
     /// recorder starts a new run instead of averaging over the pause.
     prev: Option<(i64, Counters)>,
+}
+
+struct State {
     timeline: Timeline<Sample>,
     recording: bool,
-    /// A client shows live readings: every sample repaints, not just the first.
-    watched: bool,
     stopping: bool,
 }
 
 struct Inner {
+    reader: Mutex<Reader>,
     state: Mutex<State>,
+    /// A client shows live readings: every sample repaints, not just the first.
+    watched: AtomicBool,
     wake: Condvar,
     repaint: Repaint,
 }
@@ -284,14 +281,13 @@ impl Perf {
     pub fn manual(backend: Box<dyn Backend>, repaint: Repaint) -> Perf {
         Perf {
             inner: Arc::new(Inner {
+                reader: Mutex::new(Reader { backend, prev: None }),
                 state: Mutex::new(State {
-                    backend,
-                    prev: None,
                     timeline: Timeline::new(SPAN),
                     recording: false,
-                    watched: false,
                     stopping: false,
                 }),
+                watched: AtomicBool::new(false),
                 wake: Condvar::new(),
                 repaint,
             }),
@@ -316,32 +312,32 @@ impl Perf {
     /// Turns recording on or off. Off parks the recorder; the seconds until it is turned on
     /// again are a gap.
     pub fn set_recording(&self, on: bool) {
-        let mut state = self.inner.state.lock();
-        if state.recording != on {
+        {
+            let mut state = self.inner.state.lock();
+            if state.recording == on {
+                return;
+            }
             state.recording = on;
-            state.prev = None;
             self.inner.wake.notify_all();
         }
-    }
-
-    pub fn recording(&self) -> bool {
-        self.inner.state.lock().recording
+        self.inner.reader.lock().prev = None;
     }
 
     /// Whether a client shows live readings: then every sample repaints. Otherwise only the
     /// first sample of a run does (so the rail can show Performance).
     pub fn set_watched(&self, on: bool) {
-        self.inner.state.lock().watched = on;
+        self.inner.watched.store(on, Ordering::Relaxed);
     }
 
     /// Reads the counters as of second `now` and records that second's sample (the recorder
     /// thread calls this every second). The first reading of a run, and one after a step of
-    /// more than a few seconds, only primes the next.
+    /// more than a few seconds, only primes the next. Samples older than an hour before `now`
+    /// are dropped.
     pub fn tick(&self, now: i64) {
         self.inner.tick(now);
     }
 
-    /// The newest sample, if any second was recorded.
+    /// The newest sample, if any second of the last hour was recorded.
     pub fn live(&self) -> Option<Arc<Sample>> {
         self.inner.state.lock().timeline.latest().map(|(_, s)| s.clone())
     }
@@ -360,14 +356,23 @@ impl Perf {
         !self.inner.state.lock().timeline.is_empty()
     }
 
-    /// `value` of every sample from `from` to `to` (inclusive) that has it, oldest first.
-    pub fn series(&self, from: i64, to: i64, value: impl Fn(&Sample) -> Option<f32>) -> Vec<(i64, f32)> {
+    /// How many seconds from `from` to `to` (inclusive) have a sample.
+    pub fn count(&self, from: i64, to: i64) -> usize {
+        self.inner.state.lock().timeline.range(from, to).count()
+    }
+
+    /// `from` to `to` (inclusive) cut into `buckets` equal slices, each with the highest
+    /// `value` of its samples, or `None` where no sample has one: a gap.
+    pub fn peaks(&self, from: i64, to: i64, buckets: usize, value: impl Fn(&Sample) -> Option<f32>) -> Vec<Option<f32>> {
+        let mut peaks = vec![None; buckets];
+        let span = (to - from + 1).max(1) as usize;
         let state = self.inner.state.lock();
-        state
-            .timeline
-            .range(from, to)
-            .filter_map(|(t, s)| value(s).map(|v| (t, v)))
-            .collect()
+        for (t, s) in state.timeline.range(from, to) {
+            if let (Some(v), Some(peak)) = (value(s), peaks.get_mut((t - from) as usize * buckets / span)) {
+                *peak = Some(peak.map_or(v, |p: f32| p.max(v)));
+            }
+        }
+        peaks
     }
 
     /// The runs of seconds from `from` to `to` with no sample, as inclusive (first, last).
@@ -409,11 +414,12 @@ fn record(inner: &Arc<Inner>) {
         let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
         let into_second = Duration::from_nanos(u64::from(since_epoch.subsec_nanos()));
         // Just past the next second's start, so a sample never lands in the second it left.
-        let wait = Duration::from_secs(1) - into_second + Duration::from_millis(5);
+        let deadline = Instant::now() + Duration::from_secs(1) - into_second + Duration::from_millis(5);
         {
             let mut state = inner.state.lock();
-            if !state.stopping {
-                inner.wake.wait_for(&mut state, wait);
+            // A toggle of recording wakes this early; only the deadline ends the wait.
+            while state.recording && !state.stopping && Instant::now() < deadline {
+                inner.wake.wait_until(&mut state, deadline);
             }
             if state.stopping {
                 return;
@@ -429,23 +435,25 @@ fn record(inner: &Arc<Inner>) {
 
 impl Inner {
     fn tick(&self, now: i64) {
-        let repaint = {
-            let mut state = self.state.lock();
-            let state = &mut *state;
-            let counters = state.backend.read();
-            let first = state.timeline.is_empty();
-            let recorded = match state.prev.take() {
-                Some((then, prev)) if now > then && now - then <= MAX_STEP => {
-                    let sample = sample(now, now - then, &prev, &counters);
-                    state.timeline.push(now, Arc::new(sample));
-                    true
-                }
-                _ => false,
+        let sample = {
+            let mut reader = self.reader.lock();
+            let counters = reader.backend.read();
+            let sample = match reader.prev.take() {
+                Some((then, prev)) if now > then && now - then <= MAX_STEP => Some(sample(now, now - then, &prev, &counters)),
+                _ => None,
             };
-            state.prev = Some((now, counters));
-            recorded && (state.watched || first)
+            reader.prev = Some((now, counters));
+            sample
         };
-        if repaint {
+        let first = {
+            let mut state = self.state.lock();
+            state.timeline.expire(now);
+            let Some(sample) = sample else { return };
+            let first = state.timeline.is_empty();
+            state.timeline.push(now, Arc::new(sample));
+            first
+        };
+        if first || self.watched.load(Ordering::Relaxed) {
             (self.repaint)();
         }
     }

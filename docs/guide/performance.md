@@ -1,6 +1,6 @@
 # Performance
 
-The Performance Module shows what the machine is doing: CPU use, memory and disk throughput, now or at any second of the last hour. It is read-only and needs no permissions. Linux only for now.
+The Performance Module shows what the machine is doing: CPU use, memory and disk throughput, now or at any second of the last hour. It is read-only and needs no permissions. Linux only for now; on other platforms nothing is recorded and the Module does not appear.
 
 ## The System page
 
@@ -23,4 +23,4 @@ A second with no sample is a gap, drawn blank: the app was not running, it was n
 
 ## When it records
 
-Recording runs while the window is open, and after it closes only with **keep in tray** on ([Staying current](live-updates-and-background.md#background-tray-and-start-at-login)). A start at login that waits in the tray records only with keep in tray on. Reading the counters once a second costs well under 1 % of one CPU, and an hour of samples takes a few megabytes.
+Recording runs while the window is open, and after it closes only with **keep in tray** on ([Staying current](live-updates-and-background.md#background-tray-and-start-at-login)). A start at login that waits in the tray records only with keep in tray on. On a 12-core desktop, reading the counters once a second measured 0.02 % of one CPU, and an hour of samples takes about 2 MB.
