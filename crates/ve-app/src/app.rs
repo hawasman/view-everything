@@ -2858,7 +2858,12 @@ impl Render for Shell {
             }
             Page::Network => {
                 let sample = self.engine.net.at(self.moment);
-                let hour = self.engine.net.summary(now - ve_engine::perf::SPAN + 1, now);
+                // The hour up to the Moment, so scrubbing moves the totals with the rates.
+                let end = match self.moment {
+                    Moment::Live => now,
+                    Moment::At(time) => time,
+                };
+                let hour = self.engine.net.summary(end - ve_engine::perf::SPAN + 1, end);
                 crate::network::page(sample.as_ref(), &hour, self.moment, now, cx)
             }
             Page::Apps => {

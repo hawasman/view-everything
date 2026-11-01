@@ -190,6 +190,9 @@ pub enum Reason {
     Loading,
     /// No saved Index to read (no app running, and none built yet).
     NoIndex,
+    /// Not the agent's doing: the app answered what `ve mcp` could not read, or the agent's key
+    /// could not be kept. Calling again may work.
+    Failed,
 }
 
 /// A call the agent can correct or wait on, and why.
@@ -216,15 +219,16 @@ impl Refusal {
     }
 
     /// The refusal of an agent waiting for the user to approve `request`.
-    pub fn pending(request: &Request) -> Refusal {
+    pub fn pending(request: &Request, now: i64) -> Refusal {
         let Request { code, module, .. } = request;
+        let minutes = request.minutes_left(now);
         Refusal {
             reason: Reason::ApprovalPending,
             message: format!(
                 "approval pending, code {code}: this agent may not read {module} yet. Ask the user to approve code {code} \
                  in view-everything (Settings → Permissions) or by running `ve mcp --approve {code}`, then call again. \
-                 The code expires in {} minutes.",
-                super::CODE_LIFETIME / 60
+                 The code expires in {minutes} minute{}.",
+                if minutes == 1 { "" } else { "s" }
             ),
             code: Some(code.clone()),
             expires_at: Some(request.expires_at),
@@ -362,7 +366,7 @@ impl Agents<'_> {
     /// call, or the Index still loading.
     pub fn files(&self, agent: &Agent, tool: &str, arguments: Value, now: i64) -> Result<Value, Refusal> {
         if let super::Access::Pending(request) = self.access(agent, super::FILES, now) {
-            return Err(Refusal::pending(&request));
+            return Err(Refusal::pending(&request, now));
         }
         let call = Call::parse(tool, arguments)?;
         let engine = self.engine;

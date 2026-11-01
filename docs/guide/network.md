@@ -7,7 +7,7 @@ The Network Module shows what each network interface is receiving and sending, n
 **Network** appears in the rail, under Performance → System, once a sample has a network reading, about two seconds after the window opens. It shows the second the Moment points at:
 
 - **Receiving** and **Sending**: the sum over every interface, in bytes per second.
-- **Received, last hour** and **Sent, last hour**: what every interface moved in the seconds of the last hour that were recorded, and the interface that moved the most.
+- **Received, last hour** and **Sent, last hour**: what every interface moved in the recorded seconds of the hour up to the Moment, and the interface that moved the most; "—" while no second of it had a known count.
 - **Interfaces**: one row per interface (`eth0`, `wlp3s0`, `tun0`…) with its receive and send rates that second and its totals for the hour. Loopback (`lo`) is left out: it is no link.
 
 An interface that goes away (a VPN that disconnects, a USB tether unplugged) keeps its row for the rest of the hour, marked "gone" with the last second it was seen (at a past Moment, "not there at this Moment"); scrub back to see its rates then. A new interface shows "—" for its first second, since a rate needs two readings; so does a counter that went back (the interface was reset), and the hour's totals leave those seconds out. A counter of a 32-bit kernel that wraps past its limit is still read as the bytes moved.

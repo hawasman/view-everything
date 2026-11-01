@@ -52,6 +52,7 @@ A call that cannot be answered comes back as an error result whose `structuredCo
 | `unknown_tool` | any other tool name |
 | `loading` | the app is still reading its Index |
 | `no_index` | no app running and no saved Index yet |
+| `failed` | not the agent's doing: the app's answer could not be read, or the agent's key could not be saved |
 
 ## With the app closed
 

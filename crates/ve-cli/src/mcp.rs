@@ -225,7 +225,7 @@ impl Server {
         let name = self.name.clone().unwrap_or_else(|| UNNAMED.to_owned());
         let key = agent_key(&name).map_err(|e| {
             Refusal::new(
-                Reason::NotApproved,
+                Reason::Failed,
                 format!("cannot keep this agent's key, so it cannot be approved: {e}"),
             )
         })?;
@@ -257,8 +257,8 @@ impl Server {
             return Some(match (reply.get("answer"), reply.get("refusal")) {
                 (Some(answer), _) => Ok(answer.clone()),
                 (None, Some(refusal)) => Err(serde_json::from_value(refusal.clone())
-                    .unwrap_or_else(|e| Refusal::new(Reason::BadArguments, format!("unreadable refusal from the app: {e}")))),
-                (None, None) => Err(Refusal::new(Reason::BadArguments, "the app answered nothing")),
+                    .unwrap_or_else(|e| Refusal::new(Reason::Failed, format!("unreadable refusal from the app: {e}")))),
+                (None, None) => Err(Refusal::new(Reason::Failed, "the app answered nothing")),
             });
         }
         None
