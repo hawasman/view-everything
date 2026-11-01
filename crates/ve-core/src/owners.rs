@@ -1,6 +1,6 @@
 //! Owner detection (ADR-0014): finds the Owner roots of one Location from the Index itself
 //! (project markers, Steam libraries, install folders) and, for a mounted local Volume, from
-//! what the platform keeps on disk (Steam manifests, the package database, `os-release`).
+//! what the platform keeps on disk (Steam manifests, the pacman and dpkg databases, `os-release`).
 //!
 //! Runs as the last step of a Sync or Catch-up in three steps, so no file is read while the
 //! Index is locked: [`plan`] under a read lock, [`Detection::read`] with no lock, and
@@ -92,6 +92,27 @@ impl Disk for LocalDisk {
     }
 }
 
+/// The Owner of a Steam game's install folder.
+pub fn steam_owner(title: &str) -> Owner {
+    Owner::new(OwnerKind::Game, title, "Steam")
+}
+
+/// The Owner of a Flatpak application's folders, by its application id (`org.gimp.GIMP`).
+pub fn flatpak_owner(id: &str) -> Owner {
+    let name = id.rsplit('.').next().unwrap_or(id);
+    Owner::new(OwnerKind::Program, name, format!("Flatpak {id}"))
+}
+
+/// The Owner of a program's folder under `/opt`, by the folder's name.
+pub fn opt_owner(name: &str) -> Owner {
+    Owner::new(OwnerKind::Program, name, "/opt")
+}
+
+/// The Owner of the folders a system package owns wholly; `manager` is `pacman` or `dpkg`.
+pub fn package_owner(name: &str, manager: &str) -> Owner {
+    Owner::new(OwnerKind::System, name, manager)
+}
+
 /// The Owner roots of the Location `volume`, for [`Index::set_owners`]: the three steps in one
 /// go, for a caller that holds no Index lock. A folder found by a platform convention and by a
 /// project marker keeps the platform's Owner.
@@ -151,8 +172,8 @@ pub struct DiskText {
 }
 
 impl Detection {
-    /// The second step: reads the manifests and, on Linux, `os-release` and the pacman
-    /// database. Needs no Index lock.
+    /// The second step: reads the manifests and, on Linux, `os-release` and the pacman and
+    /// dpkg databases. Needs no Index lock.
     pub fn read(&self, disk: &dyn Disk) -> DiskText {
         let manifests = self
             .manifests
@@ -160,7 +181,9 @@ impl Detection {
             .filter_map(|(common, path)| Some((*common, disk.read(path)?)))
             .collect();
         let (os_release, packages) = if self.platform == Some(Platform::Linux) {
-            (disk.read(Path::new("/etc/os-release")), read_pacman(disk))
+            let mut packages = read_pacman(disk);
+            packages.extend(read_dpkg(disk));
+            (disk.read(Path::new("/etc/os-release")), packages)
         } else {
             (None, Vec::new())
         };
@@ -253,13 +276,14 @@ fn steam(index: &Index, manifests: &[(EntryId, String)]) -> Vec<(EntryId, Owner)
         .filter_map(|(common, text)| {
             let (title, installdir) = (vdf_value(text, "name")?, vdf_value(text, "installdir")?);
             let dir = index.child_named(*common, installdir)?;
-            Some((dir, Owner::new(OwnerKind::Game, title, "Steam")))
+            Some((dir, steam_owner(title)))
         })
         .collect()
 }
 
-/// The value of `key` in Valve's key-value text: a line `"key"  "value"`.
-fn vdf_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+/// The value of `key` in Valve's key-value text (Steam manifests, `libraryfolders.vdf`): the
+/// first line `"key"  "value"`.
+pub fn vdf_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     text.lines().find_map(|line| {
         let mut quoted = line.split('"').skip(1).step_by(2);
         (quoted.next()? == key).then(|| quoted.next()).flatten()
@@ -359,7 +383,7 @@ fn macos(index: &Index, root: EntryId) -> Vec<(EntryId, Owner)> {
 }
 
 /// Linux: the system folders (named after the distribution), `/opt/<app>`, Flatpak
-/// applications and the folders a pacman package owns wholly.
+/// applications and the folders a pacman or dpkg package owns wholly.
 fn linux(index: &Index, volume: VolumeId, os_release: Option<&str>, packages: &[Package]) -> Vec<(EntryId, Owner)> {
     let mut roots = Vec::new();
     let on_volume = |id: EntryId| index.volume_of(id) == Some(volume);
@@ -379,7 +403,7 @@ fn linux(index: &Index, volume: VolumeId, os_release: Option<&str>, packages: &[
         }
     }
     for app in folders(index, index.find_path(Path::new("/opt")).filter(|&d| on_volume(d))) {
-        roots.push((app, Owner::new(OwnerKind::Program, index.name(app), "/opt")));
+        roots.push((app, opt_owner(index.name(app))));
     }
     let homes = folders(index, index.find_path(Path::new("/home"))).map(|h| index.path(h));
     let flatpak_apps: Vec<PathBuf> = [PathBuf::from("/var/lib/flatpak/app")]
@@ -388,19 +412,18 @@ fn linux(index: &Index, volume: VolumeId, os_release: Option<&str>, packages: &[
         .collect();
     for dir in flatpak_apps {
         for app in folders(index, index.find_path(&dir).filter(|&d| on_volume(d))) {
-            let id = index.name(app);
-            let name = id.rsplit('.').next().unwrap_or(id);
-            roots.push((app, Owner::new(OwnerKind::Program, name, format!("Flatpak {id}"))));
+            roots.push((app, flatpak_owner(index.name(app))));
         }
     }
-    roots.extend(pacman(index, &on_volume, packages));
+    roots.extend(package_roots(index, &on_volume, packages));
     roots
 }
 
-/// One installed pacman package: its name, the folders it lists and the files it owns, all
-/// relative to the filesystem root.
+/// One installed system package: its name, the package manager, the folders it lists and the
+/// files it owns, all relative to the filesystem root.
 pub struct Package {
     name: String,
+    manager: &'static str,
     dirs: Vec<String>,
     files: HashSet<String>,
 }
@@ -420,6 +443,7 @@ fn read_pacman(disk: &dyn Disk) -> Vec<Package> {
             .unwrap_or_else(|| entry.rsplitn(3, '-').last().unwrap_or(&entry).to_owned());
         let mut package = Package {
             name,
+            manager: "pacman",
             dirs: Vec::new(),
             files: HashSet::new(),
         };
@@ -436,9 +460,39 @@ fn read_pacman(disk: &dyn Disk) -> Vec<Package> {
     packages
 }
 
-/// Folders that one pacman package owns wholly: listed by that package alone, with every
-/// indexed file beneath them in its file list. The outermost such folder is the Owner root.
-fn pacman(index: &Index, on_volume: &dyn Fn(EntryId) -> bool, packages: &[Package]) -> Vec<(EntryId, Owner)> {
+/// The local dpkg database, if there is one: each `info/<package>[:<arch>].list` names every
+/// path the package installed, folders unmarked; a listed path that is another listed path's
+/// parent is a folder.
+fn read_dpkg(disk: &dyn Disk) -> Vec<Package> {
+    let info = Path::new("/var/lib/dpkg/info");
+    let mut packages = Vec::new();
+    for entry in disk.list(info) {
+        let Some(stem) = entry.strip_suffix(".list") else {
+            continue;
+        };
+        let Some(list) = disk.read(&info.join(&entry)) else {
+            continue;
+        };
+        let paths: HashSet<&str> = list
+            .lines()
+            .filter_map(|l| l.strip_prefix('/'))
+            .filter(|p| !p.is_empty() && *p != ".")
+            .collect();
+        let parents: HashSet<&str> = paths.iter().filter_map(|p| p.rsplit_once('/').map(|(parent, _)| parent)).collect();
+        let (dirs, files): (Vec<&str>, Vec<&str>) = paths.into_iter().partition(|p| parents.contains(p));
+        packages.push(Package {
+            name: stem.split(':').next().unwrap_or(stem).to_owned(),
+            manager: "dpkg",
+            dirs: dirs.into_iter().map(str::to_owned).collect(),
+            files: files.into_iter().map(str::to_owned).collect(),
+        });
+    }
+    packages
+}
+
+/// Folders that one package owns wholly: listed by that package alone, with every indexed
+/// file beneath them in its file list. The outermost such folder is the Owner root.
+fn package_roots(index: &Index, on_volume: &dyn Fn(EntryId) -> bool, packages: &[Package]) -> Vec<(EntryId, Owner)> {
     let mut listed_by: HashMap<&str, u32> = HashMap::new();
     for dir in packages.iter().flat_map(|p| &p.dirs) {
         *listed_by.entry(dir).or_default() += 1;
@@ -452,11 +506,14 @@ fn pacman(index: &Index, on_volume: &dyn Fn(EntryId) -> bool, packages: &[Packag
             if listed_by[dir] != 1 || taken.iter().any(|t| dir.starts_with(t) && dir[t.len()..].starts_with('/')) {
                 continue;
             }
-            let Some(id) = index.find_path(&Path::new("/").join(dir)).filter(|&d| on_volume(d)) else {
+            let Some(id) = index
+                .find_path(&Path::new("/").join(dir))
+                .filter(|&d| on_volume(d) && index.is_dir(d))
+            else {
                 continue;
             };
             if files_within(index, id, dir).all(|file| package.files.contains(&file)) {
-                roots.push((id, Owner::new(OwnerKind::System, package.name.as_str(), "pacman")));
+                roots.push((id, package_owner(&package.name, package.manager)));
                 taken.push(dir);
             }
         }
@@ -803,6 +860,47 @@ mod tests {
                     "GIMP".into(),
                     "Flatpak org.gimp.GIMP".into()
                 ),
+            ]
+        );
+    }
+
+    #[test]
+    fn dpkg_lists_make_wholly_owned_folders_package_roots() {
+        let (index, v) = index_of(
+            "/",
+            &[
+                "usr/bin/htop",
+                "usr/bin/ldd",
+                "usr/share/htop/themes/dark",
+                "usr/share/doc/htop/copyright",
+                "usr/share/doc/libc6/copyright",
+                "usr/share/doc/libc6/added-by-user",
+            ],
+        );
+        let disk = FakeDisk(HashMap::from([
+            (
+                PathBuf::from("/var/lib/dpkg/info/htop.list"),
+                "/.\n/usr\n/usr/bin\n/usr/bin/htop\n/usr/share\n/usr/share/htop\n/usr/share/htop/themes\n/usr/share/htop/themes/dark\n/usr/share/doc\n/usr/share/doc/htop\n/usr/share/doc/htop/copyright\n".to_owned(),
+            ),
+            (
+                PathBuf::from("/var/lib/dpkg/info/libc6:amd64.list"),
+                "/.\n/usr\n/usr/bin\n/usr/bin/ldd\n/usr/share\n/usr/share/doc\n/usr/share/doc/libc6\n/usr/share/doc/libc6/copyright\n".to_owned(),
+            ),
+            (PathBuf::from("/var/lib/dpkg/info/htop.md5sums"), "ignored".to_owned()),
+        ]));
+        let roots = detect(&index, v, Some(Platform::Linux), &disk);
+        let packages: Vec<_> = named(&index, &roots).into_iter().filter(|r| r.3 == "dpkg").collect();
+        // `usr/bin` is listed by both; `usr/share/doc/libc6` holds a file libc6 does not list.
+        assert_eq!(
+            packages,
+            [
+                (
+                    "/usr/share/doc/htop".to_owned(),
+                    OwnerKind::System,
+                    "htop".to_owned(),
+                    "dpkg".to_owned()
+                ),
+                ("/usr/share/htop".into(), OwnerKind::System, "htop".into(), "dpkg".into()),
             ]
         );
     }

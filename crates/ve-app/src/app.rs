@@ -1,6 +1,7 @@
 //! The window: the Module rail, the top bar with the Query, the pages (Overview, Browse,
 //! Cleaner, Duplicates, Tasks, Settings), the Timeline dock, the status strip and the Inspector.
 
+use crate::apps::{AppsPage, InspectApp};
 use crate::categories::CategoryPanel;
 use crate::cleaner::{CleanerPage, ShowInBrowse};
 use crate::compare::{Compare, CompareEvent};
@@ -97,6 +98,7 @@ enum Page {
     Browse,
     Cleaner,
     Duplicates,
+    Apps,
     /// Tasks and Locations, from the rail's Work block.
     Work,
     Settings,
@@ -162,6 +164,7 @@ pub struct Shell {
     settings_page: Entity<SettingsPage>,
     dashboard: Entity<DashboardPage>,
     cleaner: Entity<CleanerPage>,
+    apps: Entity<AppsPage>,
     trash: Trash,
     treemap: Entity<Treemap>,
     /// Counts the folders under the inspected folder.
@@ -246,6 +249,14 @@ impl Shell {
             cx.notify();
         })
         .detach();
+        let apps = cx.new(|cx| AppsPage::new(engine.clone(), window, cx));
+        cx.subscribe(&apps, |this, _, inspect: &InspectApp, cx| {
+            this.inspected = Some(Inspected::App(inspect.0.clone()));
+            cx.notify();
+        })
+        .detach();
+        // A first list, or none left, shows or hides Apps in the rail.
+        cx.observe(&apps, |_, _, cx| cx.notify()).detach();
         let treemap_depth = settings.treemap_depth;
         let treemap_colour_by = settings.treemap_colour_by;
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
@@ -463,6 +474,7 @@ impl Shell {
             Ok("browse" | "explorer") => Page::Browse,
             Ok("cleaner") => Page::Cleaner,
             Ok("duplicates") => Page::Duplicates,
+            Ok("apps") => Page::Apps,
             Ok("work" | "tasks") => Page::Work,
             Ok("overview" | "dashboard") => Page::Overview,
             // The scroll measurement needs the Browse list on screen.
@@ -534,6 +546,7 @@ impl Shell {
             settings_page,
             dashboard,
             cleaner,
+            apps,
             duplicates,
             trash,
             treemap,
@@ -1731,6 +1744,9 @@ impl Shell {
             .child(self.nav("nav-browse", "Browse", None, Page::Browse, true, cx))
             .child(self.nav("nav-cleaner", "Cleaner", None, Page::Cleaner, true, cx))
             .child(self.nav("nav-duplicates", "Duplicates", None, Page::Duplicates, true, cx))
+            .when(self.apps.read(cx).has_apps(cx), |d| {
+                d.child(self.nav("nav-apps", "Apps", None, Page::Apps, true, cx))
+            })
             .child(div().flex_1().min_h_0())
             .child(self.work_block(rows, now, cx))
             .children(self.update_row(cx))
@@ -2318,6 +2334,22 @@ impl Shell {
             Inspected::Location(identity) => self.location_panel(identity, rows, now, cx),
             Inspected::Task(id) => self.task_panel(*id, cx),
             Inspected::Duplicates(first) => self.duplicates_panel(*first, cx),
+            Inspected::App(key) => {
+                let app = self.apps.read(cx).app(key, cx)?;
+                let largest = app.roots.first().map(|(path, _)| path.clone());
+                let show = Item::new(
+                    "inspector-app-browse",
+                    "Show in Browse",
+                    cx.listener(move |this, _, window, cx| {
+                        let id = largest.as_ref().and_then(|path| this.engine.shared.index.read().find_path(path));
+                        if let Some(id) = id {
+                            this.show_in_browse(id, window, cx);
+                            this.inspected = Some(Inspected::Entry(id));
+                        }
+                    }),
+                );
+                Some(crate::apps::panel(&app, show))
+            }
         }
     }
 
@@ -2663,6 +2695,14 @@ impl Render for Shell {
             Page::Browse => self.browse(cx).into_any_element(),
             Page::Cleaner => self.cleaner.clone().into_any_element(),
             Page::Duplicates => self.duplicates_page(cx).into_any_element(),
+            Page::Apps => {
+                let shown = match &self.inspected {
+                    Some(Inspected::App(key)) => Some(key.clone()),
+                    _ => None,
+                };
+                self.apps.update(cx, |a, cx| a.set_selected(shown, cx));
+                self.apps.clone().into_any_element()
+            }
             Page::Work => self.work_page(&rows, now, cx).into_any_element(),
             Page::Settings => self.settings_page.clone().into_any_element(),
         };

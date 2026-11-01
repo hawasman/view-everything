@@ -29,7 +29,7 @@
 - **Projects** are recognised by their marker files, on every Location, Remotes and Offline Volumes included: `.git`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `CMakeLists.txt`, `build.gradle` and `build.gradle.kts`, `Package.swift`, `*.sln` and `*.csproj`. Markers inside dependency folders (`node_modules`, `vendor`, `site-packages`, `.venv` and similar) do not make a Project.
 - **Steam games** are read from `steamapps/appmanifest_*.acf`, on every platform.
 - **Windows:** `C:\Windows` is System; `Program Files` and `Program Files (x86)` folders (`\<App>` and `\<Vendor>\<App>`) and `AppData\Local\Programs\<App>` are Programs.
-- **Linux:** `/usr`, `/etc`, `/boot`, `/var/lib` and `/var/cache` are System, named after your distribution; `/opt/<app>` is a Program; so are Flatpak apps (`/var/lib/flatpak/app`, `~/.local/share/flatpak/app`, `~/.var/app`). A folder wholly owned by one pacman package is System, named after the package.
+- **Linux:** `/usr`, `/etc`, `/boot`, `/var/lib` and `/var/cache` are System, named after your distribution; `/opt/<app>` is a Program; so are Flatpak apps (`/var/lib/flatpak/app`, `~/.local/share/flatpak/app`, `~/.var/app`). A folder wholly owned by one pacman or dpkg package is System, named after the package.
 - **macOS:** `/System` and `/usr` are System; `.app` bundles in `/Applications` and `~/Applications` are Programs.
 - Where a platform convention and a project marker find the same folder, the platform's Owner is kept.
 - Detection runs at the end of every Sync and Catch-up of a Location, inside the same Task. Steam, Windows, Linux and macOS detection read only mounted local Volumes; project markers are read from the Index alone. Live updates do not trigger it. The detectors are built in; you can't add your own Owner rules yet ([ADR-0014](docs/adr/0014-owners-live-in-the-index.md)).
@@ -41,6 +41,12 @@
 - Two new Query modifiers: `owner:<text>` matches an Owner's name (a substring, ignoring case; quote a name with spaces: `owner:"Program Files"`), and `ownerkind:system|program|game|project|none`. Both match folders as well as files, combine with the rest of a Query, and work in `ve find` and `ve top`.
 - CSV export gains `Owner` and `Owner kind` columns, in the app, in `ve export` and in `ve find --csv`.
 - The Overview has a **Largest Owners** panel: the 5 Owners with the largest Folder Size. Clicking one shows its Owner root in the Inspector. The panel is hidden while the Index has no Owners.
+
+### Apps
+- A new **Apps** page, under Files in the rail once installed programs are known (Linux for now): every pacman, dpkg and rpm package, Flatpak app, Steam game and folder under `/opt`, with its kind, version, install date and **On disk** size. Click a column title to sort by name, kind, install date or size.
+- A program's size is the Folder Size of its Owner roots in the Index, so it matches what Browse shows. A program none of whose folders is indexed shows "—", as do most packages (only folders a package owns wholly are its Owner roots) and every rpm package (rpm file lists are not read yet).
+- Clicking a program opens it in the Inspector: version, install date, size, each Owner root with its size, and **Show in Browse** for the largest root.
+- The list is read again after each Sync's Owner detection, so a newly installed game appears with its size.
 
 ### Index format
 - The Index is now format 8. A format 7 file is converted when loaded, and every Location is detected once at launch, so Owners appear without waiting for a Sync.
