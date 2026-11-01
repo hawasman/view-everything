@@ -134,8 +134,12 @@ The pane at the right that shows whatever is selected (an Entry, a Location, a T
 _Avoid_: details pane, properties, selection panel
 
 **Apps**:
-The page listing the installed programs (system packages, Flatpaks, Steam games, programs under `/opt`) with each one's On-disk Size: the Folder Size of its Owner roots, or "—" when none of them is indexed. Shown in the rail once any program is known.
+The page listing the installed programs (system packages, Flatpaks, Steam games, programs under `/opt`) with each one's On-disk Size: the Folder Size of its Owner roots, or "—" when none of them is indexed; and, on its Startup tab, the startup items. Shown in the rail once any program or startup item is known.
 _Avoid_: programs page, software list
+
+**Startup item**:
+Something that starts when the user logs in: an XDG autostart entry or a systemd user unit enabled in the default target, with what it runs and the file that defines it. A user's entry hides the system one of the same name.
+_Avoid_: login item, autorun, startup app
 
 **Timeline dock**:
 The strip at the foot of the window that holds the Moment and lets the user scrub each Module's Timeline or Snapshots.
