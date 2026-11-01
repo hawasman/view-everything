@@ -63,6 +63,7 @@
 - **Alt+Space** opens the **Launcher** from any app: a small window that lists files and folders in the Index by name as you type, at most 50, names starting with the text first, then a word in them, then anywhere, newest first. Enter opens one with its default app, Shift+Enter shows it in Browse, Esc or clicking elsewhere closes it. [More](docs/guide/launcher.md)
 - It works with the main window closed while the app stays in the tray, and the tray menu has a **Launcher** item. Entries on an Offline Volume or a Remote are marked and not opened.
 - **Settings → Launcher** changes the shortcut and says whether the desktop gave it. On Wayland the app asks the desktop's GlobalShortcuts portal. Where the desktop refuses, the tray menu still opens the Launcher, and `view-everything --launcher` can be bound to a key; run with the app closed, it opens a Launcher that says the app is not running.
+- The packaged desktop file is now `io.github.hawasman.view-everything.desktop`, the app id its windows and the GlobalShortcuts portal use, so the desktop can tell whose shortcut it is asked for. A start at login entry keeps its name.
 - The app's socket answers `launcher` and `launch.match`.
 
 ### Index format

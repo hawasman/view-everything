@@ -323,7 +323,7 @@ impl Host {
                 title: Some(crate::app::APP_NAME.into()),
                 ..Default::default()
             }),
-            app_id: Some("view-everything".into()),
+            app_id: Some(crate::app::APP_ID.into()),
             ..Default::default()
         };
         let opened = gpui_kit::open_window(options, cx, |window, cx| {

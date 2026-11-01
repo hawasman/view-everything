@@ -4,7 +4,7 @@
 //! the Inspector (#50).
 
 use crate::format;
-use crate::inspector::Panel;
+use crate::inspector::{Panel, long_fact};
 use crate::theme::{FS_BODY, FS_SMALL, GAP, RADIUS_CHIP, palette};
 use crate::ui::{Tone, caption, empty_state, kpi_strip, panel, section_title, swatch, title_row};
 use chrono::{Local, TimeZone as _};
@@ -734,7 +734,7 @@ pub fn inspector_panel(inspecting: &Inspecting, table: Option<&Processes>, now: 
     };
     let readings = current.map(|(_, p)| p);
     let facts = vec![
-        fact(
+        long_fact(
             "Command line",
             details.and_then(|d| d.command.value().cloned()).unwrap_or_else(unknown),
         ),

@@ -47,8 +47,8 @@ package() {
   install -Dm755 target/release/ve-fanotify "$pkgdir/usr/libexec/view-everything/ve-fanotify"
   install -Dm644 packaging/linux/org.view-everything.fanotify.policy \
     "$pkgdir/usr/share/polkit-1/actions/org.view-everything.fanotify.policy"
-  install -Dm644 packaging/linux/view-everything.desktop \
-    "$pkgdir/usr/share/applications/view-everything.desktop"
+  install -Dm644 packaging/linux/io.github.hawasman.view-everything.desktop \
+    "$pkgdir/usr/share/applications/io.github.hawasman.view-everything.desktop"
   install -Dm644 packaging/icons/view-everything.svg \
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/view-everything.svg"
   install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"

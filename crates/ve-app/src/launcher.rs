@@ -64,7 +64,7 @@ pub fn show(cx: &mut App) {
         window_decorations: Some(WindowDecorations::Client),
         is_resizable: false,
         is_minimizable: false,
-        app_id: Some("view-everything".into()),
+        app_id: Some(crate::app::APP_ID.into()),
         ..Default::default()
     };
     match gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Launcher::new(engine, text, window, cx))) {

@@ -360,10 +360,9 @@ mod portal {
     use std::pin::Pin;
     use std::rc::Rc;
 
+    use crate::app::APP_ID;
+
     const ID: &str = "launcher";
-    /// Who the portal is told the app is. A program not installed as a Flatpak or Snap has no
-    /// identity the portal can read, and the GlobalShortcuts portal refuses one without.
-    const APP_ID: &str = "io.github.hawasman.view-everything";
 
     pub type Session = ashpd::desktop::Session<GlobalShortcuts>;
 

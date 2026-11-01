@@ -49,8 +49,13 @@ use ve_engine::view::Focus;
 use ve_engine::{Engine, Phase, last_synced_label};
 use ve_scan::VolumeInfo;
 
-/// The app's name as people read it (the binary, app id and data folders stay `view-everything`).
+/// The app's name as people read it (the binary and data folders stay `view-everything`).
 pub const APP_NAME: &str = "View Everything";
+
+/// The app id: its windows' Wayland app id, the name of its packaged desktop file
+/// (`<APP_ID>.desktop`, which the desktop matches windows and portal requests against), and who
+/// the GlobalShortcuts portal is told the app is.
+pub const APP_ID: &str = "io.github.hawasman.view-everything";
 
 /// Most Entries "Open" and "Show in file manager" act on at once; more would launch a process
 /// or window each.
