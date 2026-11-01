@@ -568,6 +568,12 @@ impl ProcessList {
         true
     }
 
+    /// The row process `id` is shown at, if the table has it.
+    pub fn row_of(&self, id: ProcessId) -> Option<usize> {
+        let list = &self.table.as_ref()?.list;
+        self.order.iter().position(|&i| list[i].id == id)
+    }
+
     fn sorted(&mut self) {
         let Some(table) = &self.table else {
             self.order.clear();

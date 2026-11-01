@@ -23,6 +23,7 @@
 ### Network
 - A new Module, **Network** (Linux), appears in the rail under Performance → System once a sample has interfaces: each interface's receive and send rate at the Moment and what it moved in the last hour, with the busiest named. Loopback is left out. Recorded with Performance, in the same samples, so the Timeline dock scrubs it the same way; on the Network page its lane shows the hour's throughput. An interface that goes away keeps its row and its history for the hour. A rate the app cannot take (a new interface, a reset counter) shows "—". [More](docs/guide/network.md)
 - The page says that per-app traffic needs administrator rights and is not available yet; nothing prompts for them.
+- **Connections** on Network: every open TCP and UDP connection (IPv4 and IPv6) with its local and remote address, state and the process holding it; "unknown" where that process cannot be read (another user's), never "nobody". Click one to open its process in the Inspector, then **Show on Performance** to find it in the process table. Read every two seconds; Live lists them all, a past second keeps 200, open conversations first. [More](docs/guide/network.md#connections)
 
 ### Query modifiers
 - New Query modifiers: `kind:file` and `kind:folder`; `is:cleanable` (what the Cleaner found), `is:duplicate` (same as `dupe:`) and `is:offline` (Entries on an Offline Volume); `at:/path` (a folder and everything below it); `since:7d`, `since:12h`, `since:2026-10-01` (files modified since then). They combine with text, `|`, `!` and every other modifier.

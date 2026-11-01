@@ -158,6 +158,10 @@ impl Backend for LinuxBackend {
             user: user.into(),
         })
     }
+
+    fn connections(&mut self) -> Reading<Vec<crate::net::Socket>> {
+        crate::net::sockets(&self.root)
+    }
 }
 
 /// The shared copy of process name `name` in `names`.
