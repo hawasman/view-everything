@@ -1,9 +1,13 @@
-//! The Overview: the answer first (what can be cleaned up), then the Index at a glance. It
-//! ignores the Explorer's Query. What it shows comes from one pass over the Index, computed off
-//! the UI thread and cached per Index generation (see `dashboard_summary`).
+//! The Overview: three answers first (what is filling the disk, slowing the machine, talking on
+//! the network), most severe first, then the Index at a glance. It ignores the Explorer's Query.
+//! What it shows of the Index comes from one pass over it, computed off the UI thread and cached
+//! per Index generation (see `dashboard_summary`).
 
 use crate::app::volume_name;
-use crate::dashboard_summary::{Summary, ago, group_by_filesystem, oldest, summarize};
+use crate::dashboard_summary::{
+    Answer, Cleanable, Fullest, Question, RANKING_RULE, Summary, ago, disk_answer, group_by_filesystem, oldest, percent, rank,
+    slowing_answer, summarize, talking_answer,
+};
 use crate::format;
 use crate::inspector::Inspected;
 use crate::settings::Settings;
@@ -22,7 +26,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 use ve_core::{Capacity, Category, CategoryMap, Query, QueryContext};
-use ve_engine::{Phase, Repaint, Shared};
+use ve_engine::{Engine, Phase, Repaint, Shared};
 use ve_scan::VolumeInfo;
 
 /// Never recompute the summary more often than this while the Index is being filled; a
@@ -43,6 +47,8 @@ pub enum Act {
     SaveQuery(Option<String>),
     /// Start the Live updates a login start held back.
     StartLive,
+    /// Follow an answer to its Module page, showing this in the Inspector there.
+    Follow(Question, Option<Inspected>),
 }
 
 impl EventEmitter<Act> for DashboardPage {}
@@ -78,20 +84,14 @@ fn locations_phrase(locations: &[Location]) -> String {
     format!("{count} {}", if count == 1 { "Location" } else { "Locations" })
 }
 
-/// The Overview's finding line for `count` Cleanables of `reclaim` bytes, `admin` of them freed
-/// only with administrator rights. No administrator share, no mention of it.
-fn finding_sentence(reclaim: u64, count: usize, admin: u64) -> String {
-    let mut sentence = format!(
-        "{} can be cleaned up across {} Cleanable{}",
-        format::size(reclaim),
-        format::count(count as u64),
-        if count == 1 { "" } else { "s" }
-    );
-    if admin > 0 {
-        sentence.push_str(&format!("; {} of it needs administrator", format::size(admin)));
-    }
-    sentence.push('.');
-    sentence
+/// Seconds the slowing and talking answers stand before they are read again.
+const MACHINE_EVERY: i64 = 5;
+
+/// The slowing and talking answers over the hour up to second `at`.
+struct Machine {
+    at: i64,
+    slowing: Answer,
+    talking: Answer,
 }
 
 /// The machine's name, when the system says it.
@@ -102,7 +102,11 @@ fn hostname() -> Option<String> {
 }
 
 pub struct DashboardPage {
-    shared: Arc<Shared>,
+    engine: Arc<Engine>,
+    /// The slowing and talking answers, once read.
+    machine: Option<Machine>,
+    /// Reading them again, off the UI thread.
+    reading_machine: Option<Task<()>>,
     cleaner: Entity<crate::cleaner::CleanerPage>,
     trash: Trash,
     /// The newest summary the worker computed.
@@ -119,7 +123,7 @@ pub struct DashboardPage {
 impl DashboardPage {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        shared: Arc<Shared>,
+        engine: Arc<Engine>,
         cleaner: Entity<crate::cleaner::CleanerPage>,
         trash: Trash,
         categories: CategoryMap,
@@ -133,7 +137,7 @@ impl DashboardPage {
         let recent_query = settings.recent_query_text();
         let _ = queries.send(recent_query.clone());
         {
-            let (shared, latest) = (shared.clone(), latest.clone());
+            let (shared, latest) = (engine.shared.clone(), latest.clone());
             std::thread::Builder::new()
                 .name("ve-dashboard".into())
                 .spawn(move || run_summary(&shared, &categories, &requests, &latest, &repaint))
@@ -146,7 +150,9 @@ impl DashboardPage {
         #[cfg(not(feature = "bench"))]
         let _ = window;
         let mut page = Self {
-            shared,
+            engine,
+            machine: None,
+            reading_machine: None,
             cleaner,
             trash,
             latest,
@@ -157,7 +163,7 @@ impl DashboardPage {
             editing: None,
             host: hostname(),
         };
-        // The finding line shows what the Cleaner's background look found.
+        // The disk answer and the Cleanable figure show what the Cleaner's background look found.
         cx.observe(&page.cleaner, |_, _, cx| cx.notify()).detach();
         page.set_context(settings, Vec::new(), cx);
         page
@@ -190,12 +196,12 @@ impl DashboardPage {
 
     /// Every Location in the Index, in Index order, the Volumes of one filesystem as one.
     fn locations(&self) -> Vec<Location> {
-        let status = self.shared.status.lock().clone();
+        let status = self.engine.shared.status.lock().clone();
         let syncing: &[PathBuf] = match &status.phase {
             Phase::Syncing { volumes, .. } => volumes,
             _ => &[],
         };
-        let index = self.shared.index.read();
+        let index = self.engine.shared.index.read();
         let singles: Vec<(Location, String)> = index
             .volumes()
             .map(|(_, v)| {
@@ -268,6 +274,50 @@ impl DashboardPage {
                 whole
             })
             .collect()
+    }
+
+    /// The slowing and talking answers over the last hour. Read off the UI thread when they are
+    /// older than [`MACHINE_EVERY`]; the page redraws only if they changed. Until the first
+    /// reading they say "—".
+    fn machine(&mut self, now: i64, cx: &mut Context<Self>) -> (Answer, Answer) {
+        let stale = self.machine.as_ref().is_none_or(|m| now - m.at >= MACHINE_EVERY);
+        if stale && self.reading_machine.is_none() {
+            let engine = self.engine.clone();
+            self.reading_machine = Some(cx.spawn(async move |this, cx| {
+                let machine = cx
+                    .background_spawn(async move {
+                        let from = now - ve_engine::perf::SPAN + 1;
+                        Machine {
+                            at: now,
+                            slowing: slowing_answer(&engine.perf.summary(from, now)),
+                            // The open connections slot in here once `net.summary` records them.
+                            talking: talking_answer(&engine.net.summary(from, now), None),
+                        }
+                    })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    let changed = this
+                        .machine
+                        .as_ref()
+                        .is_none_or(|m| m.slowing != machine.slowing || m.talking != machine.talking);
+                    this.machine = Some(machine);
+                    this.reading_machine = None;
+                    if changed {
+                        cx.notify();
+                    }
+                });
+            }));
+        }
+        let unread = |question| Answer {
+            question,
+            severity: None,
+            text: "—".to_owned(),
+            inspect: None,
+        };
+        match &self.machine {
+            Some(m) => (m.slowing.clone(), m.talking.clone()),
+            None => (unread(Question::Slowing), unread(Question::Talking)),
+        }
     }
 
     /// Files in the Index on the Volume or Remote with this identity, once the summary is in.
@@ -379,19 +429,13 @@ enum Finding {
     Looking {
         spinning: bool,
     },
-    Found {
-        reclaim: u64,
-        count: usize,
-        /// The part of `reclaim` that needs administrator rights.
-        admin: u64,
-    },
+    Found(Cleanable),
     Nothing,
 }
 
 impl Render for DashboardPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _span = crate::trace::span("DashboardPage::render");
-        let p = palette(cx);
         let now = chrono::Utc::now().timestamp();
         let locations = self.locations();
         let oldest_loc = oldest(&locations.iter().map(|l| l.last_synced).collect::<Vec<_>>()).map(|i| &locations[i]);
@@ -404,10 +448,10 @@ impl Render for DashboardPage {
         });
         let finding = if looking {
             Finding::Looking { spinning: true }
-        } else if self.shared.is_loading() || self.shown.is_none() {
+        } else if self.engine.shared.is_loading() || self.shown.is_none() {
             Finding::Looking { spinning: false }
         } else if count > 0 {
-            Finding::Found { reclaim, count, admin }
+            Finding::Found(Cleanable { reclaim, count, admin })
         } else {
             Finding::Nothing
         };
@@ -439,7 +483,7 @@ impl Render for DashboardPage {
             .justify_between()
             .gap(px(GAP))
             .child(crate::ui::title_row("Overview", Some(facts), cx))
-            .when(matches!(finding, Finding::Found { .. }), |d| {
+            .when(matches!(finding, Finding::Found(_)), |d| {
                 d.child(
                     div().flex_none().child(
                         button("open-cleaner", "Open Cleaner")
@@ -449,34 +493,29 @@ impl Render for DashboardPage {
                 )
             });
 
-        let sentence = match &finding {
-            Finding::Looking { .. } => "Looking for Cleanables…".to_owned(),
-            Finding::Found { reclaim, count, admin } => finding_sentence(*reclaim, *count, *admin),
-            Finding::Nothing => "Nothing to clean up.".to_owned(),
-        };
-        let finding_line = panel(cx)
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(GAP))
-            .child(
-                h_flex()
-                    .gap(px(10.))
-                    .items_center()
-                    .text_size(px(FS_BODY))
-                    .text_color(p.text)
-                    .when(matches!(finding, Finding::Looking { spinning: true }), |d| {
-                        d.child(Spinner::new().with_size(Size::Small).color(p.muted))
-                    })
-                    .child(sentence),
-            )
-            .when(matches!(finding, Finding::Found { .. }), |d| {
-                d.child(
-                    link("review-plan", "Review Cleanup Plan", cx)
-                        .flex_none()
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(Act::OpenCleaner))),
-                )
+        // The fullest Location that is online and says its capacity.
+        let share = |c: &Capacity| c.total.saturating_sub(c.free) as f64 / c.total as f64;
+        let fullest = locations
+            .iter()
+            .filter(|l| l.online)
+            .filter_map(|l| l.capacity.filter(|c| c.total > 0).map(|c| (l, c)))
+            .max_by(|(_, a), (_, b)| share(a).total_cmp(&share(b)))
+            .map(|(l, c)| Fullest {
+                identity: &l.identity,
+                name: &l.name,
+                used: c.total.saturating_sub(c.free),
+                total: c.total,
             });
+        let cleanable = match finding {
+            Finding::Looking { .. } => None,
+            Finding::Found(c) => Some(c),
+            Finding::Nothing => Some(Cleanable::default()),
+        };
+        let owner = self.shown.as_ref().and_then(|s| s.owners.first().cloned());
+        let (slowing, talking) = self.machine(now, cx);
+        let mut answers = [disk_answer(fullest, cleanable, owner.as_ref()), slowing, talking];
+        rank(&mut answers);
+        let answers = self.answers_panel(answers, matches!(finding, Finding::Looking { spinning: true }), cx);
 
         let dash = || SharedString::from("—");
         let indexed = match &self.shown {
@@ -488,7 +527,7 @@ impl Render for DashboardPage {
         };
         let cleanable = match &finding {
             Finding::Looking { .. } => (dash(), Some("not looked yet".into())),
-            Finding::Found { reclaim, count, .. } => (
+            Finding::Found(Cleanable { reclaim, count, .. }) => (
                 format::size(*reclaim).into(),
                 Some(format!("{} Cleanable{}", format::count(*count as u64), if *count == 1 { "" } else { "s" }).into()),
             ),
@@ -550,7 +589,7 @@ impl Render for DashboardPage {
                             ),
                     )
                 })
-                .child(finding_line)
+                .child(answers)
                 .child(kpis)
                 .child(
                     h_flex()
@@ -580,6 +619,66 @@ impl Render for DashboardPage {
 }
 
 impl DashboardPage {
+    /// The three answers, most severe first: the question, the answer, how severe as a bar (— when
+    /// nothing was recorded) and the Module page a click opens, then the ranking rule.
+    fn answers_panel(&self, answers: [Answer; 3], looking: bool, cx: &mut Context<Self>) -> Div {
+        let p = palette(cx);
+        let mut rows = v_flex().mt(px(8.));
+        for (ix, answer) in answers.into_iter().enumerate() {
+            let module = answer.question.module();
+            let severity = match answer.severity {
+                Some(s) => h_flex()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(60.))
+                            .h(px(6.))
+                            .rounded(px(3.))
+                            .overflow_hidden()
+                            .bg(p.free)
+                            .child(div().h_full().w(relative(s.clamp(0., 1.))).bg(p.accent)),
+                    )
+                    .child(div().w(px(36.)).text_right().text_color(p.text).child(percent(s))),
+                None => h_flex().justify_end().w(px(104.)).text_color(p.muted).child("—"),
+            };
+            let (question, inspect) = (answer.question, answer.inspect);
+            rows = rows.child(
+                h_flex()
+                    .id(("answer", ix))
+                    .min_h(px(ROW_H))
+                    .py(px(6.))
+                    .gap(px(GAP))
+                    .items_center()
+                    .cursor_pointer()
+                    .when(ix > 0, |d| d.border_t_1().border_color(p.rule))
+                    .hover(move |s| s.bg(p.raised))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(Act::Follow(question, inspect.clone()))))
+                    .child(div().w(px(170.)).flex_none().text_color(p.muted).child(answer.question.title()))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(8.))
+                            .items_center()
+                            .text_color(p.text)
+                            .when(looking && answer.question == Question::Disk, |d| {
+                                d.child(Spinner::new().with_size(Size::Small).color(p.muted))
+                            })
+                            .child(div().min_w_0().child(answer.text)),
+                    )
+                    .child(div().flex_none().child(severity))
+                    // The whole row follows the answer; the link names where to.
+                    .child(link(("follow", ix), module, cx).w(px(84.)).flex_none().text_right()),
+            );
+        }
+        panel(cx)
+            .text_size(px(FS_BODY))
+            .child(section_title("What needs attention", cx))
+            .child(rows)
+            .child(div().mt(px(8.)).child(caption(RANKING_RULE, cx)))
+    }
+
     /// One row per Location: name (and its kind when not a local Volume), used bar, figures,
     /// Last Synced. A click shows it in the Inspector.
     fn locations_panel(&self, locations: &[Location], now: i64, cx: &mut Context<Self>) -> impl IntoElement {
@@ -984,19 +1083,5 @@ mod bench {
             }
         })
         .detach();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::finding_sentence;
-
-    #[::core::prelude::v1::test]
-    fn the_finding_line_states_the_administrator_share_only_when_there_is_one() {
-        assert_eq!(finding_sentence(2048, 3, 0), "2.00 KB can be cleaned up across 3 Cleanables.");
-        assert_eq!(
-            finding_sentence(4096, 1, 1024),
-            "4.00 KB can be cleaned up across 1 Cleanable; 1.00 KB of it needs administrator."
-        );
     }
 }

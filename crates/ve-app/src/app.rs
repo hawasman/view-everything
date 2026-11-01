@@ -7,6 +7,7 @@ use crate::categories::CategoryPanel;
 use crate::cleaner::{CleanerPage, ShowInBrowse};
 use crate::compare::{Compare, CompareEvent, moment_of, nearest_snapshot};
 use crate::dashboard::{Act, DashboardPage};
+use crate::dashboard_summary::Question;
 use crate::duplicates::{DuplicatesPanel, InspectGroup};
 use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
@@ -252,7 +253,7 @@ impl Shell {
         });
         let dashboard = cx.new(|cx| {
             let mut page = DashboardPage::new(
-                engine.shared.clone(),
+                engine.clone(),
                 cleaner.clone(),
                 trash.clone(),
                 categories.clone(),
@@ -1237,12 +1238,34 @@ impl Shell {
             Act::OpenCleaner => self.page = Page::Cleaner,
             Act::Inspect(what) => self.inspected = Some(what.clone()),
             Act::StartLive => Host::start_live(cx),
+            Act::Follow(question, inspect) => self.follow(*question, inspect.clone(), window, cx),
             Act::SaveQuery(text) => {
                 self.settings_page
                     .update(cx, |page, cx| page.apply(|s| s.recent_query = text.clone(), cx));
             }
         }
         cx.notify();
+    }
+
+    /// Opens the Module page an Overview answer is about, with what it names in the Inspector.
+    fn follow(&mut self, question: Question, inspect: Option<Inspected>, window: &mut Window, cx: &mut Context<Self>) {
+        let page = match question {
+            Question::Disk => Page::Browse,
+            Question::Slowing => Page::Performance,
+            Question::Talking => Page::Network,
+        };
+        self.go(page, cx);
+        match inspect {
+            // Show in Browse, as the Inspector's own button does.
+            Some(Inspected::Entry(id)) => {
+                self.show_in_browse(id, window, cx);
+                self.inspected = Some(Inspected::Entry(id));
+            }
+            // The busiest process of the hour, if it is still in the Moment's table.
+            Some(Inspected::Process(id)) => self.inspect_process(id, cx),
+            Some(other) => self.inspected = Some(other),
+            None => {}
+        }
     }
 
     /// The one-line bar under the Explorer: sync state, Last Synced, problems, totals, Trash.

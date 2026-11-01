@@ -25,6 +25,9 @@
 - The page says that per-app traffic needs administrator rights and is not available yet; nothing prompts for them.
 - **Connections** on Network: every open TCP and UDP connection (IPv4 and IPv6) with its local and remote address, state and the process holding it; "unknown" where that process cannot be read (another user's), never "nobody". Click one to open its process in the Inspector, then **Show on Performance** to find it in the process table. Read every two seconds; Live lists them all, a past second keeps 200, open conversations first. [More](docs/guide/network.md#connections)
 
+### Overview
+- The **Overview** opens with three answers, the most severe first: what is filling the disk (how full the fullest Location is, what can be cleaned up, the largest Owner), what is slowing the machine (CPU and memory over the last hour, the busiest process) and what is talking on the network (the busiest interface over the last hour). The page states the ranking rule under them. Click one to open its page: Browse with the largest Owner in the Inspector, Performance with the busiest process, or Network. A Module with no samples says "not recorded" and ranks last; it never reads as zero. The Cleanable finding line is now part of the disk answer, administrator share included.
+
 ### Query modifiers
 - New Query modifiers: `kind:file` and `kind:folder`; `is:cleanable` (what the Cleaner found), `is:duplicate` (same as `dupe:`) and `is:offline` (Entries on an Offline Volume); `at:/path` (a folder and everything below it); `since:7d`, `since:12h`, `since:2026-10-01` (files modified since then). They combine with text, `|`, `!` and every other modifier.
 - A Query that does not parse says why inside the Query box, naming the modifier.
