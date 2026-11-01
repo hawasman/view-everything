@@ -33,6 +33,11 @@ pub fn find_helper() -> Option<PathBuf> {
     (cfg!(debug_assertions) && beside.is_file()).then_some(beside)
 }
 
+/// Whether a helper that ended with `code` was refused at its authentication prompt.
+pub fn refused(code: Option<i32>) -> bool {
+    matches!(code, Some(126 | 127))
+}
+
 /// What a helper that ended without being asked to means for the user.
 pub fn describe_exit(code: Option<i32>) -> String {
     match code {
@@ -54,13 +59,13 @@ pub struct Helper {
 impl Helper {
     /// Asks for authentication with pkexec and starts `program` on `mounts`. Changes go to `events`.
     /// `ready` is called once the helper is watching (after authentication). `ended` is called,
-    /// with what to tell the user, if the helper ends on its own.
+    /// with its exit code ([`describe_exit`], [`refused`]), if the helper ends on its own.
     pub fn start(
         program: &Path,
         mounts: &[PathBuf],
         events: SyncSender<Event>,
         ready: impl FnOnce() + Send + 'static,
-        ended: impl FnOnce(String) + Send + 'static,
+        ended: impl FnOnce(Option<i32>) + Send + 'static,
     ) -> io::Result<Helper> {
         let mut command = Command::new("pkexec");
         command.arg(program).args(mounts);
@@ -71,7 +76,7 @@ impl Helper {
         mut command: Command,
         events: SyncSender<Event>,
         ready: impl FnOnce() + Send + 'static,
-        ended: impl FnOnce(String) + Send + 'static,
+        ended: impl FnOnce(Option<i32>) + Send + 'static,
     ) -> io::Result<Helper> {
         let mut child: Child = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
         let stdin = child.stdin.take();
@@ -95,7 +100,7 @@ impl Helper {
             );
             let code = child.wait().ok().and_then(|s| s.code());
             if !flag.load(Ordering::Relaxed) {
-                ended(describe_exit(code));
+                ended(code);
             }
         })?;
         Ok(Helper {
@@ -217,19 +222,21 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         let mut sh = Command::new("sh");
         sh.args(["-c", "printf '/x/y\\0'; exit 126"]);
-        let _helper = Helper::spawn(sh, tx, || (), move |why| done_tx.send(why).unwrap()).unwrap();
-        assert_eq!(done_rx.recv().unwrap(), "Authentication was dismissed");
+        let _helper = Helper::spawn(sh, tx, || (), move |code| done_tx.send(code).unwrap()).unwrap();
+        let code = done_rx.recv().unwrap();
+        assert_eq!(describe_exit(code), "Authentication was dismissed");
+        assert!(refused(code));
         assert_eq!(rx.recv().unwrap(), Event::Changed("/x/y".into()));
     }
 
     #[test]
     fn stopping_closes_stdin_and_is_not_reported_as_a_failure() {
         let (tx, rx) = channel();
-        let (done_tx, done_rx) = mpsc::channel::<String>();
+        let (done_tx, done_rx) = mpsc::channel::<Option<i32>>();
         let mut sh = Command::new("sh");
         // Like the helper: runs until the end of stdin, and passes on what it was told to watch.
         sh.args(["-c", "while read verb path; do printf '%s\\0' \"$path\"; done"]);
-        let helper = Helper::spawn(sh, tx, || (), move |why| done_tx.send(why).unwrap()).unwrap();
+        let helper = Helper::spawn(sh, tx, || (), move |code| done_tx.send(code).unwrap()).unwrap();
         helper.watch(&["/mnt/usb".into()]);
         assert_eq!(rx.recv().unwrap(), Event::Changed("/mnt/usb".into()));
         helper.stop();

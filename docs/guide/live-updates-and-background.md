@@ -52,6 +52,10 @@ On Linux the tray needs a StatusNotifierItem host. GNOME needs the AppIndicator 
 
 Turning a switch off removes what it installed: the autostart entry, the scheduled task or the LaunchAgent.
 
+Only one copy of the app runs per account, on every platform. Launching it again asks the running copy to show its window and exits; on Windows that conversation goes over a named pipe only your account can open (see [the app's socket](command-line.md#the-apps-socket)). A login start that finds the app already running just exits.
+
 ## Permissions
 
 The Live updates helper and start at login are **Permissions**: approvals beyond the app's core features. **Settings → Permissions** lists each one you granted and when; one granted before v0.3.0 says "Granted before this version". Its switch revokes it fully, the same as switching it off where it was granted: the helper stops and is not started again until you grant it again, and the login entry is removed. The list is kept in `settings.toml`.
+
+Dismissing the helper's password prompt, or failing it, drops the helper's Permission: the Live updates switch turns back off and the app does not ask again at its next start.

@@ -1,7 +1,8 @@
 //! Permissions (CONTEXT.md): the approvals the user granted, one list kept in the settings.
-//! Granting happens where the user is asked (the app's Settings), after what it allows has been
-//! set up; revoking can come from any client of the handle, so a revoke undoes the Permission
-//! fully here: it stops the Live updates helper, or has the host remove the login entry.
+//! Granting happens where the user is asked (the app's Settings); the Live updates helper is
+//! asked for once granted, and a refused authentication forgets it again. Revoking can come from
+//! any client of the handle, so a revoke undoes the Permission fully here: it stops the Live
+//! updates helper, or has the host remove the login entry.
 
 use crate::Engine;
 use parking_lot::Mutex;
@@ -77,6 +78,27 @@ pub struct Store {
     saving: Mutex<()>,
 }
 
+impl Store {
+    /// Forgets the Permission of `kind` without undoing anything: what it allowed was refused
+    /// where it was asked for (the helper's authentication prompt).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn forget(&self, kind: Kind) -> Result<(), String> {
+        self.list.lock().retain(|p| p.kind != kind);
+        self.save()
+    }
+
+    /// Stores the list as it is now. Saves run one at a time, each reading the list once it
+    /// runs, so a slower save never stores an older list over a newer one.
+    fn save(&self) -> Result<(), String> {
+        let Some(hooks) = self.hooks.lock().clone() else {
+            return Ok(());
+        };
+        let _saving = self.saving.lock();
+        let list = self.list.lock().clone();
+        (hooks.save)(&list).map_err(|e| format!("Could not save the Permissions: {e}"))
+    }
+}
+
 /// The Permissions through the [`Engine`] handle (`permissions.list`, `permissions.revoke`).
 pub struct Permissions<'a> {
     engine: &'a Engine,
@@ -128,7 +150,7 @@ impl Permissions<'_> {
                 granted_at: Some(at),
             });
         }
-        self.save()
+        self.store().save()
     }
 
     /// Undoes the Permission of `kind` on `subject` and forgets it. When the undoing fails the
@@ -148,17 +170,6 @@ impl Permissions<'_> {
             }
         }
         self.store().list.lock().retain(|p| !held(p));
-        self.save()
-    }
-
-    /// Stores the list as it is now. Saves run one at a time, each reading the list once it
-    /// runs, so a slower save never stores an older list over a newer one.
-    fn save(&self) -> Result<(), String> {
-        let Some(hooks) = self.store().hooks.lock().clone() else {
-            return Ok(());
-        };
-        let _saving = self.store().saving.lock();
-        let list = self.list();
-        (hooks.save)(&list).map_err(|e| format!("Could not save the Permissions: {e}"))
+        self.store().save()
     }
 }

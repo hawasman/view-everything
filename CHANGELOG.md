@@ -60,13 +60,14 @@
 ### Engine
 - The engine (the Index, Tasks, Locations, Live updates, Sync scheduling and Snapshots) is its own crate, `ve-engine`, with no GUI in it ([ADR-0016](docs/adr/0016-engine-library-in-the-tray-process-with-a-local-socket.md)). The app hosts it and behaves as before.
 - A finished Sync's Task shows the Entries it read, as its result says; a quick Sync used to show 0.
-- The app listens on a local socket only your account can open (`$XDG_RUNTIME_DIR/view-everything/engine.sock`; `VE_SOCKET` overrides it), speaking newline-delimited JSON with a version handshake. Windows has no socket yet.
+- The app listens on a local socket only your account can open (`$XDG_RUNTIME_DIR/view-everything/engine.sock`; `VE_SOCKET` overrides it), speaking newline-delimited JSON with a version handshake. On Windows it is a named pipe only your account can open (`\\.\pipe\view-everything-<your SID>-engine`). A second launch shows the running window and exits on both platforms, and `ve` gives up on an app that does not answer within 5 seconds.
 - Launching the app while it runs brings up the running window (from the tray too) instead of starting a second engine.
 - `ve find`, `ve top` and `ve export` ask the running app, so they see changes from seconds ago, and `dupe:`, `is:duplicate`, `is:cleanable` and `is:offline` work there. With the app closed, `ve` reads the saved Index and says so on stderr.
 
 ### Permissions
 - **Settings → Permissions** lists every Permission you granted (the Live updates helper, start at login) with when you granted it. Switching one off revokes it fully: the helper stops and is not started again, the login entry is removed. The Live updates and Start at login switches read and change the same list.
 - Settings files are now version 1. A helper or start at login you had switched on is kept, as a Permission "granted before this version".
+- Dismissing or failing the helper's password prompt drops its Permission and turns the Live updates switch back off, so a prompt you said no to is not asked again at the next start.
 
 ## v0.2.1
 
