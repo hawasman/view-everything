@@ -225,13 +225,16 @@ impl Host {
         }
     }
 
-    /// Starts the Live updates a login start held back.
+    /// Starts the Live updates a login start held back, if the helper's Permission is still held
+    /// (another client may have revoked it meanwhile).
     pub fn start_live(cx: &mut App) {
         let host = cx.global_mut::<Host>();
         if !std::mem::replace(&mut host.live_paused, false) {
             return;
         }
-        host.engine.set_live_helper(true);
+        if host.engine.permissions().has(Kind::LiveHelper) {
+            host.engine.set_live_helper(true);
+        }
         (host.repaint)();
     }
 

@@ -10,8 +10,8 @@ use ve_scan::VolumeInfo;
 use ve_core::paths::APP_DIR;
 pub use ve_core::paths::load_categories;
 
-/// What `version` a settings file written now carries. Version 1 (v0.3.0) replaced the
-/// `live_helper` and `start_at_login` booleans with Permission entries.
+/// What `version` a settings file written now carries. Version 1 replaced the `live_helper` and
+/// `start_at_login` booleans with Permission entries.
 pub const VERSION: u32 = 1;
 
 /// User choices that outlive a session, stored as `settings.toml`.
@@ -431,26 +431,44 @@ impl Settings {
         }
     }
 
-    pub fn save(&self) -> Result<(), String> {
-        let path = settings_path().ok_or("no configuration folder on this system")?;
-        let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
-        write_file(&path, &text).map_err(|e| format!("{}: {e}", path.display()))
+    /// Saves the settings with the Permissions `permissions` returns, read while no other save
+    /// can run: a Permission the Engine dropped meanwhile is never written back.
+    pub fn save(&mut self, permissions: impl FnOnce() -> Vec<Permission>) -> Result<(), String> {
+        let _writing = WRITING.lock();
+        self.permissions = permissions();
+        self.write()
     }
 
     /// Writes `permissions` into the settings file, leaving the rest as it is there. A file that
     /// cannot be read is left alone rather than replaced with defaults.
     pub fn save_permissions(permissions: &[Permission]) -> Result<(), String> {
+        let _writing = WRITING.lock();
         let mut settings = Settings::load()?;
         settings.permissions = permissions.to_vec();
-        settings.save()
+        settings.write()
+    }
+
+    fn write(&self) -> Result<(), String> {
+        let path = settings_path().ok_or("no configuration folder on this system")?;
+        let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
+        write_file(&path, &text).map_err(|e| format!("{}: {e}", path.display()))
     }
 }
 
+/// Held while `settings.toml` is written. The Settings page and the Engine (through
+/// [`Settings::save_permissions`]) both write it, from different threads.
+static WRITING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Replaces `path` whole, so a reader never sees half a file. A symlinked file is replaced where
+/// the link points.
 fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    fs::write(path, text)
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let partial = path.with_extension("toml.partial");
+    fs::write(&partial, text)?;
+    fs::rename(&partial, &path)
 }
 
 fn settings_path() -> Option<PathBuf> {

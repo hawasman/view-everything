@@ -797,12 +797,17 @@ impl SettingsPage {
         self.problem.is_some()
     }
 
-    /// Saves the settings, with the Permissions as the Engine holds them, and tells the window
-    /// what to apply.
+    /// Saves the settings and tells the window what to apply.
     fn commit(&mut self, cx: &mut Context<Self>) {
-        self.settings.permissions = self.engine.permissions().list();
-        self.problem = self.settings.save().err().map(|e| format!("Could not save settings: {e}"));
+        self.save();
         self.emit_changed(cx);
+    }
+
+    /// Writes the settings, with the Permissions as the Engine holds them.
+    fn save(&mut self) {
+        let engine = self.engine.clone();
+        let saved = self.settings.save(|| engine.permissions().list());
+        self.problem = saved.err().map(|e| format!("Could not save settings: {e}"));
     }
 
     fn emit_changed(&mut self, cx: &mut Context<Self>) {
@@ -1174,7 +1179,7 @@ impl SettingsPage {
                         .gap(px(2.))
                         .child(div().font_weight(FontWeight::MEDIUM).child(kind.label()))
                         .child(caption(about, cx))
-                        .child(caption(kind.revoke(), cx)),
+                        .child(caption(kind.revoke_note(), cx)),
                 )
         });
         panel(cx).child(v_flex().gap(px(12.)).children(rows))
@@ -1215,6 +1220,7 @@ impl SettingsPage {
         .detach();
     }
 
+    /// Saves what a grant or revoke left, and says why it failed, if it did.
     fn permission_changed(&mut self, done: Result<(), String>, cx: &mut Context<Self>) {
         self.commit(cx);
         if let Err(why) = done {
@@ -1271,8 +1277,7 @@ impl SettingsPage {
         self.update_status = status;
         self.settings.last_update_check = Some(at);
         // Only the check time changed: nothing for the window to apply.
-        self.settings.permissions = self.engine.permissions().list();
-        self.problem = self.settings.save().err().map(|e| format!("Could not save settings: {e}"));
+        self.save();
         cx.notify();
     }
 

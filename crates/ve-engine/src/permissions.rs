@@ -35,8 +35,8 @@ impl Kind {
         }
     }
 
-    /// What revoking undoes.
-    pub fn revoke(self) -> &'static str {
+    /// What revoking undoes, as Settings says it.
+    pub fn revoke_note(self) -> &'static str {
         match self {
             Kind::LiveHelper => "Revoking stops the helper; it is not started again until granted again",
             Kind::StartAtLogin => "Revoking removes the login entry",
@@ -74,6 +74,7 @@ pub struct Hooks {
 pub struct Store {
     list: Mutex<Vec<Permission>>,
     hooks: Mutex<Option<Arc<Hooks>>>,
+    saving: Mutex<()>,
 }
 
 /// The Permissions through the [`Engine`] handle (`permissions.list`, `permissions.revoke`).
@@ -82,6 +83,7 @@ pub struct Permissions<'a> {
 }
 
 impl Engine {
+    /// The Permissions the user granted, and their grant and revoke.
     pub fn permissions(&self) -> Permissions<'_> {
         Permissions { engine: self }
     }
@@ -97,6 +99,7 @@ impl Permissions<'_> {
         *self.store().list.lock() = list;
     }
 
+    /// Gives the engine what the host does for it: remove the login entry, store the list.
     pub fn set_hooks(&self, hooks: Hooks) {
         *self.store().hooks.lock() = Some(Arc::new(hooks));
     }
@@ -129,7 +132,8 @@ impl Permissions<'_> {
     }
 
     /// Undoes the Permission of `kind` on `subject` and forgets it. When the undoing fails the
-    /// Permission stays, and the error says why.
+    /// Permission stays, and the error says why; when only storing the shorter list fails, the
+    /// Permission is revoked and the error says the list was not saved.
     pub fn revoke(&self, kind: Kind, subject: &str) -> Result<(), String> {
         let held = |p: &Permission| p.kind == kind && p.subject == subject;
         if !self.store().list.lock().iter().any(held) {
@@ -147,10 +151,13 @@ impl Permissions<'_> {
         self.save()
     }
 
+    /// Stores the list as it is now. Saves run one at a time, each reading the list once it
+    /// runs, so a slower save never stores an older list over a newer one.
     fn save(&self) -> Result<(), String> {
         let Some(hooks) = self.store().hooks.lock().clone() else {
             return Ok(());
         };
+        let _saving = self.store().saving.lock();
         let list = self.list();
         (hooks.save)(&list).map_err(|e| format!("Could not save the Permissions: {e}"))
     }
