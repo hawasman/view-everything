@@ -2462,7 +2462,16 @@ impl Shell {
             Inspected::Process(id) => {
                 let inspecting = self.process.as_ref().filter(|p| p.id == *id)?;
                 let table = self.engine.perf.processes(self.moment);
-                crate::performance::inspector_panel(inspecting, table.as_deref(), now)
+                let mut panel = crate::performance::inspector_panel(inspecting, table.as_deref(), now)?;
+                if self.page != Page::Performance {
+                    let id = *id;
+                    panel.actions.push(Item::new(
+                        "inspector-process-performance",
+                        "Show on Performance",
+                        cx.listener(move |this, _, _, cx| this.show_process_on_performance(id, cx)),
+                    ));
+                }
+                Some(panel)
             }
             Inspected::Startup(key) => Some(crate::apps::startup_panel(&self.apps.read(cx).startup_item(key, cx)?)),
         }
@@ -2488,6 +2497,22 @@ impl Shell {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Opens Performance with process `id` selected in its table, scrolled to the middle of it
+    /// (the table re-sorts as readings change, so the middle leaves it room), and still in the
+    /// Inspector.
+    fn show_process_on_performance(&mut self, id: ve_engine::perf::ProcessId, cx: &mut Context<Self>) {
+        self.go(Page::Performance, cx);
+        self.inspected = Some(Inspected::Process(id));
+        let table = self.engine.perf.processes(self.moment);
+        self.processes.update(cx, |t, cx| {
+            t.delegate_mut().show(table, Some(id));
+            if let Some(row) = t.delegate().row_of(id) {
+                t.vertical_scroll_handle.scroll_to_item(row, ScrollStrategy::Center);
+            }
+            cx.notify();
+        });
     }
 
     /// A Duplicate group: size, copies and wasted space; Open, Show in Browse and Trash others…
@@ -2864,7 +2889,21 @@ impl Render for Shell {
                     Moment::At(time) => time,
                 };
                 let hour = self.engine.net.summary(end - ve_engine::perf::SPAN + 1, end);
-                crate::network::page(sample.as_ref(), &hour, self.moment, now, cx)
+                let selected = match &self.inspected {
+                    Some(Inspected::Process(id)) => Some(*id),
+                    _ => None,
+                };
+                let shell = cx.weak_entity();
+                let on_inspect: crate::performance::OnInspect = Rc::new(move |id, cx| {
+                    let _ = shell.update(cx, |this, cx| this.inspect_process(id, cx));
+                });
+                let processes = self.engine.perf.processes(self.moment);
+                let inspect = crate::network::Inspect {
+                    selected,
+                    processes: processes.as_deref(),
+                    on_inspect: &on_inspect,
+                };
+                crate::network::page(sample.as_ref(), &hour, self.moment, now, &inspect, cx)
             }
             Page::Apps => {
                 let shown = match &self.inspected {
