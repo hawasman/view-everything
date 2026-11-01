@@ -25,7 +25,7 @@ Detection runs at the end of every Sync and Catch-up of a Location, inside the s
 | Windows | `C:\Windows` | System |
 | Windows | `Program Files` and `Program Files (x86)`: `\<App>` and `\<Vendor>\<App>`; `AppData\Local\Programs\<App>` | Program |
 | Linux | `/usr`, `/etc`, `/boot`, `/var/lib`, `/var/cache`, named after your distribution | System |
-| Linux | a folder wholly owned by one pacman package, named after the package | System |
+| Linux | a folder wholly owned by one pacman or dpkg package, named after the package | System |
 | Linux | `/opt/<app>`; Flatpak apps in `/var/lib/flatpak/app`, `~/.local/share/flatpak/app` and `~/.var/app` | Program |
 | macOS | `/System`, `/usr` | System |
 | macOS | `.app` bundles in `/Applications` and `~/Applications` | Program |
@@ -40,6 +40,7 @@ A folder found by a platform convention and by a project marker keeps the platfo
 - **Colour by**, under the Treemap's title, switches the tiles between **Category** and **Owner kind**. The choice is remembered. Under Owner kind the legend shows the four kinds and "No Owner" (grey).
 - The Overview's **Largest Owners** panel lists the 5 Owners with the largest Folder Size. Click one to show its Owner root (its largest, when it has several) in the Inspector. The panel is hidden while the Index has no Owners.
 - [CSV export](snapshots-and-export.md#export) has `Owner` and `Owner kind` columns.
+- The [Apps](apps.md) page sizes each installed program from its Owner roots.
 
 ## Searching
 

@@ -2,6 +2,7 @@
 //! updates, Sync scheduling and Snapshots, and the Views computed for a Query. It knows nothing
 //! of a GUI; its clients hold an [`Engine`] and are told to redraw through [`Repaint`].
 
+pub mod apps;
 pub mod format;
 mod live;
 pub mod perf;
@@ -194,6 +195,8 @@ pub struct Engine {
     newest_query: Arc<AtomicU64>,
     indexer: Mutex<Option<JoinHandle<()>>>,
     pub perf: perf::Perf,
+    /// The Apps Module's installed programs (`apps.list`).
+    pub apps: apps::Apps,
 }
 
 impl Engine {
@@ -272,6 +275,7 @@ impl Engine {
             queries,
             newest_query,
             indexer: Mutex::new(Some(indexer)),
+            apps: apps::Apps::new(),
         }
     }
 

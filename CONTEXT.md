@@ -130,8 +130,12 @@ The column of Modules and their pages at the left of the window, with the Work b
 _Avoid_: sidebar, menu
 
 **Inspector**:
-The pane at the right that shows whatever is selected (an Entry, a Location, a Task, a group of Duplicates) with its facts and the actions it allows. It follows the selection; Esc clears it.
+The pane at the right that shows whatever is selected (an Entry, a Location, a Task, a group of Duplicates, an installed program) with its facts and the actions it allows. It follows the selection; Esc clears it.
 _Avoid_: details pane, properties, selection panel
+
+**Apps**:
+The page listing the installed programs (system packages, Flatpaks, Steam games, programs under `/opt`) with each one's On-disk Size: the Folder Size of its Owner roots, or "—" when none of them is indexed. Shown in the rail once any program is known.
+_Avoid_: programs page, software list
 
 **Timeline dock**:
 The strip at the foot of the window that holds the Moment and lets the user scrub each Module's Timeline or Snapshots.

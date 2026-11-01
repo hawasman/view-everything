@@ -25,6 +25,8 @@ pub enum Inspected {
     Task(u64),
     /// A group of Duplicates, by its first copy.
     Duplicates(EntryId),
+    /// An installed program, by its key (`ve_engine::apps::App::key`).
+    App(String),
 }
 
 /// The width of the pane.
