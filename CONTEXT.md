@@ -145,7 +145,7 @@ The one point in time the whole window shows: Live, or a chosen time. Each Modul
 _Avoid_: date, time cursor, position
 
 **Launcher**:
-The window the global hotkey opens anywhere on the desktop: a single line that finds Entries, installed apps and app actions by name, keyboard only. Not the Query box, which is the Files Module's search.
+The window the global hotkey (or the tray menu) opens anywhere on the desktop, with or without the main window: a single line that finds Entries and installed programs by name, keyboard only. Not the Query box, which is the Files Module's search.
 _Avoid_: search (for this), spotlight, palette
 
 **Work block**:

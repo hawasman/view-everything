@@ -129,80 +129,16 @@ impl Keys {
                 mods |= m;
             }
         }
-        const LETTERS: [Code; 26] = [
-            Code::KeyA,
-            Code::KeyB,
-            Code::KeyC,
-            Code::KeyD,
-            Code::KeyE,
-            Code::KeyF,
-            Code::KeyG,
-            Code::KeyH,
-            Code::KeyI,
-            Code::KeyJ,
-            Code::KeyK,
-            Code::KeyL,
-            Code::KeyM,
-            Code::KeyN,
-            Code::KeyO,
-            Code::KeyP,
-            Code::KeyQ,
-            Code::KeyR,
-            Code::KeyS,
-            Code::KeyT,
-            Code::KeyU,
-            Code::KeyV,
-            Code::KeyW,
-            Code::KeyX,
-            Code::KeyY,
-            Code::KeyZ,
-        ];
-        const DIGITS: [Code; 10] = [
-            Code::Digit0,
-            Code::Digit1,
-            Code::Digit2,
-            Code::Digit3,
-            Code::Digit4,
-            Code::Digit5,
-            Code::Digit6,
-            Code::Digit7,
-            Code::Digit8,
-            Code::Digit9,
-        ];
-        const FS: [Code; 24] = [
-            Code::F1,
-            Code::F2,
-            Code::F3,
-            Code::F4,
-            Code::F5,
-            Code::F6,
-            Code::F7,
-            Code::F8,
-            Code::F9,
-            Code::F10,
-            Code::F11,
-            Code::F12,
-            Code::F13,
-            Code::F14,
-            Code::F15,
-            Code::F16,
-            Code::F17,
-            Code::F18,
-            Code::F19,
-            Code::F20,
-            Code::F21,
-            Code::F22,
-            Code::F23,
-            Code::F24,
-        ];
-        let code = match self.key {
-            Key::Letter(b) => LETTERS[usize::from(b - b'a')],
-            Key::Digit(b) => DIGITS[usize::from(b - b'0')],
-            Key::F(n) => FS[usize::from(n - 1)],
-            Key::Space => Code::Space,
-            Key::Enter => Code::Enter,
-            Key::Tab => Code::Tab,
+        // The W3C UI Events code names, which `Code` parses.
+        let name = match self.key {
+            Key::Letter(b) => format!("Key{}", b.to_ascii_uppercase() as char),
+            Key::Digit(b) => format!("Digit{}", b as char),
+            Key::F(n) => format!("F{n}"),
+            Key::Space => "Space".to_owned(),
+            Key::Enter => "Enter".to_owned(),
+            Key::Tab => "Tab".to_owned(),
         };
+        let code = name.parse::<Code>().expect("every Key names a Code");
         HotKey::new(Some(mods), code)
     }
 }
@@ -231,9 +167,9 @@ impl fmt::Display for Keys {
 pub enum Status {
     /// Waiting for the desktop's answer.
     Pending,
-    /// Pressing `trigger` opens the Launcher. `trigger` is what the desktop reports, which on
-    /// Wayland may differ from what was asked for.
-    Active { trigger: String },
+    /// Pressing `trigger` opens the Launcher. `trigger` is what the desktop reports; on Wayland
+    /// it may differ from what was asked for (`as_asked` is false then).
+    Active { trigger: String, as_asked: bool },
     /// The desktop would not give it, with its reason.
     Refused(String),
 }
@@ -247,11 +183,11 @@ enum Backend {
         key: HotKey,
     },
     /// Bound through the GlobalShortcuts portal: dropping the task stops listening, and the
-    /// session (once bound) is closed on release so the desktop forgets the binding.
+    /// session, kept as soon as it exists, is closed on release so the desktop forgets the binding.
     #[cfg(target_os = "linux")]
     Portal {
         _listening: Task<()>,
-        session: Rc<std::cell::RefCell<Option<portal::Session>>>,
+        session: portal::Kept,
     },
 }
 
@@ -339,21 +275,24 @@ impl Shortcut {
             });
             return;
         }
-        self.status = Status::Active { trigger: keys.to_string() };
+        self.status = Status::Active {
+            trigger: keys.to_string(),
+            as_asked: true,
+        };
         self.backend = Backend::Grab { manager, key };
         listen_for_grabs(cx);
     }
 
     #[cfg(target_os = "linux")]
     fn bind_portal(&mut self, keys: Keys, cx: &mut Context<Self>) {
-        let trigger = keys.portal_trigger();
-        let session = Rc::new(std::cell::RefCell::new(None));
+        let session = portal::Kept::default();
         let kept = session.clone();
         let listening = cx.spawn(async move |this, cx| {
-            let (presses, status) = match portal::bind(&trigger).await {
-                Ok(bound) => {
-                    *kept.borrow_mut() = Some(bound.session);
-                    (Some(bound.presses), Status::Active { trigger: bound.trigger })
+            let (presses, status) = match portal::bind(&keys.portal_trigger(), &kept).await {
+                Ok((presses, trigger)) => {
+                    // The desktop may spell the trigger its own way; read back, it may still be the one asked for.
+                    let as_asked = Keys::parse(&trigger) == Ok(keys);
+                    (Some(presses), Status::Active { trigger, as_asked })
                 }
                 Err(reason) => (None, Status::Refused(reason)),
             };
@@ -417,7 +356,9 @@ mod portal {
     use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
     use futures_lite::Stream;
     pub use futures_lite::StreamExt;
+    use std::cell::RefCell;
     use std::pin::Pin;
+    use std::rc::Rc;
 
     const ID: &str = "launcher";
     /// Who the portal is told the app is. A program not installed as a Flatpak or Snap has no
@@ -426,15 +367,16 @@ mod portal {
 
     pub type Session = ashpd::desktop::Session<GlobalShortcuts>;
 
-    /// A bound shortcut: its session, its presses, and the trigger the desktop chose.
-    pub struct Bound {
-        pub session: Session,
-        pub presses: Pin<Box<dyn Stream<Item = ()>>>,
-        pub trigger: String,
-    }
+    /// Where a session is kept from the moment it exists, so a binding given up while the
+    /// desktop still asks (a dialog open) is closed too.
+    pub type Kept = Rc<RefCell<Option<Rc<Session>>>>;
 
-    /// Binds the Launcher's shortcut, preferring `trigger`, or says why none was bound.
-    pub async fn bind(trigger: &str) -> Result<Bound, String> {
+    /// The presses of a bound shortcut.
+    pub type Presses = Pin<Box<dyn Stream<Item = ()>>>;
+
+    /// Binds the Launcher's shortcut, preferring `trigger`, keeping its session in `kept`.
+    /// Returns its presses and the trigger the desktop chose, or why none was bound.
+    pub async fn bind(trigger: &str, kept: &Kept) -> Result<(Presses, String), String> {
         let refused = |e: ashpd::Error| format!("The desktop refused a global shortcut ({e})");
         // A connection of its own: the portal ties an app id to a connection once, and GPUI's
         // connection may have talked to the portal already.
@@ -447,7 +389,8 @@ mod portal {
         let portal = GlobalShortcuts::with_connection(connection)
             .await
             .map_err(|e| format!("The desktop offers no global shortcuts ({e})"))?;
-        let session = portal.create_session(Default::default()).await.map_err(refused)?;
+        let session = Rc::new(portal.create_session(Default::default()).await.map_err(refused)?);
+        *kept.borrow_mut() = Some(session.clone());
         let shortcut = NewShortcut::new(ID, "Open the View Everything Launcher").preferred_trigger(Some(trigger));
         let bound = portal
             .bind_shortcuts(&session, &[shortcut], None, Default::default())
@@ -470,11 +413,7 @@ mod portal {
             .map_err(refused)?
             .filter(|a| a.shortcut_id() == ID)
             .map(|_| ());
-        Ok(Bound {
-            session,
-            presses: Box::pin(presses),
-            trigger,
-        })
+        Ok((Box::pin(presses), trigger))
     }
 }
 

@@ -158,7 +158,7 @@ impl Host {
         // Closing the main window quits unless the app stays in the tray; the Launcher closing
         // never does.
         cx.on_window_closed(|cx, _| {
-            let Some(main) = cx.global::<Host>().main.as_ref().map(|(window, _)| *window) else {
+            let Some(main) = cx.global::<Host>().main_window() else {
                 return;
             };
             if cx.windows().contains(&main) {
@@ -218,6 +218,11 @@ impl Host {
                 cx.activate(true);
             }
         }
+    }
+
+    /// The main window, while one is open.
+    fn main_window(&self) -> Option<AnyWindowHandle> {
+        self.main.as_ref().map(|(window, _)| *window)
     }
 
     /// Quits with the window and tray icon gone first: saving the Index can take seconds, and
@@ -295,7 +300,7 @@ impl Host {
 
     /// Shows the main window: raises the open one or builds a new one bound to this host.
     pub fn open_window(cx: &mut App) -> Option<AnyWindowHandle> {
-        if let Some(window) = cx.global::<Host>().main.as_ref().map(|(window, _)| *window)
+        if let Some(window) = cx.global::<Host>().main_window()
             && window.update(cx, |_, window, _| window.activate_window()).is_ok()
         {
             return Some(window);

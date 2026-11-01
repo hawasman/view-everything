@@ -126,16 +126,16 @@ fn main() {
 /// `--launcher`: asks the running app to open its Launcher. With none running (nothing answers
 /// on the engine socket), opens a Launcher of its own that says so, and exits when it closes.
 fn launcher_only() {
-    use ve_engine::socket::{self, Client, Error};
+    use ve_engine::socket::{self, Client};
     if let Some(path) = socket::path() {
         match Client::connect(&path).and_then(|mut app| app.call("launcher", Default::default())) {
             Ok(_) => return,
-            Err(Error::Refused(reason)) => {
-                eprintln!("Another version of View Everything is running ({reason}); quit it first.");
+            Err(e) if e.is_not_running() => {}
+            // Something answers (another version, a hung app): not a case for "not running".
+            Err(e) => {
+                eprintln!("View Everything is running but did not open its Launcher: {e}");
                 std::process::exit(1)
             }
-            Err(e) if !e.is_not_running() => eprintln!("View Everything did not answer: {e}"),
-            Err(_) => {}
         }
     }
     let settings = Settings::load().unwrap_or_default();

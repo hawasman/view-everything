@@ -113,7 +113,7 @@ fn matches_rank_name_starts_then_word_starts_then_the_rest_newest_first_and_mark
     let by_name = |name: &str| found.iter().find(|m| m.name == name).unwrap();
     assert_eq!(by_name("Reports").kind, Kind::Folder);
     assert_eq!(by_name("report.txt").kind, Kind::File);
-    assert_eq!(Path::new(&by_name("report.txt").path), fixture.path().join("here/notes/report.txt"));
+    assert_eq!(by_name("report.txt").path, fixture.path().join("here/notes/report.txt"));
     assert!(by_name("old-report.md").offline, "away is not mounted");
     assert!(found.iter().filter(|m| m.name != "old-report.md").all(|m| !m.offline));
     engine.shutdown();

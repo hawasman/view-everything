@@ -7,6 +7,7 @@ use crate::{Engine, Phase};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
+use std::path::{Path, PathBuf};
 use ve_core::{EntryId, Index};
 
 /// The most matches `launch.match` returns.
@@ -26,12 +27,18 @@ pub enum Kind {
 pub struct Match {
     pub kind: Kind,
     pub name: String,
-    /// Full path, lossily made UTF-8.
-    pub path: String,
+    /// Full path. Over the socket it is lossily made UTF-8; in process it is exact, so a name
+    /// that is not UTF-8 still opens.
+    #[serde(serialize_with = "lossy")]
+    pub path: PathBuf,
     /// On an Offline Volume: the path is not there to open.
     pub offline: bool,
     /// On a Remote: the path is the server's, not one this machine can open.
     pub remote: bool,
+}
+
+fn lossy<S: serde::Serializer>(path: &Path, out: S) -> Result<S::Ok, S::Error> {
+    out.serialize_str(&path.to_string_lossy())
 }
 
 /// How well a name matches, best first.
@@ -101,7 +108,7 @@ fn row(index: &Index, id: EntryId) -> Match {
     Match {
         kind: if index.is_dir(id) { Kind::Folder } else { Kind::File },
         name: index.name(id).to_owned(),
-        path: index.path(id).to_string_lossy().into_owned(),
+        path: index.path(id),
         offline: volume.is_some_and(|v| !v.online) && !remote,
         remote,
     }

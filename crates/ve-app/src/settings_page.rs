@@ -1,7 +1,7 @@
 //! The Settings page: which Volumes are indexed, how often they are re-read, and the theme.
 
 use crate::settings::{Settings, ThemeChoice, default_duplicate_exclusions};
-use crate::theme::{self, CONTROL_H, RADIUS_CONTROL, palette};
+use crate::theme::{self, CONTROL_H, FS_SMALL, RADIUS_CONTROL, palette};
 use crate::ui::{ButtonKind, Tone, button, caption, dialog_title, panel, tag};
 use chrono::Local;
 use gpui_kit::component::Disableable as _;
@@ -503,10 +503,10 @@ impl SettingsPage {
                 .placeholder(crate::launcher::DEFAULT_SHORTCUT)
                 .default_value(settings.launcher_shortcut.clone())
         });
-        cx.subscribe_in(&shortcut, window, |this, _, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                this.apply_shortcut(window, cx);
-            }
+        cx.subscribe_in(&shortcut, window, |this, _, event: &InputEvent, window, cx| match event {
+            InputEvent::PressEnter { .. } => this.apply_shortcut(true, window, cx),
+            InputEvent::Blur => this.apply_shortcut(false, window, cx),
+            _ => {}
         })
         .detach();
         // The desktop answers a shortcut request later (Wayland).
@@ -1170,17 +1170,15 @@ impl SettingsPage {
         let p = palette(cx);
         let status = cx.global::<crate::host::Host>().shortcut.read(cx).status().clone();
         let line = match &self.shortcut_error {
-            Some(error) => div().text_xs().text_color(p.negative).child(error.clone()),
+            Some(error) => div().text_size(px(FS_SMALL)).text_color(p.negative).child(error.clone()),
             None => match status {
                 ShortcutStatus::Pending => caption("Asking the desktop for the shortcut…", cx),
-                ShortcutStatus::Active { trigger } if trigger == self.settings.launcher_shortcut => {
-                    caption(format!("{trigger} opens the Launcher from any app"), cx)
-                }
-                ShortcutStatus::Active { trigger } => caption(
+                ShortcutStatus::Active { trigger, as_asked: true } => caption(format!("{trigger} opens the Launcher from any app"), cx),
+                ShortcutStatus::Active { trigger, as_asked: false } => caption(
                     format!("Your desktop bound {trigger} to the Launcher; change it in the desktop's shortcut settings"),
                     cx,
                 ),
-                ShortcutStatus::Refused(reason) => div().text_xs().text_color(p.warning).child(format!(
+                ShortcutStatus::Refused(reason) => div().text_size(px(FS_SMALL)).text_color(p.warning).child(format!(
                     "{reason}. Open the Launcher from the tray menu, or bind the command `view-everything --launcher` to a key in your desktop's shortcut settings."
                 )),
             },
@@ -1199,12 +1197,13 @@ impl SettingsPage {
     }
 
     /// Asks for the typed shortcut and keeps it once it names one; otherwise shows why not.
-    fn apply_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Unchanged text asks again only on Enter after a refusal (the key may be free now), so
+    /// leaving the field never brings up a desktop dialog by itself.
+    fn apply_shortcut(&mut self, enter: bool, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.shortcut.read(cx).value().to_string();
         let shortcut = cx.global::<crate::host::Host>().shortcut.clone();
         let refused = matches!(shortcut.read(cx).status(), crate::launcher::ShortcutStatus::Refused(_));
-        // Unchanged text asks again only after a refusal (the key may be free now).
-        if text.trim() == self.settings.launcher_shortcut && !refused {
+        if text.trim() == self.settings.launcher_shortcut && !(enter && refused) {
             self.shortcut_error = None;
             cx.notify();
             return;

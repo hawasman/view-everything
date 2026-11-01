@@ -10,7 +10,7 @@ The **Launcher** is a small window that finds files and folders in the Index by 
 | Shift+Enter | shows it in **Browse** in the main window, opening the window if it is closed |
 | Esc | closes the Launcher; so does clicking another window |
 
-Clicking a row opens it, as Enter does. The Launcher remembers what you typed until the app quits, so reopening it continues where you left off. It never asks for anything and sends nothing over the network.
+The Launcher is keyboard only. It remembers what you typed until the app quits, so reopening it continues where you left off. It never asks for anything and sends nothing over the network.
 
 ## What it lists
 

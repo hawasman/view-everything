@@ -11,10 +11,10 @@
 //! - a failure: `{"id", "error"}`.
 //!
 //! Methods: `echo` (result: the params), `show` (raises the app's window), `launcher` (opens the
-//! Launcher), `search` (streams [`search::Row`]s for a [`search::Search`]; end: `{"count",
-//! "last_synced"}`), `launch.match` (streams the Launcher's [`crate::launch::Match`]es for
-//! `{"text"}`; end: `{"count"}`), `tasks` (streams running Tasks' progress; with `{"follow": true}`
-//! until none runs; end: `{}`).
+//! Launcher, or closes it when open), `search` (streams [`search::Row`]s for a
+//! [`search::Search`]; end: `{"count", "last_synced"}`), `launch.match` (streams the Launcher's
+//! [`crate::launch::Match`]es for `{"text"}`; end: `{"count"}`), `tasks` (streams running Tasks'
+//! progress; with `{"follow": true}` until none runs; end: `{}`).
 
 pub mod search;
 #[cfg(windows)]

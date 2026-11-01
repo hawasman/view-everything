@@ -16,7 +16,6 @@ use gpui_kit::component::{Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::ops::Range;
-use std::path::Path;
 use std::sync::Arc;
 use ve_engine::Engine;
 use ve_engine::launch::{Kind, Match};
@@ -29,16 +28,16 @@ const TITLE: &str = "View Everything Launcher";
 /// The one Launcher window of this process, and the text it last held (kept for the session,
 /// so reopening continues where the user left off).
 #[derive(Default)]
-struct Open {
+struct LauncherWindow {
     window: Option<AnyWindowHandle>,
     text: String,
 }
 
-impl Global for Open {}
+impl Global for LauncherWindow {}
 
 /// Opens the Launcher, or closes it when it is open.
 pub fn toggle(cx: &mut App) {
-    let open = cx.default_global::<Open>().window;
+    let open = cx.default_global::<LauncherWindow>().window;
     if let Some(window) = open
         && window.update(cx, |_, window, _| window.remove_window()).is_ok()
     {
@@ -49,13 +48,13 @@ pub fn toggle(cx: &mut App) {
 
 /// Opens the Launcher, bound to the app's Engine when this process hosts one.
 pub fn show(cx: &mut App) {
-    if let Some(window) = cx.default_global::<Open>().window
+    if let Some(window) = cx.default_global::<LauncherWindow>().window
         && window.update(cx, |_, window, _| window.activate_window()).is_ok()
     {
         return;
     }
     let engine = cx.try_global::<crate::host::Host>().map(|h| h.engine.clone());
-    let text = cx.global::<Open>().text.clone();
+    let text = cx.global::<LauncherWindow>().text.clone();
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(WIDTH), px(HEIGHT)), cx))),
         titlebar: Some(TitlebarOptions {
@@ -70,7 +69,7 @@ pub fn show(cx: &mut App) {
     };
     match gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Launcher::new(engine, text, window, cx))) {
         Ok((window, _)) => {
-            cx.global_mut::<Open>().window = Some(window);
+            cx.global_mut::<LauncherWindow>().window = Some(window);
             let _ = window.update(cx, |_, window, _| window.activate_window());
         }
         Err(e) => {
@@ -90,6 +89,14 @@ enum Found {
     Matches(Vec<Match>),
     /// The Engine could not answer (the Index is still loading).
     Failed(String),
+}
+
+/// What Enter does to the selected match.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Act {
+    Open,
+    /// With Shift.
+    ShowInBrowse,
 }
 
 pub struct Launcher {
@@ -133,7 +140,11 @@ impl Launcher {
                 if window.window_handle() != handle {
                     return;
                 }
-                let shift = event.keystroke.modifiers.shift;
+                let enter = if event.keystroke.modifiers.shift {
+                    Act::ShowInBrowse
+                } else {
+                    Act::Open
+                };
                 let handled = me
                     .update(cx, |this, cx| match event.keystroke.key.as_str() {
                         "escape" => {
@@ -143,7 +154,7 @@ impl Launcher {
                         "up" => this.select_by(-1, cx),
                         "down" => this.select_by(1, cx),
                         "enter" => {
-                            this.activate(this.selected, shift, window, cx);
+                            this.act(enter, window, cx);
                             true
                         }
                         _ => false,
@@ -163,7 +174,7 @@ impl Launcher {
         ];
         cx.on_release(|this: &mut Launcher, cx| {
             let text = this.input.read(cx).value().to_string();
-            let open = cx.default_global::<Open>();
+            let open = cx.default_global::<LauncherWindow>();
             open.window = None;
             open.text = text;
             // A copy started only for the Launcher ends with it.
@@ -232,17 +243,15 @@ impl Launcher {
         true
     }
 
-    /// Enter opens the match with the system handler; Shift+Enter shows it in Browse in the
-    /// main window. Either closes the Launcher; a match that cannot be opened leaves a note.
-    fn activate(&mut self, ix: usize, show_in_browse: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(found) = self.matches().get(ix).cloned() else {
+    /// Enter opens the selected match with the system handler; Shift+Enter shows it in Browse in
+    /// the main window. Either closes the Launcher; a match that cannot be opened leaves a note.
+    fn act(&mut self, act: Act, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(found) = self.matches().get(self.selected).cloned() else {
             return;
         };
-        self.selected = ix;
-        if show_in_browse {
+        if act == Act::ShowInBrowse {
             window.remove_window();
-            let path = std::path::PathBuf::from(found.path);
-            cx.defer(move |cx| crate::host::Host::show_in_browse(&path, cx));
+            cx.defer(move |cx| crate::host::Host::show_in_browse(&found.path, cx));
             return;
         }
         if found.offline {
@@ -250,7 +259,7 @@ impl Launcher {
         } else if found.remote {
             self.note = Some(format!("{} is on a Remote: Shift+Enter shows it in Browse", found.name));
         } else {
-            match opener::open(Path::new(&found.path)) {
+            match opener::open(&found.path) {
                 Ok(()) => return window.remove_window(),
                 Err(e) => self.note = Some(format!("Could not open {}: {e}", found.name)),
             }
@@ -261,18 +270,14 @@ impl Launcher {
     fn row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
         let m = &self.matches()[ix];
-        let folder = Path::new(&m.path).parent().map(|f| f.display().to_string()).unwrap_or_default();
+        let folder = m.path.parent().map(|f| f.display().to_string()).unwrap_or_default();
         h_flex()
-            .id(("launcher-row", ix))
             .w_full()
             .h(px(ROW_H))
             .px(px(16.))
             .gap(px(12.))
             .items_center()
             .when(ix == self.selected, |d| d.bg(p.active))
-            .hover(|s| s.bg(p.raised))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, window, cx| this.activate(ix, false, window, cx)))
             .child(
                 v_flex()
                     .flex_1()
