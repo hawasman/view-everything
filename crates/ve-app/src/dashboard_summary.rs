@@ -491,10 +491,37 @@ pub fn slowing_answer(perf: &ve_engine::perf::Summary) -> Answer {
     }
 }
 
-/// What is talking, from the Network Module's last hour: the busiest interface and the open
-/// connections (`None` until they are recorded). Its severity is that interface's average
-/// throughput against [`REFERENCE_RATE`].
-pub fn talking_answer(net: &ve_engine::net::Summary, connections: Option<u32>) -> Answer {
+/// The process holding the most open connections that have a remote end.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Talker {
+    pub id: ve_engine::perf::ProcessId,
+    pub name: std::sync::Arc<str>,
+    pub connections: usize,
+}
+
+/// The [`Talker`] of a connection table; `None` when no readable process holds a connection
+/// with a remote end. A tie goes to the lower process id, so the pick is stable.
+pub fn talker(table: &ve_engine::net::Connections) -> Option<Talker> {
+    let mut held: std::collections::HashMap<ve_engine::perf::ProcessId, (&std::sync::Arc<str>, usize)> = std::collections::HashMap::new();
+    for c in table.list.iter().filter(|c| c.has_remote()) {
+        if let ve_engine::net::Holder::Process { id, name } = &c.holder {
+            held.entry(*id).or_insert((name, 0)).1 += 1;
+        }
+    }
+    held.into_iter()
+        .max_by(|(a_id, (_, a)), (b_id, (_, b))| a.cmp(b).then(b_id.cmp(a_id)))
+        .map(|(id, (name, connections))| Talker {
+            id,
+            name: name.clone(),
+            connections,
+        })
+}
+
+/// What is talking, from the Network Module's last hour: the busiest interface, how many
+/// connections were open in that hour, and `talker`, the process holding the most open now,
+/// which the line inspects. Its severity is that interface's average throughput against
+/// [`REFERENCE_RATE`].
+pub fn talking_answer(net: &ve_engine::net::Summary, talker: Option<Talker>) -> Answer {
     if net.seconds == 0 {
         return Answer {
             question: Question::Talking,
@@ -503,9 +530,9 @@ pub fn talking_answer(net: &ve_engine::net::Summary, connections: Option<u32>) -
             inspect: None,
         };
     }
-    let connections = match connections {
+    let connections = match net.connections {
         Some(n) => format!(
-            "{} connection{} open",
+            "{} connection{} in the last hour",
             crate::format::count(u64::from(n)),
             if n == 1 { "" } else { "s" }
         ),
@@ -528,11 +555,19 @@ pub fn talking_answer(net: &ve_engine::net::Summary, connections: Option<u32>) -
         }
         None => (0., "nothing moved in the last hour".to_owned()),
     };
+    let mut text = format!("{busiest} · {connections}");
+    if let Some(t) = &talker {
+        text.push_str(&format!(
+            " · {} holds the most open, {}",
+            t.name,
+            crate::format::count(t.connections as u64)
+        ));
+    }
     Answer {
         question: Question::Talking,
         severity: Some(severity),
-        text: format!("{busiest} · {connections}"),
-        inspect: None,
+        text,
+        inspect: talker.map(|t| crate::inspector::Inspected::Process(t.id)),
     }
 }
 
@@ -870,15 +905,74 @@ mod tests {
             }))
         );
 
-        // A busy link outranks a calm machine.
+        // A busy link outranks a calm machine; the line names the hour's connections and
+        // inspects the process holding the most open now.
+        let mut busy = net(10, 1_000_000_000);
+        busy.connections = Some(42);
+        let browser = ve_engine::perf::ProcessId { pid: 9, start: 1 };
         let mut answers = [
             slowing_answer(&perf(3600, Some(0.1), Some(0.2), None)),
-            talking_answer(&net(10, 1_000_000_000), Some(42)),
+            talking_answer(
+                &busy,
+                Some(Talker {
+                    id: browser,
+                    name: "firefox".into(),
+                    connections: 12,
+                }),
+            ),
         ];
         rank(&mut answers);
         assert_eq!(order(&answers), [Question::Talking, Question::Slowing]);
         assert_eq!(answers[0].severity, Some(1.));
-        assert!(answers[0].text.ends_with("· 42 connections open"), "{}", answers[0].text);
+        assert!(
+            answers[0]
+                .text
+                .ends_with("· 42 connections in the last hour · firefox holds the most open, 12"),
+            "{}",
+            answers[0].text
+        );
+        assert_eq!(answers[0].inspect, Some(crate::inspector::Inspected::Process(browser)));
+    }
+
+    #[test]
+    fn the_talker_holds_the_most_connections_with_a_remote_end() {
+        use std::sync::Arc;
+        use ve_engine::net::{Connection, Connections, Holder, Protocol, State};
+        let process = |pid, name: &str| Holder::Process {
+            id: ve_engine::perf::ProcessId { pid, start: 0 },
+            name: name.into(),
+        };
+        let connection = |port: u16, remote: &str, holder: Holder| {
+            Arc::new(Connection {
+                protocol: Protocol::Tcp,
+                local: ([10, 0, 0, 2], port).into(),
+                remote: remote.parse().unwrap(),
+                state: State::Established,
+                holder,
+            })
+        };
+        let table = |list| Connections { list };
+        let listening = "0.0.0.0:0";
+        let far = "10.0.0.9:443";
+        let busy = table(vec![
+            // A listening server holds the most sockets, but none talks to anyone.
+            connection(1, listening, process(1, "server")),
+            connection(2, listening, process(1, "server")),
+            connection(3, listening, process(1, "server")),
+            connection(4, far, process(2, "curl")),
+            connection(5, far, process(3, "firefox")),
+            connection(6, far, process(3, "firefox")),
+            // An unreadable holder is never the talker.
+            connection(7, far, Holder::Unknown),
+            connection(8, far, Holder::Unknown),
+            connection(9, far, Holder::Unknown),
+        ]);
+        let found = talker(&busy).expect("firefox talks");
+        assert_eq!((&*found.name, found.connections, found.id.pid), ("firefox", 2, 3));
+        // A tie goes to the lower process id.
+        let tie = table(vec![connection(1, far, process(5, "b")), connection(2, far, process(4, "a"))]);
+        assert_eq!(talker(&tie).map(|t| t.id.pid), Some(4));
+        assert_eq!(talker(&table(vec![connection(1, listening, process(1, "server"))])), None);
     }
 
     #[test]
@@ -896,7 +990,9 @@ mod tests {
         assert_eq!(answers[0].text, "nothing moved in the last hour · connections not recorded");
         assert_eq!((answers[1].severity, answers[1].text.as_str()), (None, "not read yet"));
         assert_eq!((answers[2].severity, answers[2].text.as_str()), (None, NOT_RECORDED));
-        assert_eq!(talking_answer(&net(0, 0), Some(3)).text, NOT_RECORDED);
+        let mut unread = net(0, 0);
+        unread.connections = Some(3);
+        assert_eq!(talking_answer(&unread, None).text, NOT_RECORDED);
         // A direction never read is not shown as a total.
         let mut half = net(60, 6_000_000);
         half.interfaces[0].sent = None;

@@ -158,27 +158,22 @@ impl Net {
     /// Every interface seen from `from` to `to` (inclusive), with what it moved then, and how
     /// many connections were kept then.
     pub fn summary(&self, from: i64, to: i64) -> Summary {
-        self.store.timeline(|timeline| {
+        // The connection tables are taken from under the lock, so counting them never holds up
+        // the recorder.
+        let (mut summary, tables) = self.store.timeline(|timeline| {
             let mut summary = Summary {
                 seconds: 0,
                 interfaces: Vec::new(),
                 connections: None,
             };
-            let mut seen: HashSet<(Protocol, SocketAddr, SocketAddr)> = HashSet::new();
-            let mut last: Option<&Arc<Connections>> = None;
-            for (_, sample) in timeline.range(from, to) {
+            let mut tables: Vec<Arc<Connections>> = Vec::new();
+            for (time, sample) in timeline.range(from, to) {
                 // Consecutive seconds share one table until the next is read.
                 if let Reading::Value(table) = &sample.connections
-                    && last.is_none_or(|l| !Arc::ptr_eq(l, table))
+                    && tables.last().is_none_or(|l| !Arc::ptr_eq(l, table))
                 {
-                    seen.extend(table.list.iter().map(|c| c.key()));
-                    last = Some(table);
+                    tables.push(table.clone());
                 }
-            }
-            if last.is_some() {
-                summary.connections = Some(u32::try_from(seen.len()).unwrap_or(u32::MAX));
-            }
-            for (time, sample) in timeline.range(from, to) {
                 let Reading::Value(interfaces) = &sample.network else { continue };
                 summary.seconds += 1;
                 for i in interfaces {
@@ -203,8 +198,12 @@ impl Net {
                     s.last_seen = time;
                 }
             }
-            summary
-        })
+            (summary, tables)
+        });
+        if !tables.is_empty() {
+            summary.connections = Some(u32::try_from(distinct(&tables)).unwrap_or(u32::MAX));
+        }
+        summary
     }
 
     /// Whether any recorded second has a network reading: the rail shows Network only then.
@@ -242,6 +241,35 @@ fn add(total: &mut Option<u64>, count: Option<&u64>) {
     if let Some(&count) = count {
         *total = Some(total.unwrap_or(0) + count);
     }
+}
+
+/// How many distinct connections (protocol, local and remote address) `tables` hold. A
+/// connection unchanged since the table before is the same `Arc` there, at the same place in
+/// the order (see [`connections`]), so only the ones new to a table are hashed.
+fn distinct(tables: &[Arc<Connections>]) -> usize {
+    let mut seen: HashSet<(Protocol, SocketAddr, SocketAddr)> = HashSet::new();
+    let mut before: &[Arc<Connection>] = &[];
+    for table in tables {
+        let mut at = 0;
+        for c in &table.list {
+            while before.get(at).is_some_and(|b| !Arc::ptr_eq(b, c) && order(b, c).is_lt()) {
+                at += 1;
+            }
+            if before.get(at).is_some_and(|b| Arc::ptr_eq(b, c)) {
+                at += 1;
+            } else {
+                seen.insert(c.key());
+            }
+        }
+        before = &table.list;
+    }
+    seen.len()
+}
+
+/// The order of a connection table: most worth keeping first (see [`State`]), then by
+/// protocol and address.
+fn order(a: &Connection, b: &Connection) -> std::cmp::Ordering {
+    a.state.rank().cmp(&b.state.rank()).then_with(|| a.key().cmp(&b.key()))
 }
 
 /// Connections a sample keeps: the most active by state (see [`State`]). The bytes each
@@ -438,7 +466,7 @@ pub(crate) fn connections(sockets: Vec<Socket>, table: Option<&ProcessCountersTa
             }
         })
         .collect();
-    list.sort_by(|a, b| a.state.rank().cmp(&b.state.rank()).then_with(|| a.key().cmp(&b.key())));
+    list.sort_by(|a, b| order(a, b));
     Connections { list }
 }
 

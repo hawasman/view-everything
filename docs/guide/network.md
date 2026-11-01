@@ -20,7 +20,10 @@ The page says, in one line, that per-app traffic needs administrator rights and 
 
 - A socket held by a process the app cannot read (another user's, or the system's) says **unknown**: it belongs to some process, the app is just not allowed to see which. A closed connection the kernel is finishing belongs to no process and says **none, closed**.
 - A listening port or an unconnected UDP socket has no remote end: its Remote reads "none".
-- Click a connection to open its process in the Inspector (command line, user, start time, parent, CPU time); **Show on Performance** there opens Performance → System with that process selected in the table.
+- Click a connection to open its process in the Inspector (command line, user, start time, parent, CPU time); **Show on Performance** there opens Performance → System with that process selected in the table. Its row stays in view as the table re-sorts, until you scroll the table yourself.
+- The list shows about a dozen rows at a time and scrolls; only the rows in view are drawn, so thousands of connections cost no more than a few.
+
+The Overview's "Talking on the network" answer counts the distinct connections the hour's kept seconds hold and names the process holding the most open connections with a remote end now; clicking it opens Network with that process inspected and its first connection at the top of the list.
 
 Connections are read every two seconds, with the process table. Live lists every one; each past second keeps the 200 most worth keeping by state (open conversations first), since how many bytes each connection moves cannot be read without administrator rights.
 

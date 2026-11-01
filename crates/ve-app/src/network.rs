@@ -9,6 +9,7 @@ use crate::format;
 use crate::performance::{Lane, OnInspect, Scrub, lane_of, when};
 use crate::theme::{FS_BODY, GAP, palette};
 use crate::ui::{caption, empty_state, kpi_strip, panel, section_title, title_row};
+use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -37,8 +38,17 @@ fn total(interfaces: &[Interface], rate: impl Fn(&Interface) -> Reading<u64>) ->
 }
 
 /// The Network page at `moment`: `sample` is the network then, `None` a gap; `hour` what each
-/// interface moved over the last hour; `inspect` what a click on a connection opens.
-pub fn page(sample: Option<&NetSample>, hour: &Summary, moment: Moment, now: i64, inspect: &Inspect, cx: &App) -> AnyElement {
+/// interface moved over the last hour; `inspect` what a click on a connection opens; `scroll`
+/// the connections list's.
+pub fn page(
+    sample: Option<&NetSample>,
+    hour: &Summary,
+    moment: Moment,
+    now: i64,
+    inspect: &Inspect,
+    scroll: &UniformListScrollHandle,
+    cx: &App,
+) -> AnyElement {
     let facts = match (moment, sample) {
         (Moment::Live, Some(s)) => format!("Live · sampled at {}", when(s.time, now)),
         (Moment::Live, None) => "Live · no sample yet".to_owned(),
@@ -66,7 +76,7 @@ pub fn page(sample: Option<&NetSample>, hour: &Summary, moment: Moment, now: i64
                 .child(head)
                 .child(kpis(&s.interfaces, hour, cx))
                 .child(interfaces_panel(&s.interfaces, hour, moment, now, cx))
-                .child(connections_panel(&s.connections, moment, inspect, cx)),
+                .child(connections_panel(&s.connections, moment, inspect, scroll, cx)),
         )
         .into_any_element()
 }
@@ -187,17 +197,37 @@ fn holder_text(holder: &Holder) -> (String, bool) {
 }
 
 /// What a click on a connection opens: its process, when the Moment's process table has it.
-pub struct Inspect<'a> {
+#[derive(Clone)]
+pub struct Inspect {
     /// The process the Inspector shows.
     pub selected: Option<ProcessId>,
     /// The Moment's process table; a past second keeps only some processes.
-    pub processes: Option<&'a Processes>,
-    pub on_inspect: &'a OnInspect,
+    pub processes: Option<Arc<Processes>>,
+    pub on_inspect: OnInspect,
+}
+
+/// Height of one connection row; the list shows at most [`SHOWN`] at once and scrolls.
+const ROW_H: f32 = 32.;
+const SHOWN: usize = 12;
+
+/// The row of the first connection process `id` holds, if any.
+pub fn row_of(connections: &Connections, id: ProcessId) -> Option<usize> {
+    connections
+        .list
+        .iter()
+        .position(|c| matches!(&c.holder, Holder::Process { id: held, .. } if *held == id))
 }
 
 /// Every open connection at the Moment (all of them live, the kept top of a past second), open
-/// conversations first; a click on one held by a known process inspects that process.
-fn connections_panel(connections: &Reading<Arc<Connections>>, moment: Moment, inspect: &Inspect, cx: &App) -> Div {
+/// conversations first, in a list that builds only the rows in view; a click on one held by a
+/// known process inspects that process.
+fn connections_panel(
+    connections: &Reading<Arc<Connections>>,
+    moment: Moment,
+    inspect: &Inspect,
+    scroll: &UniformListScrollHandle,
+    cx: &App,
+) -> Div {
     let p = palette(cx);
     let (body, note) = match connections {
         Reading::Unsupported => (caption(UNSUPPORTED, cx).into_any_element(), None),
@@ -212,6 +242,7 @@ fn connections_panel(connections: &Reading<Arc<Connections>>, moment: Moment, in
             let header = h_flex()
                 .h(px(24.))
                 .px(px(4.))
+                .pr(Scrollbar::width() + px(8.))
                 .gap(px(12.))
                 .text_size(px(FS_BODY))
                 .text_color(p.muted)
@@ -220,12 +251,15 @@ fn connections_panel(connections: &Reading<Arc<Connections>>, moment: Moment, in
                 .child(div().flex_1().min_w_0().child("Remote"))
                 .child(div().w(px(STATE_W)).flex_none().child("State"))
                 .child(div().w(px(PROCESS_W)).flex_none().child("Process"));
-            let rows = c
-                .list
-                .iter()
-                .enumerate()
-                .map(|(i, connection)| connection_row(i, connection, inspect, cx));
-            (v_flex().child(header).children(rows).into_any_element(), Some(note))
+            let (table, inspect) = (c.clone(), inspect.clone());
+            let rows = uniform_list("connections", n, move |range: std::ops::Range<usize>, _, cx| {
+                range.map(|i| connection_row(i, &table.list[i], &inspect, cx)).collect()
+            });
+            let list = div()
+                .flex()
+                .h(px(ROW_H * n.min(SHOWN) as f32))
+                .child(crate::ui::scrolling_list(rows, scroll));
+            (v_flex().child(header).child(list).into_any_element(), Some(note))
         }
     };
     panel(cx).child(
@@ -248,7 +282,7 @@ fn connection_row(i: usize, c: &Connection, inspect: &Inspect, cx: &App) -> Stat
         Holder::Process { id, .. } => Some(*id),
         Holder::Unknown | Holder::Nobody => None,
     };
-    let inspectable = id.filter(|&id| inspect.processes.is_some_and(|t| t.get(id).is_some()));
+    let inspectable = id.filter(|&id| inspect.processes.as_ref().is_some_and(|t| t.get(id).is_some()));
     let (process, known) = holder_text(&c.holder);
     let (remote, has_remote) = if c.has_remote() {
         (c.remote.to_string(), true)
@@ -265,7 +299,8 @@ fn connection_row(i: usize, c: &Connection, inspect: &Inspect, cx: &App) -> Stat
     h_flex()
         .id(("connection", i))
         .relative()
-        .h(px(32.))
+        .w_full()
+        .h(px(ROW_H))
         .px(px(4.))
         .gap(px(12.))
         .items_center()

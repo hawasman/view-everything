@@ -6,7 +6,7 @@
 use crate::app::volume_name;
 use crate::dashboard_summary::{
     Answer, Cleanable, Fullest, Question, RANKING_RULE, Summary, ago, disk_answer, group_by_filesystem, oldest, percent, rank,
-    slowing_answer, summarize, talking_answer,
+    slowing_answer, summarize, talker, talking_answer,
 };
 use crate::format;
 use crate::inspector::Inspected;
@@ -290,8 +290,10 @@ impl DashboardPage {
                         Machine {
                             at: now,
                             slowing: slowing_answer(&engine.perf.summary(from, now)),
-                            // The open connections slot in here once `net.summary` records them.
-                            talking: talking_answer(&engine.net.summary(from, now), None),
+                            talking: talking_answer(
+                                &engine.net.summary(from, now),
+                                engine.net.live().and_then(|n| n.connections.value().and_then(|c| talker(c))),
+                            ),
                         }
                     })
                     .await;
@@ -699,8 +701,9 @@ impl DashboardPage {
             let bar = l.capacity.filter(|c| c.total > 0).map(|c| {
                 let used = c.total.saturating_sub(c.free) as f64 / c.total as f64;
                 div()
+                    // Gives way to the name when the Inspector narrows the page.
                     .w(px(120.))
-                    .flex_none()
+                    .min_w(px(40.))
                     .h(px(6.))
                     .rounded(px(3.))
                     .overflow_hidden()
@@ -731,7 +734,7 @@ impl DashboardPage {
                     .child(
                         h_flex()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(80.))
                             .gap(px(8.))
                             .items_center()
                             .child(div().truncate().text_color(p.text).child(l.name.clone()))
@@ -828,6 +831,8 @@ impl DashboardPage {
         panel(cx)
             .flex_grow(4.)
             .flex_basis(relative(0.))
+            // Room for the bars when the Inspector narrows the page; Locations gives way.
+            .min_w(px(340.))
             .text_size(px(FS_BODY))
             .child(section_title("Categories", cx))
             .child(list)
