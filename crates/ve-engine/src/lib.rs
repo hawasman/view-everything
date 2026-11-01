@@ -4,6 +4,7 @@
 
 pub mod format;
 mod live;
+pub mod permissions;
 pub mod tasks;
 pub mod view;
 
@@ -108,6 +109,8 @@ pub struct Shared {
     folders_syncing: Mutex<Vec<EntryId>>,
     /// Background work clients list (Sync, Duplicate search, Cleaner, ...).
     pub tasks: Tasks,
+    /// The Permissions the user granted, read through [`Engine::permissions`].
+    pub permissions: permissions::Store,
     /// Called from the background threads whenever something a client shows has changed.
     pub repaint: Repaint,
 }
@@ -238,6 +241,7 @@ impl Engine {
             sync_queued: AtomicBool::new(false),
             folders_syncing: Mutex::new(Vec::new()),
             tasks,
+            permissions: permissions::Store::default(),
             repaint,
         });
         let (commands, command_rx) = mpsc::channel();
@@ -1397,6 +1401,7 @@ mod tests {
             live_held: AtomicU64::new(0),
             followed: Mutex::new(HashSet::new()),
             tasks: Tasks::new(),
+            permissions: Default::default(),
             repaint: Arc::new(|| {}),
         }
     }

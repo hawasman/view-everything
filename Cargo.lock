@@ -7519,6 +7519,7 @@ dependencies = [
  "libc",
  "parking_lot 0.13.0",
  "rayon",
+ "serde",
  "tempfile",
  "ve-core",
  "ve-scan",

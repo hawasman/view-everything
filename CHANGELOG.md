@@ -50,6 +50,10 @@
 - The engine (the Index, Tasks, Locations, Live updates, Sync scheduling and Snapshots) is its own crate, `ve-engine`, with no GUI in it ([ADR-0016](docs/adr/0016-engine-library-in-the-tray-process-with-a-local-socket.md)). The app hosts it and behaves as before.
 - A finished Sync's Task shows the Entries it read, as its result says; a quick Sync used to show 0.
 
+### Permissions
+- **Settings → Permissions** lists every Permission you granted (the Live updates helper, start at login) with when you granted it. Switching one off revokes it fully: the helper stops and is not started again, the login entry is removed. The Live updates and Start at login switches read and change the same list.
+- Settings files are now version 1. A helper or start at login you had switched on is kept, as a Permission "granted before this version".
+
 ## v0.2.1
 
 ### Half the memory
