@@ -118,7 +118,7 @@ _Avoid_: owner folder, install dir
 ### Views
 
 **Overview**:
-The home view: what is indexed, what can be cleaned up, what is in the Trash and when the Index was last synced, then the Locations, the Categories, the largest and the most recently modified files.
+The home view: three answers first, most severe first (what is filling the disk, what is slowing the machine, what is talking on the network), then what is indexed, what is in the Trash and when the Index was last synced, the Locations, the Categories, the largest and the most recently modified files.
 _Avoid_: dashboard, home, summary
 
 **Browse**:

@@ -7,10 +7,12 @@
 
 mod linux;
 mod process;
+mod summary;
 
 pub use linux::LinuxBackend;
 use process::PrevProcesses;
 pub use process::{Details, Io, Process, ProcessCounters, ProcessCountersTable, ProcessId, Processes, RETAINED};
+pub use summary::{Summary, TopProcess};
 
 use crate::Repaint;
 use crate::net::{Interface, InterfaceCounters};

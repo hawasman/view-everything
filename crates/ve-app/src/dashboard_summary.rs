@@ -329,6 +329,217 @@ pub fn group_by_filesystem(identities: &[&str]) -> Vec<Vec<usize>> {
     groups.into_iter().map(|(_, members)| members).collect()
 }
 
+/// The three questions the Overview answers, in the order a tie keeps them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Question {
+    /// What is filling the disk.
+    Disk,
+    /// What is slowing the machine.
+    Slowing,
+    /// What is talking on the network.
+    Talking,
+}
+
+impl Question {
+    pub fn title(self) -> &'static str {
+        match self {
+            Question::Disk => "Filling the disk",
+            Question::Slowing => "Slowing the machine",
+            Question::Talking => "Talking on the network",
+        }
+    }
+}
+
+/// How the Overview orders its answers, as the page states it.
+pub const RANKING_RULE: &str = "Most severe first: how full the fullest Location is; the busier of CPU and memory over the last hour; \
+     the busiest interface's average over the last hour against 100 Mbit/s. A question with nothing recorded comes last.";
+
+/// The throughput a busiest interface is measured against: 100 Mbit/s, in bytes per second.
+const REFERENCE_RATE: f64 = 12_500_000.;
+
+/// What an answer says when its Module has no samples: never zero.
+pub const NOT_RECORDED: &str = "not recorded";
+
+/// One of the Overview's answers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Answer {
+    pub question: Question,
+    /// How severe, 0 to 1 (see [`RANKING_RULE`]); `None` when nothing was recorded to judge by.
+    pub severity: Option<f32>,
+    pub text: String,
+    /// What its Module page shows in the Inspector when the line is followed.
+    pub inspect: Option<crate::inspector::Inspected>,
+}
+
+/// The fullest Location with a known capacity: identity, name, used and total bytes.
+pub struct Fullest<'a> {
+    pub identity: &'a str,
+    pub name: &'a str,
+    pub used: u64,
+    pub total: u64,
+}
+
+fn percent(share: f32) -> String {
+    format!("{:.0}%", share * 100.)
+}
+
+/// What the Cleaner found: `count` Cleanables of `reclaim` bytes, `admin` of them freed only
+/// with administrator rights.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cleanable {
+    pub reclaim: u64,
+    pub count: usize,
+    pub admin: u64,
+}
+
+impl Cleanable {
+    /// "4.00 KB can be cleaned up across 3 Cleanables"; the administrator share only when there
+    /// is one.
+    fn phrase(self) -> String {
+        if self.count == 0 {
+            return "nothing to clean up".to_owned();
+        }
+        let mut phrase = format!(
+            "{} can be cleaned up across {} Cleanable{}",
+            crate::format::size(self.reclaim),
+            crate::format::count(self.count as u64),
+            if self.count == 1 { "" } else { "s" }
+        );
+        if self.admin > 0 {
+            phrase.push_str(&format!("; {} of it needs administrator", crate::format::size(self.admin)));
+        }
+        phrase
+    }
+}
+
+/// What is filling the disk: the fullest Location, what the Cleaner found (`None` while it has
+/// not looked) and the largest Owner. Its severity is how full that Location is.
+pub fn disk_answer(fullest: Option<Fullest>, cleanable: Option<Cleanable>, owner: Option<&OwnerRow>) -> Answer {
+    let fullest = fullest.filter(|f| f.total > 0);
+    let severity = fullest.as_ref().map(|f| (f.used as f64 / f.total as f64).clamp(0., 1.) as f32);
+    let mut parts = Vec::new();
+    if let (Some(f), Some(share)) = (&fullest, severity) {
+        parts.push(format!("{} is {} full", f.name, percent(share)));
+    }
+    match cleanable {
+        Some(c) => parts.push(c.phrase()),
+        None if fullest.is_some() || owner.is_some() => parts.push("looking for Cleanables…".to_owned()),
+        None => {}
+    }
+    if let Some(o) = owner {
+        parts.push(format!("{} the largest Owner at {}", o.name, crate::format::size(o.size)));
+    }
+    let inspect = match (owner, &fullest) {
+        (Some(o), _) => Some(crate::inspector::Inspected::Entry(o.root)),
+        (None, Some(f)) => Some(crate::inspector::Inspected::Location(f.identity.to_owned())),
+        (None, None) => None,
+    };
+    Answer {
+        question: Question::Disk,
+        severity,
+        text: if parts.is_empty() {
+            "not read yet".to_owned()
+        } else {
+            parts.join(" · ")
+        },
+        inspect,
+    }
+}
+
+/// What is slowing the machine, from the Performance Module's last hour: the busier of CPU and
+/// memory first, then the busiest process. Its severity is the busier one's share.
+pub fn slowing_answer(perf: &ve_engine::perf::Summary) -> Answer {
+    let severity = match (perf.cpu, perf.memory) {
+        (Some(c), Some(m)) => Some(c.max(m)),
+        (c, m) => c.or(m),
+    };
+    if perf.seconds == 0 {
+        return Answer {
+            question: Question::Slowing,
+            severity: None,
+            text: NOT_RECORDED.to_owned(),
+            inspect: None,
+        };
+    }
+    let cpu = format!("CPU {} busy", perf.cpu.map_or("—".to_owned(), percent));
+    let memory = format!("memory {} taken", perf.memory.map_or("—".to_owned(), percent));
+    // The busier subsystem leads.
+    let (mut first, second) = if perf.memory.unwrap_or(0.) > perf.cpu.unwrap_or(0.) {
+        (memory, cpu)
+    } else {
+        (cpu, memory)
+    };
+    first[..1].make_ascii_uppercase();
+    let process = match &perf.top {
+        Some(top) => format!("{} the busiest process at {} CPU", top.name, percent(top.cpu)),
+        None => "busiest process —".to_owned(),
+    };
+    Answer {
+        question: Question::Slowing,
+        severity,
+        text: format!("{first}, {second} in the last hour · {process}"),
+        inspect: perf.top.as_ref().map(|t| crate::inspector::Inspected::Process(t.id)),
+    }
+}
+
+/// What is talking, from the Network Module's last hour: the busiest interface and the open
+/// connections (`None` until they are recorded). Its severity is that interface's average
+/// throughput against [`REFERENCE_RATE`].
+pub fn talking_answer(net: &ve_engine::net::Summary, connections: Option<u32>) -> Answer {
+    if net.seconds == 0 {
+        return Answer {
+            question: Question::Talking,
+            severity: None,
+            text: NOT_RECORDED.to_owned(),
+            inspect: None,
+        };
+    }
+    let connections = match connections {
+        Some(n) => format!(
+            "{} connection{} open",
+            crate::format::count(u64::from(n)),
+            if n == 1 { "" } else { "s" }
+        ),
+        None => format!("connections {NOT_RECORDED}"),
+    };
+    let (severity, busiest) = match net.busiest() {
+        Some(i) => {
+            let rate = i.moved() / net.seconds as u64;
+            (
+                (rate as f64 / REFERENCE_RATE).min(1.) as f32,
+                format!(
+                    "{} moved {} in the last hour, {}/s on average",
+                    i.name,
+                    crate::format::size(i.moved()),
+                    crate::format::size(rate)
+                ),
+            )
+        }
+        None => (0., "nothing moved in the last hour".to_owned()),
+    };
+    Answer {
+        question: Question::Talking,
+        severity: Some(severity),
+        text: format!("{busiest} · {connections}"),
+        inspect: None,
+    }
+}
+
+/// Orders `answers` by [`RANKING_RULE`]: the most severe first, the unknown last, a tie in
+/// [`Question`] order.
+pub fn rank(answers: &mut [Answer]) {
+    answers.sort_by(|a, b| {
+        let key = |x: &Answer| x.severity.map(|s| -s);
+        match (key(a), key(b)) {
+            (Some(x), Some(y)) => x.total_cmp(&y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+        .then(a.question.cmp(&b.question))
+    });
+}
+
 /// "just now", "6 min ago", "3 h ago", "1 day ago", "6 days ago".
 pub fn ago(now: i64, at: i64) -> String {
     let secs = (now - at).max(0);
@@ -552,5 +763,132 @@ mod tests {
         assert_eq!((rows[1].name.as_str(), rows[1].size), ("Proj", 80));
         assert_eq!((rows[2].name.as_str(), rows[2].size), ("Inner", 30));
         assert!(rows.windows(2).all(|w| w[0].size >= w[1].size));
+    }
+
+    fn perf(seconds: usize, cpu: Option<f32>, memory: Option<f32>, top: Option<(&str, f32)>) -> ve_engine::perf::Summary {
+        ve_engine::perf::Summary {
+            seconds,
+            cpu,
+            memory,
+            top: top.map(|(name, cpu)| ve_engine::perf::TopProcess {
+                id: ve_engine::perf::ProcessId { pid: 7, start: 3 },
+                name: name.into(),
+                cpu,
+            }),
+        }
+    }
+
+    /// `seconds` of network readings, `wlan0` having moved `moved` bytes over them.
+    fn net(seconds: usize, moved: u64) -> ve_engine::net::Summary {
+        ve_engine::net::Summary {
+            seconds,
+            interfaces: vec![ve_engine::net::InterfaceSummary {
+                name: "wlan0".into(),
+                received: Some(moved),
+                sent: Some(0),
+                last_seen: 0,
+            }],
+        }
+    }
+
+    fn order(answers: &[Answer]) -> Vec<Question> {
+        answers.iter().map(|a| a.question).collect()
+    }
+
+    #[test]
+    fn the_most_severe_answer_comes_first() {
+        let fullest = Fullest {
+            identity: "uuid:1",
+            name: "nvme0n1p2",
+            used: 87,
+            total: 100,
+        };
+        let mut answers = [
+            disk_answer(
+                Some(fullest),
+                Some(Cleanable {
+                    reclaim: 4096,
+                    count: 2,
+                    admin: 0,
+                }),
+                None,
+            ),
+            // Memory nearly full outweighs a disk 87% full.
+            slowing_answer(&perf(3600, Some(0.3), Some(0.95), Some(("firefox", 0.12)))),
+            // 2 MB/s on average: a sixth of 100 Mbit/s.
+            talking_answer(&net(100, 200_000_000), None),
+        ];
+        rank(&mut answers);
+        assert_eq!(order(&answers), [Question::Slowing, Question::Disk, Question::Talking]);
+        assert_eq!(
+            answers[1].text,
+            "nvme0n1p2 is 87% full · 4.00 KB can be cleaned up across 2 Cleanables"
+        );
+        assert_eq!(answers[1].inspect, Some(crate::inspector::Inspected::Location("uuid:1".into())));
+        // The administrator share only when there is one; a largest Owner is what the line inspects.
+        let owner = OwnerRow {
+            name: "Steam".into(),
+            kind: OwnerKind::Game,
+            size: 2048,
+            root: EntryId(5),
+        };
+        let cleanable = Cleanable {
+            reclaim: 4096,
+            count: 1,
+            admin: 1024,
+        };
+        let disk = disk_answer(None, Some(cleanable), Some(&owner));
+        assert_eq!(
+            disk.text,
+            "4.00 KB can be cleaned up across 1 Cleanable; 1.00 KB of it needs administrator · Steam the largest Owner at 2.00 KB"
+        );
+        assert_eq!(disk.inspect, Some(crate::inspector::Inspected::Entry(EntryId(5))));
+        // No capacity known: nothing to judge how full the disk is by.
+        assert_eq!(disk.severity, None);
+        // The busier subsystem leads, then the busiest process, which the line inspects.
+        assert_eq!(
+            answers[0].text,
+            "Memory 95% taken, CPU 30% busy in the last hour · firefox the busiest process at 12% CPU"
+        );
+        assert_eq!(
+            answers[0].inspect,
+            Some(crate::inspector::Inspected::Process(ve_engine::perf::ProcessId {
+                pid: 7,
+                start: 3
+            }))
+        );
+
+        // A busy link outranks a calm machine.
+        let mut answers = [
+            slowing_answer(&perf(3600, Some(0.1), Some(0.2), None)),
+            talking_answer(&net(10, 1_000_000_000), Some(42)),
+        ];
+        rank(&mut answers);
+        assert_eq!(order(&answers), [Question::Talking, Question::Slowing]);
+        assert_eq!(answers[0].severity, Some(1.));
+        assert!(answers[0].text.ends_with("· 42 connections open"), "{}", answers[0].text);
+    }
+
+    #[test]
+    fn a_module_with_no_samples_says_so_and_ranks_last() {
+        let mut answers = [
+            disk_answer(None, None, None),
+            slowing_answer(&perf(0, None, None, None)),
+            // Recorded, but nothing moved: known to be calm, not unknown.
+            talking_answer(&net(60, 0), None),
+        ];
+        rank(&mut answers);
+        // The unknown keep their own order behind the known.
+        assert_eq!(order(&answers), [Question::Talking, Question::Disk, Question::Slowing]);
+        assert_eq!(answers[0].severity, Some(0.));
+        assert_eq!(answers[0].text, "nothing moved in the last hour · connections not recorded");
+        assert_eq!((answers[1].severity, answers[1].text.as_str()), (None, "not read yet"));
+        assert_eq!((answers[2].severity, answers[2].text.as_str()), (None, NOT_RECORDED));
+        assert_eq!(talking_answer(&net(0, 0), Some(3)).text, NOT_RECORDED);
+
+        // CPU read but memory not: the unknown share says —, never 0%.
+        let cpu_only = slowing_answer(&perf(60, Some(0.4), None, None));
+        assert_eq!(cpu_only.severity, Some(0.4));
+        assert_eq!(cpu_only.text, "CPU 40% busy, memory — taken in the last hour · busiest process —");
     }
 }
