@@ -799,6 +799,7 @@ mod tests {
                 sent: Some(0),
                 last_seen: 0,
             }],
+            connections: None,
         }
     }
 
