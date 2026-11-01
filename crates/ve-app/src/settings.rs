@@ -86,6 +86,13 @@ pub struct Settings {
     /// Show no animations (Reduce motion); off follows the operating system.
     #[serde(default)]
     pub reduce_motion: bool,
+    /// The global shortcut that opens the Launcher, e.g. `Alt+Space`.
+    #[serde(default = "default_launcher_shortcut")]
+    pub launcher_shortcut: String,
+}
+
+fn default_launcher_shortcut() -> String {
+    crate::launcher::DEFAULT_SHORTCUT.to_owned()
 }
 
 fn default_temp_days() -> u64 {
@@ -171,6 +178,7 @@ impl Default for Settings {
             treemap_colour_by: Default::default(),
             keep_in_tray: false,
             reduce_motion: false,
+            launcher_shortcut: default_launcher_shortcut(),
         }
     }
 }

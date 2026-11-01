@@ -5,6 +5,6 @@
 Nine "unmaintained" warnings remain. None is a vulnerability, and each has a reason to stay:
 
 - **bincode 1.3.3** (RUSTSEC-2025-0141), used directly by ve-core and ve-scan for the Index and the duplicates cache. It is finished software, and its latest release, 3.0.0, is a `compile_error!` tombstone. Replacing it changes the on-disk Index format that ADR-0001 shares between sessions, for no security gain. Revisit if a maintained serde binary format is wanted for another reason.
-- **instant, paste, rustybuzz, ttf-parser, zbus_names, zvariant, zvariant_derive, rustls-pemfile**, all pulled in through GPUI (`gpui-pre` 0.3.10, `gpui-kit` 0.8.1, the latest pair). We cannot replace them without leaving GPUI; they go when GPUI moves off them.
+- **instant, paste, rustybuzz, ttf-parser, zbus_names, zvariant, zvariant_derive, rustls-pemfile**, all pulled in through GPUI (`gpui-pre` 0.3.10, `gpui-kit` 0.8.1, the latest pair). We cannot replace them without leaving GPUI; they go when GPUI moves off them. The Launcher's global shortcut uses the same `ashpd` and `zbus` GPUI does (the GlobalShortcuts portal on Wayland), so it adds no warning; `global-hotkey` (X11, Windows, macOS) adds none either.
 
 Re-run `cargo audit` when bumping GPUI and before each release.

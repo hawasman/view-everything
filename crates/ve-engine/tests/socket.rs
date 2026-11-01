@@ -29,7 +29,7 @@ fn handshake_echo_and_a_refused_version() {
     let Claim::Host(listener) = socket::claim(&path).unwrap() else {
         panic!("nothing else listens there")
     };
-    socket::serve(listener, Arc::new(engine), Arc::new(|| {}));
+    socket::serve(listener, Arc::new(engine), Arc::new(|_| {}));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -84,7 +84,7 @@ fn an_oversized_request_line_is_refused_and_a_silent_host_times_out() {
     let Claim::Host(listener) = socket::claim(&path).unwrap() else {
         panic!("nothing else listens there")
     };
-    socket::serve(listener, Arc::new(engine), Arc::new(|| {}));
+    socket::serve(listener, Arc::new(engine), Arc::new(|_| {}));
 
     #[cfg(unix)]
     let stream = std::os::unix::net::UnixStream::connect(&path).unwrap();

@@ -5,6 +5,7 @@
 pub mod agents;
 pub mod apps;
 pub mod format;
+pub mod launch;
 mod live;
 pub mod net;
 pub mod perf;

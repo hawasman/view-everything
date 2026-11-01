@@ -10,10 +10,12 @@
 //! - a stream: repeated `{"id", "item"}` lines ending with `{"id", "end"}`;
 //! - a failure: `{"id", "error"}`.
 //!
-//! Methods: `echo` (result: the params), `show` (raises the app's window), `search` (streams
-//! [`search::Row`]s for a [`search::Search`]; end: `{"count", "last_synced"}`), `tasks` (streams
-//! running Tasks' progress; with `{"follow": true}` until none runs; end: `{}`), and the agent
-//! methods `agents.pending`, `agents.approve` and `files` (see [`agents`]).
+//! Methods: `echo` (result: the params), `show` (raises the app's window), `launcher` (opens the
+//! Launcher, or closes it when open), `search` (streams [`search::Row`]s for a
+//! [`search::Search`]; end: `{"count", "last_synced"}`), `launch.match` (streams the Launcher's
+//! [`crate::launch::Match`]es for `{"text"}`; end: `{"count"}`), `tasks` (streams running Tasks'
+//! progress; with `{"follow": true}` until none runs; end: `{}`), and the agent methods
+//! `agents.pending`, `agents.approve` and `files` (see [`agents`]).
 
 mod agents;
 pub mod search;
@@ -40,8 +42,17 @@ pub const PATH_ENV: &str = "VE_SOCKET";
 /// How often a followed `tasks` stream looks at the running Tasks.
 const TASKS_POLL: Duration = Duration::from_millis(250);
 
-/// Called when a client asks the app to show its window.
-pub type Show = Arc<dyn Fn() + Send + Sync>;
+/// What a client asks the app to show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Surface {
+    /// The app's window (`show`).
+    Window,
+    /// The Launcher (`launcher`).
+    Launcher,
+}
+
+/// Called when a client asks the app to show its window or its Launcher.
+pub type Show = Arc<dyn Fn(Surface) + Send + Sync>;
 
 /// Where the socket is: `$VE_SOCKET`, else `$XDG_RUNTIME_DIR/view-everything/engine.sock`, else a
 /// per-user folder in the temporary folder. On Windows a named pipe, `\\.\pipe\view-everything-<SID>-engine`
@@ -447,9 +458,14 @@ fn serve_lines(reader: &mut impl BufRead, out: &mut BufWriter<impl Write>, engin
         match request.get("method").and_then(Value::as_str).unwrap_or("") {
             "echo" => send(out, &json!({ "id": id, "result": params }))?,
             "show" => {
-                show();
+                show(Surface::Window);
                 send(out, &json!({ "id": id, "result": null }))?;
             }
+            "launcher" => {
+                show(Surface::Launcher);
+                send(out, &json!({ "id": id, "result": null }))?;
+            }
+            "launch.match" => answer_launch_match(out, &id, &params, engine)?,
             "search" => answer_search(out, &id, params, engine)?,
             "tasks" => answer_tasks(out, &id, &params, engine)?,
             method @ ("agents.pending" | "agents.approve" | "files") => agents::answer(out, &id, method, params, engine)?,
@@ -474,6 +490,19 @@ fn answer_search(out: &mut impl Write, id: &Value, params: Value, engine: &Engin
                 out,
                 &json!({ "id": id, "end": { "count": found.rows.len(), "last_synced": found.last_synced } }),
             )
+        }
+        Err(e) => send(out, &json!({ "id": id, "error": e })),
+    }
+}
+
+fn answer_launch_match(out: &mut impl Write, id: &Value, params: &Value, engine: &Engine) -> io::Result<()> {
+    let text = params.get("text").and_then(Value::as_str).unwrap_or_default();
+    match engine.launch_match(text) {
+        Ok(found) => {
+            for row in &found {
+                send(out, &json!({ "id": id, "item": row }))?;
+            }
+            send(out, &json!({ "id": id, "end": { "count": found.len() } }))
         }
         Err(e) => send(out, &json!({ "id": id, "error": e })),
     }

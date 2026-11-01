@@ -160,7 +160,7 @@ fn an_agent_is_refused_until_approved_then_answered_in_capped_pages() {
     let Claim::Host(listener) = socket::claim(&socket_path).unwrap() else {
         panic!("nothing else listens there")
     };
-    socket::serve(listener, engine.clone(), Arc::new(|| {}));
+    socket::serve(listener, engine.clone(), Arc::new(|_| {}));
     let mut mcp = Mcp::start(&socket_path, home.path(), "test-agent");
 
     let tools = mcp.request("tools/list", json!({}))["result"]["tools"].clone();
