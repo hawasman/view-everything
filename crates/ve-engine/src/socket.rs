@@ -12,8 +12,10 @@
 //!
 //! Methods: `echo` (result: the params), `show` (raises the app's window), `search` (streams
 //! [`search::Row`]s for a [`search::Search`]; end: `{"count", "last_synced"}`), `tasks` (streams
-//! running Tasks' progress; with `{"follow": true}` until none runs; end: `{}`).
+//! running Tasks' progress; with `{"follow": true}` until none runs; end: `{}`), and the agent
+//! methods `agents.pending`, `agents.approve` and `files` (see [`agents`]).
 
+mod agents;
 pub mod search;
 #[cfg(windows)]
 mod windows;
@@ -450,6 +452,7 @@ fn serve_lines(reader: &mut impl BufRead, out: &mut BufWriter<impl Write>, engin
             }
             "search" => answer_search(out, &id, params, engine)?,
             "tasks" => answer_tasks(out, &id, &params, engine)?,
+            method @ ("agents.pending" | "agents.approve" | "files") => agents::answer(out, &id, method, params, engine)?,
             other => send(out, &json!({ "id": id, "error": format!("unknown method `{other}`") }))?,
         }
         out.flush()?;

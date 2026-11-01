@@ -1,6 +1,7 @@
 // Release builds on Windows are GUI apps without a console window.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod agent_notice;
 mod app;
 mod apps;
 mod autostart;

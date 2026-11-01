@@ -1,0 +1,287 @@
+//! `ve mcp serve` run as a subprocess and driven with JSON-RPC lines: an agent is refused with an
+//! approval code until approved, answers are capped and continue by cursor, bad calls are
+//! structured refusals, and with no app running it reads the saved Index for an approved agent.
+#![cfg(target_os = "linux")]
+
+use serde_json::{Value, json};
+use std::collections::HashSet;
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use ve_core::{CategoryMap, EntryMeta, Index, SyncState};
+use ve_engine::socket::{self, Claim};
+use ve_engine::{Config, Engine, Phase};
+use ve_scan::VolumeInfo;
+
+/// A running `ve mcp serve`, its socket at `socket` and its data and config folders in `home`.
+struct Mcp {
+    child: Child,
+    input: ChildStdin,
+    output: BufReader<ChildStdout>,
+    next_id: u64,
+}
+
+impl Mcp {
+    fn start(socket: &Path, home: &Path, agent: &str) -> Mcp {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ve"))
+            .args(["mcp", "serve"])
+            .env(socket::PATH_ENV, socket)
+            .env("XDG_DATA_HOME", home.join("data"))
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut mcp = Mcp {
+            input: child.stdin.take().unwrap(),
+            output: BufReader::new(child.stdout.take().unwrap()),
+            child,
+            next_id: 0,
+        };
+        let init = mcp.request(
+            "initialize",
+            json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": agent, "version": "1" } }),
+        );
+        assert_eq!(init["result"]["protocolVersion"], "2025-06-18", "{init}");
+        mcp.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+        mcp
+    }
+
+    fn send(&mut self, message: &Value) {
+        writeln!(self.input, "{message}").unwrap();
+        self.input.flush().unwrap();
+    }
+
+    /// Sends a request and reads its response (the server answers in order).
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        self.next_id += 1;
+        self.send(&json!({ "jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params }));
+        let mut line = String::new();
+        self.output.read_line(&mut line).unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line:?}"));
+        assert_eq!(reply["id"], self.next_id, "{reply}");
+        reply
+    }
+
+    /// Calls a tool and returns its result (`isError`, `content`, `structuredContent`).
+    fn call(&mut self, tool: &str, arguments: Value) -> Value {
+        self.request("tools/call", json!({ "name": tool, "arguments": arguments }))["result"].clone()
+    }
+}
+
+impl Drop for Mcp {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn ve(args: &[&str], socket: &Path, home: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_ve"))
+        .args(args)
+        .env(socket::PATH_ENV, socket)
+        .env("XDG_DATA_HOME", home.join("data"))
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .output()
+        .unwrap()
+}
+
+fn text(result: &Value) -> &str {
+    result["content"][0]["text"].as_str().unwrap()
+}
+
+fn refusal(result: &Value) -> &Value {
+    assert_eq!(result["isError"], true, "{result}");
+    &result["structuredContent"]["refusal"]
+}
+
+fn answer(result: &Value) -> &Value {
+    assert_eq!(result["isError"], false, "{result}");
+    &result["structuredContent"]
+}
+
+fn paths(answer: &Value) -> Vec<String> {
+    answer["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["path"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn an_agent_is_refused_until_approved_then_answered_in_capped_pages() {
+    let (engine_data, fixture, home) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    for n in 0..250 {
+        // One file clearly the largest on disk (small files all take one block).
+        let size = if n == 249 { 64 * 1024 } else { 1 };
+        fs::write(fixture.path().join(format!("report-{n:03}.txt")), "x".repeat(size)).unwrap();
+    }
+    let volume = VolumeInfo {
+        mount: fixture.path().to_path_buf(),
+        identity: "uuid:fixture".into(),
+        fs_type: "ext4".into(),
+        label: "fixture".into(),
+        removable: false,
+        network: false,
+        read_only: false,
+    };
+    let engine = Arc::new(Engine::start(
+        Config {
+            index_path: Some(engine_data.path().join("index.bin")),
+            mounted: vec![volume.clone()],
+            volumes: vec![volume],
+            remotes: Vec::new(),
+            intervals: Default::default(),
+            categories: CategoryMap::builtin(),
+            live_helper: false,
+        },
+        Arc::new(|| {}),
+    ));
+    wait_for("the first Sync", || {
+        !engine.is_busy() && matches!(engine.shared.status.lock().phase, Phase::Idle) && !engine.shared.tasks.finished().is_empty()
+    });
+    let socket_path = home.path().join("run").join("engine.sock");
+    let Claim::Host(listener) = socket::claim(&socket_path).unwrap() else {
+        panic!("nothing else listens there")
+    };
+    socket::serve(listener, engine.clone(), Arc::new(|| {}));
+    let mut mcp = Mcp::start(&socket_path, home.path(), "test-agent");
+
+    let tools = mcp.request("tools/list", json!({}))["result"]["tools"].clone();
+    let names: Vec<_> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["files.find", "files.top", "files.locations", "files.summary"]);
+    assert!(tools.as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
+
+    // First contact: refused with a code, before the call itself is looked at.
+    let refused = mcp.call("files.find", json!({ "query": "ext:txt" }));
+    let code = refusal(&refused)["code"].as_str().unwrap().to_owned();
+    assert_eq!(refusal(&refused)["reason"], "approval_pending");
+    assert!(
+        text(&refused).starts_with(&format!("approval pending, code {code}")),
+        "{}",
+        text(&refused)
+    );
+    assert!(text(&refused).contains(&format!("ve mcp --approve {code}")), "{}", text(&refused));
+
+    let listed = ve(&["mcp", "--list-requests"], &socket_path, home.path());
+    let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+    assert!(listed.contains(&format!("{code}\tFiles\tin 10 min\ttest-agent")), "{listed}");
+    let approved = ve(&["mcp", "--approve", &code.to_lowercase()], &socket_path, home.path());
+    assert!(approved.status.success(), "{}", String::from_utf8_lossy(&approved.stderr));
+    assert_eq!(String::from_utf8_lossy(&approved.stdout), "Approved: test-agent may read Files\n");
+
+    // More than the cap asked for: 200 rows, and a cursor to the rest.
+    let first = mcp.call("files.find", json!({ "query": "ext:txt", "limit": 500 }));
+    let first = answer(&first).clone();
+    assert_eq!((first["total"].as_u64(), first["limit"].as_u64()), (Some(250), Some(200)));
+    assert_eq!(first["source"], "running app");
+    assert!(first["on_disk_size"].as_u64().unwrap() > 0, "{first}");
+    let mut seen = paths(&first);
+    assert_eq!(seen.len(), 200);
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let rest = mcp.call("files.find", json!({ "query": "ext:txt", "limit": 500, "cursor": cursor }));
+    let rest = answer(&rest).clone();
+    assert_eq!(rest["next_cursor"], Value::Null);
+    seen.extend(paths(&rest));
+    assert_eq!(seen.iter().collect::<HashSet<_>>().len(), 250, "pages neither overlap nor skip");
+    // The default page is 50 rows.
+    let top = mcp.call("files.top", json!({ "files": true }));
+    let top = answer(&top);
+    assert_eq!(paths(top).len(), 50);
+    assert!(paths(top)[0].ends_with("report-249.txt"), "largest first: {:?}", &paths(top)[..3]);
+    assert_eq!(top["next_cursor"], "50");
+
+    // Bad calls are refusals the agent can correct.
+    assert_eq!(refusal(&mcp.call("files.find", json!({ "query": "size:" })))["reason"], "bad_query");
+    let outside = mcp.call("files.top", json!({ "path": "/nowhere/at/all" }));
+    assert_eq!(refusal(&outside)["reason"], "bad_path");
+    assert_eq!(refusal(&mcp.call("files.delete", json!({})))["reason"], "unknown_tool");
+    assert_eq!(
+        refusal(&mcp.call("files.find", json!({ "query": "x", "rm": true })))["reason"],
+        "bad_arguments"
+    );
+
+    // Revoked: refused again.
+    engine
+        .permissions()
+        .revoke(ve_engine::permissions::Kind::Agent, "test-agent")
+        .unwrap();
+    assert_eq!(refusal(&mcp.call("files.summary", json!({})))["reason"], "approval_pending");
+    engine.shutdown();
+}
+
+#[test]
+fn with_no_app_running_an_approved_agent_reads_the_saved_index() {
+    let home = tempfile::tempdir().unwrap();
+    let mut index = Index::new();
+    let folder = EntryMeta {
+        is_dir: true,
+        ..Default::default()
+    };
+    let vol = index.add_volume(Path::new("/w"), "ext4", "uuid:w", folder, SyncState::Walk);
+    let root = index.volume(vol).unwrap().root;
+    let docs = index.insert(root, "docs", folder);
+    for name in ["a.pdf", "b.pdf", "c.txt"] {
+        let file = EntryMeta {
+            logical: 1000,
+            on_disk: 4096,
+            ..Default::default()
+        };
+        index.insert(docs, name, file);
+    }
+    index.mark_synced(vol, 1_791_646_413, None);
+    let data = home.path().join("data").join("view-everything");
+    fs::create_dir_all(&data).unwrap();
+    index.save(&data.join("index.bin")).unwrap();
+    fs::write(data.join("agent-keys.json"), r#"{ "approved-agent": "k1" }"#).unwrap();
+    let config = home.path().join("config").join("view-everything");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("settings.toml"),
+        "version = 1\n\n[[permissions]]\nkind = \"agent\"\nsubject = \"approved-agent\"\ngranted_at = 1791646413\nmodule = \"Files\"\nkey = \"k1\"\n",
+    )
+    .unwrap();
+    let nobody = home.path().join("nobody.sock");
+
+    let mut mcp = Mcp::start(&nobody, home.path(), "approved-agent");
+    let found = mcp.call("files.find", json!({ "query": "ext:pdf", "limit": 1 }));
+    let found = answer(&found);
+    assert_eq!(found["source"], "saved Index file");
+    assert_eq!(paths(found), ["/w/docs/a.pdf"]);
+    assert_eq!((found["total"].as_u64(), found["next_cursor"].as_str()), (Some(2), Some("1")));
+    let summary = mcp.call("files.summary", json!({ "path": "/w/docs" }));
+    assert_eq!(
+        (answer(&summary)["files"].as_u64(), answer(&summary)["on_disk_size"].as_u64()),
+        (Some(3), Some(12288))
+    );
+    let locations = mcp.call("files.locations", json!({}));
+    let location = &answer(&locations)["rows"][0];
+    assert_eq!((location["path"].as_str(), &location["online"]), (Some("/w"), &Value::Null));
+    assert_eq!(
+        refusal(&mcp.call("files.find", json!({ "query": "is:offline" })))["reason"],
+        "bad_query"
+    );
+
+    // Same name, no key on file for it here: a new key, which the settings do not approve.
+    fs::remove_file(data.join("agent-keys.json")).unwrap();
+    let mut stranger = Mcp::start(&nobody, home.path(), "approved-agent");
+    let refused = stranger.call("files.find", json!({ "query": "pdf" }));
+    assert_eq!(refusal(&refused)["reason"], "not_approved");
+    assert!(text(&refused).contains("not running"), "{}", text(&refused));
+}

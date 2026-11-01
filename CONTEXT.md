@@ -166,6 +166,10 @@ _Avoid_: size map, block view
 An approval the user granted for something beyond the app's core features, such as an elevated helper, the background service, start at login or an agent's access to a Module. Every Permission can be revoked.
 _Avoid_: consent, grant, access right
 
+**Agent**:
+A program the user runs that asks the app questions over MCP (`ve mcp serve`), such as Claude or an IDE assistant. An agent is its client name plus a key issued on first contact; it reads a Module only under a Permission for that Module, which the user grants by approving the agent's 4-character code. Agents only read.
+_Avoid_: client, bot, assistant (unqualified)
+
 ### Changes
 
 **Trash**:

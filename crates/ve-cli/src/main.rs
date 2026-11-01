@@ -1,5 +1,8 @@
 //! `ve`: asks the running app's engine over its socket and prints Entries, largest folders or
-//! CSV. With the app closed it reads the saved Index file instead (never writing it).
+//! CSV. With the app closed it reads the saved Index file instead (never writing it). `ve mcp`
+//! serves the same to agents over MCP (see [`mcp`]).
+
+mod mcp;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -15,6 +18,8 @@ Usage:
   ve top  [OPTIONS] [--] [QUERY]...   Largest folders (or --files) by On-disk Size (Filtered Size under a Query)
   ve du   ...                         Same as top
   ve export [OPTIONS] [--] [QUERY]... CSV of a Query's results (everything without one; --json for JSON)
+  ve mcp serve | --list-requests | --approve <CODE>
+                                      MCP server for agents, and their approval (ve mcp --help)
 
 Options:
   --csv           CSV output (path, name, Logical Size, On-disk Size, modified, Category, Owner, Owner kind)
@@ -119,6 +124,9 @@ fn parse_args(args: &[String]) -> Result<Option<Args>, String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "mcp") {
+        return mcp::main(&args[1..]);
+    }
     let parsed = match parse_args(&args) {
         Ok(Some(parsed)) => parsed,
         Ok(None) => {

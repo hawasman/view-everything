@@ -69,6 +69,11 @@
 - Settings files are now version 1. A helper or start at login you had switched on is kept, as a Permission "granted before this version".
 - Dismissing or failing the helper's password prompt drops its Permission and turns the Live updates switch back off, so a prompt you said no to is not asked again at the next start.
 
+### Agents
+- `ve mcp serve` is an MCP server for your own agent (Claude, an IDE assistant): four read-only tools, `files.find`, `files.top`, `files.locations` and `files.summary`, each answering totals plus at most 200 rows and a cursor for the next ones. Bad Queries, paths outside the Index and arguments a tool does not take come back as refusals that say why. [More](docs/guide/agents.md)
+- An agent's first call is refused with a 4-character code, and the desktop shows who asked for which Module (Linux and macOS). Approve it in **Settings → Permissions** or with `ve mcp --approve CODE` within 10 minutes; `ve mcp --list-requests` lists the codes waiting. An approved agent is an **Agent access** Permission tied to the agent's name and a key issued on first contact; revoking it refuses the agent's next call.
+- With the app closed, `ve mcp serve` reads the saved Index for agents already approved.
+
 ## v0.2.1
 
 ### Half the memory

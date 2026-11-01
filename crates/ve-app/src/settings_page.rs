@@ -1145,18 +1145,62 @@ impl SettingsPage {
         panel(cx).child(v_flex().gap(px(16.)).child(keep).child(login))
     }
 
-    /// The Permissions section: every Permission granted, when, and a switch that revokes it.
+    /// The Permissions section: agents' requests waiting for approval, then every Permission
+    /// granted, when, and a switch that revokes it.
     fn permissions(&self, cx: &mut Context<Self>) -> Div {
+        let now = chrono::Utc::now().timestamp();
+        let requests = self.engine.agents().pending(now);
         let list = self.engine.permissions().list();
-        if list.is_empty() {
+        if list.is_empty() && requests.is_empty() {
             return panel(cx).child(caption("No Permissions granted", cx));
         }
         let rule = palette(cx).rule;
-        let rows = list.into_iter().enumerate().map(|(ix, permission)| {
-            let Permission { kind, subject, granted_at } = permission;
+        let requests = requests.into_iter().enumerate().map(|(ix, request)| {
+            let minutes = (request.expires_at - now).max(0).unsigned_abs().div_ceil(60);
+            let code = request.code.clone();
+            h_flex()
+                .gap(px(12.))
+                .items_center()
+                .when(ix > 0, |d| d.pt(px(12.)).border_t_1().border_color(rule))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(format!("{} asks to read {}", request.agent, request.module)),
+                        )
+                        .child(caption(
+                            format!("Agent access · Code {} · Expires in {minutes} min", request.code),
+                            cx,
+                        ))
+                        .child(caption(format!("Approve here or with `ve mcp --approve {}`", request.code), cx)),
+                )
+                .child(button(("approve-agent", ix), "Approve").small().build(
+                    cx,
+                    cx.listener(move |this, _, _, cx| {
+                        let approved = this.engine.agents().approve(&code, chrono::Utc::now().timestamp());
+                        this.permission_changed(approved.map(drop), cx);
+                    }),
+                ))
+        });
+        let granted = list.into_iter().enumerate().map(|(ix, permission)| {
+            let Permission {
+                kind,
+                subject,
+                granted_at,
+                module,
+                ..
+            } = permission;
+            let on = match &module {
+                Some(module) => format!("{subject} · {module}"),
+                None => subject.clone(),
+            };
             let about = match granted_at {
-                Some(at) => format!("{subject} · Granted {}", crate::format::time(at.saturating_mul(1_000_000_000))),
-                None => format!("{subject} · Granted before this version"),
+                Some(at) => format!("{on} · Granted {}", crate::format::time(at.saturating_mul(1_000_000_000))),
+                None => format!("{on} · Granted before this version"),
             };
             h_flex()
                 .gap(px(12.))
@@ -1167,8 +1211,15 @@ impl SettingsPage {
                         .checked(true)
                         .disabled(kind == Kind::StartAtLogin && self.login_busy)
                         .on_click(cx.listener(move |this, on: &bool, _, cx| {
-                            if !*on {
-                                this.set_permission(kind, subject.clone(), false, cx);
+                            if *on {
+                                return;
+                            }
+                            match &module {
+                                Some(module) => {
+                                    let revoked = this.engine.agents().revoke(&subject, module);
+                                    this.permission_changed(revoked, cx);
+                                }
+                                None => this.set_permission(kind, subject.clone(), false, cx),
                             }
                         })),
                 )
@@ -1182,7 +1233,14 @@ impl SettingsPage {
                         .child(caption(kind.revoke_note(), cx)),
                 )
         });
-        panel(cx).child(v_flex().gap(px(12.)).children(rows))
+        let pending = requests.len();
+        panel(cx).child(
+            v_flex()
+                .gap(px(12.))
+                .children(requests)
+                .when(pending > 0, |d| d.child(div().border_t_1().border_color(rule)))
+                .children(granted),
+        )
     }
 
     /// Grants (`on`) or revokes the Permission of `kind` on `subject` through the Engine. Start at

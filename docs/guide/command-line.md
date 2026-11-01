@@ -17,11 +17,13 @@
 ve find   [--csv|--json] [--path DIR] <QUERY>...                     matching paths, one per line
 ve top    [--csv|--json] [--path DIR] [--files] [-n N] [QUERY]...    largest folders (or files) by On-disk Size
 ve export [--json] [--path DIR] [QUERY]...                           CSV of a Query's results (everything without one)
+ve mcp serve | --list-requests | --approve CODE                      MCP server for agents, and their approval
 ```
 
 - `ve du` is the same as `ve top`. Under a Query it ranks by Filtered Size.
 - `top` prints `<bytes>\t<path>`.
 - `--index FILE` reads that saved Index file instead of asking the app.
+- `ve mcp` is described in [Agents](agents.md).
 
 The Query is the same [language](query-language.md) as the app's. Quote it for your shell, or put `--` before words that start with `-`.
 
@@ -62,6 +64,9 @@ Newline-delimited JSON, one message per line. The client opens with `{"version":
 | `show` | none | shows the window; `result`: `null` |
 | `search` | `query`, `path` (absolute), `select` (`matches`, `largest_folders`, `largest_files`), `limit` | one `item` per Entry (`path`, `name`, `is_dir`, `logical_size`, `on_disk_size`, `modified_ns` (`null` when unknown), `category`, `owner`, `owner_kind`); `end`: `count`, `last_synced` |
 | `tasks` | `follow` (bool) | one `item` per running Task (`task`, `kind`, `label`, `done`, `total`, `unit`); following, then one per change, and one with `outcome` when a Task finishes, until none runs; `end`: `{}` |
+| `agents.pending` | none | `result`: the agents' approval requests (`code`, `agent`, `module`, `requested_at`, `expires_at`) |
+| `agents.approve` | `code` | `result`: `agent`, `module`, `granted_at`; an unknown or expired code is an `error` |
+| `files` | `agent` (`name`, `key`), `tool`, `arguments` | `result`: `{"answer": ...}` or `{"refusal": ...}`, as the [agent tools](agents.md#tools) answer |
 
 ```sh
 printf '{"version":1}\n{"id":1,"method":"search","params":{"query":"ext:iso","limit":3}}\n' \

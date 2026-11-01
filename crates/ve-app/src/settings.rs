@@ -57,8 +57,9 @@ pub struct Settings {
     /// When the last update check ran, in Unix seconds.
     #[serde(default)]
     pub last_update_check: Option<i64>,
-    /// The approvals the user granted (Permissions): the Live updates helper, start at login. The
-    /// Engine holds them while the app runs and is the one place they change.
+    /// The approvals the user granted (Permissions): the Live updates helper, start at login,
+    /// each agent's access to a Module. The Engine holds them while the app runs and is the one
+    /// place they change.
     #[serde(default)]
     pub permissions: Vec<Permission>,
     /// Queries the user saved under a name, in the order saved.
@@ -203,11 +204,7 @@ impl Settings {
             let before: Before = toml::from_str(text)?;
             for (kind, on) in [(Kind::LiveHelper, before.live_helper), (Kind::StartAtLogin, before.start_at_login)] {
                 if on && !settings.has(kind) {
-                    settings.permissions.push(Permission {
-                        kind,
-                        subject: kind.subject().to_owned(),
-                        granted_at: None,
-                    });
+                    settings.permissions.push(Permission::of(kind, None));
                 }
             }
             settings.version = VERSION;
@@ -528,6 +525,8 @@ mod tests {
             kind,
             subject: subject.into(),
             granted_at: None,
+            module: None,
+            key: None,
         };
         let expected = vec![
             granted_before(Kind::LiveHelper, "ve-fanotify"),
@@ -551,12 +550,15 @@ mod tests {
     }
 
     #[test]
-    fn a_permission_survives_a_save_with_its_grant_time() {
+    fn permissions_survive_a_save_with_grant_time_and_an_agent_s_module_and_key() {
         let mut s = Settings::default();
+        s.permissions.push(Permission::of(Kind::StartAtLogin, Some(1_700_000_000)));
         s.permissions.push(Permission {
-            kind: Kind::StartAtLogin,
-            subject: "view-everything".into(),
-            granted_at: Some(1_700_000_000),
+            kind: Kind::Agent,
+            subject: "Claude".into(),
+            granted_at: Some(1_700_000_100),
+            module: Some("Files".into()),
+            key: Some("0123abcd".into()),
         });
         let back = Settings::from_toml(&toml::to_string_pretty(&s).unwrap()).unwrap();
         assert_eq!(back, s);
