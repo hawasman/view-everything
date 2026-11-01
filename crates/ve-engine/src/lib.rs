@@ -4,6 +4,7 @@
 
 pub mod format;
 mod live;
+pub mod socket;
 pub mod tasks;
 pub mod view;
 

@@ -122,7 +122,10 @@ EOF
     echo "wayland-ve-$name" >"$d/socket"
 
     unset DISPLAY WAYLAND_DISPLAY
+    # Its own engine socket: with the shared one, the app would find the user's running copy (or
+    # another sandbox's), ask it to show its window and exit.
     XDG_CONFIG_HOME=$d/xdg/config XDG_DATA_HOME=$d/xdg/data XDG_CACHE_HOME=$d/xdg/cache XDG_STATE_HOME=$d/xdg/state \
+    VE_SOCKET=$d/run/engine.sock \
     KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1 \
         systemd-run --user --scope --quiet --collect --unit="ve-ui-sandbox-$name" \
             -p MemoryHigh="${VE_SANDBOX_MEMORY_HIGH:-1536M}" -p MemoryMax="${VE_SANDBOX_MEMORY_MAX:-2G}" \

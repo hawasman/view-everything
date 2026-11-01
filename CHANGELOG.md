@@ -18,7 +18,7 @@
 - New Query modifiers: `kind:file` and `kind:folder`; `is:cleanable` (what the Cleaner found), `is:duplicate` (same as `dupe:`) and `is:offline` (Entries on an Offline Volume); `at:/path` (a folder and everything below it); `since:7d`, `since:12h`, `since:2026-10-01` (files modified since then). They combine with text, `|`, `!` and every other modifier.
 - A Query that does not parse says why inside the Query box, naming the modifier.
 - Cleanup Rules accept `kind:` and `at:` (which names a location, like `parent:`), and refuse `is:` and `dupe:` with the reason.
-- `ve` refuses `is:offline` and warns that `is:cleanable` finds nothing.
+- Reading the saved Index, `ve` refuses `is:offline` and warns that `is:cleanable` finds nothing.
 - `Ctrl+1`, `Ctrl+2` and `Ctrl+3` (`Cmd` on macOS) switch to Overview, Browse and Work from any page, the Query box included.
 - The Entry Inspector has **Show in Browse**: it zooms the Query to the folder the Entry is in and selects the Entry there, among its siblings. The rest of the Query stays, unless it would hide the Entry. A Duplicate group's Show in Browse does the same for its kept copy, and the Cleaner's Show in Explorer is now called Show in Browse.
 - The Overview's finding line says how much of the Cleanable total needs administrator ("…; 1.2 GB of it needs administrator"); with none, it says nothing about it.
@@ -49,6 +49,9 @@
 ### Engine
 - The engine (the Index, Tasks, Locations, Live updates, Sync scheduling and Snapshots) is its own crate, `ve-engine`, with no GUI in it ([ADR-0016](docs/adr/0016-engine-library-in-the-tray-process-with-a-local-socket.md)). The app hosts it and behaves as before.
 - A finished Sync's Task shows the Entries it read, as its result says; a quick Sync used to show 0.
+- The app listens on a local socket only your account can open (`$XDG_RUNTIME_DIR/view-everything/engine.sock`; `VE_SOCKET` overrides it), speaking newline-delimited JSON with a version handshake. Windows has no socket yet.
+- Launching the app while it runs brings up the running window (from the tray too) instead of starting a second engine.
+- `ve find`, `ve top` and `ve export` ask the running app, so they see changes from seconds ago, and `dupe:`, `is:duplicate`, `is:cleanable` and `is:offline` work there. With the app closed, `ve` reads the saved Index and says so on stderr.
 
 ## v0.2.1
 
