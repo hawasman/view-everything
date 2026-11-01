@@ -25,13 +25,13 @@ ve mcp --approve 4F2K
 
 A code can be approved for 10 minutes. After that the agent gets a new one the next time it asks. Requests are held by the running app; `--list-requests` and `--approve` need it running.
 
-An agent is its client name plus a key `ve mcp serve` issues it on first contact, kept in the data folder (`agent-keys.json`, readable by your account alone). A client that renames itself, or presents the same name with another key, is a new agent and needs its own approval. Approving the same name and Module again replaces the old key.
+An agent is its client name plus a key `ve mcp serve` issues it on first contact, kept in the data folder (`agent-keys.json`, readable by your account alone). A client that renames itself, or presents the same name with another key, is a new agent and needs its own approval; Settings says when approving it would replace the key an approved agent of that name holds. The key tells agents apart, not programs: any program running as you can read the key file, or run `ve mcp --approve` itself, so approve only the agents you pointed at `ve mcp serve`.
 
 Approval writes an **Agent access** Permission: the agent, the Module and when you approved it. Switch it off in Settings → Permissions to revoke it: the agent's next call is refused and asks for approval again.
 
 ## Tools
 
-All four are read-only and take the [Query language](query-language.md). Each answer holds at most 200 rows (50 unless `limit` says otherwise) with totals over every row, and a `next_cursor` while more rows remain; pass it back as `cursor` for the next page. Every answer says its `last_synced` and its `source` (`running app` or `saved Index file`).
+All four are read-only and take the [Query language](query-language.md). Each answer holds at most 200 rows (50 unless `limit` says otherwise) with totals over every row, and a `next_cursor` while more rows remain; pass it back as `cursor` for the next page. Each page is worked out again from the Index as it is then, so a change between two calls can shift a row into the next page or out of it. Every answer says its `last_synced` and its `source` (`running app` or `saved Index file`).
 
 | Tool | Arguments | Answers |
 | --- | --- | --- |

@@ -32,6 +32,8 @@ pub fn show(request: &Request) {
 fn post(title: &str, body: &str) -> Result<(), String> {
     use std::collections::HashMap;
     use zbus::zvariant::Value;
+    // Servers that support body markup read `<`, `>` and `&` as markup; the agent names itself.
+    let body = body.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     let connection = zbus::blocking::Connection::session().map_err(|e| e.to_string())?;
     let hints: HashMap<&str, Value<'_>> = HashMap::new();
     connection
@@ -45,7 +47,7 @@ fn post(title: &str, body: &str) -> Result<(), String> {
                 0u32,
                 "view-everything",
                 title,
-                body,
+                body.as_str(),
                 Vec::<&str>::new(),
                 hints,
                 -1i32,

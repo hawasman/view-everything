@@ -1156,8 +1156,20 @@ impl SettingsPage {
         }
         let rule = palette(cx).rule;
         let requests = requests.into_iter().enumerate().map(|(ix, request)| {
-            let minutes = (request.expires_at - now).max(0).unsigned_abs().div_ceil(60);
+            let minutes = request.minutes_left(now);
             let code = request.code.clone();
+            // Another key under a name already approved: approving moves the Permission to it.
+            let replaces = list
+                .iter()
+                .any(|p| p.kind == Kind::Agent && p.subject == request.agent && p.module.as_deref() == Some(request.module.as_str()));
+            let how = if replaces {
+                format!(
+                    "Already approved under this name with another key; approving replaces it. Approve here or run ve mcp --approve {}",
+                    request.code
+                )
+            } else {
+                format!("Approve here or run ve mcp --approve {}", request.code)
+            };
             h_flex()
                 .gap(px(12.))
                 .items_center()
@@ -1176,7 +1188,7 @@ impl SettingsPage {
                             format!("Agent access · Code {} · Expires in {minutes} min", request.code),
                             cx,
                         ))
-                        .child(caption(format!("Approve here or with `ve mcp --approve {}`", request.code), cx)),
+                        .child(caption(how, cx)),
                 )
                 .child(button(("approve-agent", ix), "Approve").small().build(
                     cx,
@@ -1186,6 +1198,7 @@ impl SettingsPage {
                     }),
                 ))
         });
+        let requests: Vec<_> = requests.collect();
         let granted = list.into_iter().enumerate().map(|(ix, permission)| {
             let Permission {
                 kind,
@@ -1238,7 +1251,7 @@ impl SettingsPage {
             v_flex()
                 .gap(px(12.))
                 .children(requests)
-                .when(pending > 0, |d| d.child(div().border_t_1().border_color(rule)))
+                .when(pending > 0, |d| d.child(div().h(px(1.)).bg(rule)))
                 .children(granted),
         )
     }
@@ -1829,7 +1842,7 @@ impl Render for SettingsPage {
         let permissions = self.permissions(cx);
         column = column.child(div().h(px(1.)).bg(border)).child(section(
             "Permissions",
-            "Every approval you granted, and when. Switching one off revokes it fully: the Live updates helper stops and is not started again, the login entry is removed.",
+            "Every approval you granted, and when. Switching one off revokes it fully: the Live updates helper stops and is not started again, the login entry is removed, an agent is refused from its next request. Agents asking for access wait here for 10 minutes.",
             permissions,
             cx,
         ));

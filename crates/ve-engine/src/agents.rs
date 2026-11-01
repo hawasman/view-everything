@@ -11,7 +11,6 @@ use crate::Engine;
 use crate::permissions::{Kind, Permission};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::hash::{BuildHasher, Hasher};
 use std::sync::Arc;
 
 /// The one Module agents can read in this version.
@@ -44,6 +43,13 @@ pub struct Request {
     /// Kept here: approving grants this key, and only this key.
     #[serde(skip)]
     key: String,
+}
+
+impl Request {
+    /// Whole minutes, rounded up, until the code expires at `now` (Unix seconds); 0 once it has.
+    pub fn minutes_left(&self, now: i64) -> u64 {
+        (self.expires_at - now).max(0).unsigned_abs().div_ceil(60)
+    }
 }
 
 /// What an agent may do now.
@@ -92,16 +98,11 @@ pub fn new_key() -> String {
     format!("{:016x}{:016x}", random(), random())
 }
 
-/// 64 bits from the operating system's randomness, which seeds every [`std::hash::RandomState`].
+/// 64 bits from the operating system's random number generator.
 fn random() -> u64 {
-    let mut hasher = std::hash::RandomState::new().build_hasher();
-    hasher.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos(),
-    );
-    hasher.finish()
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).expect("the operating system's random number generator");
+    u64::from_le_bytes(bytes)
 }
 
 fn new_code(taken: &[Request]) -> String {

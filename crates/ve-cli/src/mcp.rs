@@ -34,6 +34,8 @@ const PROTOCOL_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
 
 /// The name an agent goes by when its client sent none.
 const UNNAMED: &str = "unnamed agent";
+/// The longest agent name kept, in characters.
+const MAX_NAME: usize = 64;
 
 pub fn main(args: &[String]) -> ExitCode {
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
@@ -80,7 +82,7 @@ fn list_requests(out: &mut impl Write) -> Result<(), String> {
         }
         writeln!(out, "CODE\tMODULE\tEXPIRES\tAGENT")?;
         for r in &pending {
-            let minutes = (r.expires_at - now).max(0).unsigned_abs().div_ceil(60);
+            let minutes = r.minutes_left(now);
             writeln!(out, "{}\t{}\tin {minutes} min\t{}", r.code, r.module, r.agent)?;
         }
         out.flush()
@@ -160,8 +162,19 @@ impl Server {
     }
 
     fn initialize(&mut self, params: &Value) -> Value {
-        let name = params["clientInfo"]["name"].as_str().map(str::trim).filter(|n| !n.is_empty());
-        self.name = Some(name.unwrap_or(UNNAMED).to_owned());
+        // The name is shown to the user (Settings, the desktop notification): one short line.
+        let name: Option<String> = params["clientInfo"]["name"]
+            .as_str()
+            .map(|n| {
+                n.chars()
+                    .filter(|c| !c.is_control())
+                    .take(MAX_NAME)
+                    .collect::<String>()
+                    .trim()
+                    .to_owned()
+            })
+            .filter(|n| !n.is_empty());
+        self.name = Some(name.unwrap_or_else(|| UNNAMED.to_owned()));
         self.agent = None;
         let asked = params["protocolVersion"].as_str().unwrap_or_default();
         let version = PROTOCOL_VERSIONS
@@ -221,7 +234,8 @@ impl Server {
         Ok(agent)
     }
 
-    /// Asks the running app; `None` when none answers.
+    /// Asks the running app; `None` when none answers, or the one answering does not know the
+    /// `files` method (another version of the app).
     fn ask_app(&mut self, agent: &Agent, name: &str, arguments: &Value) -> Option<Result<Value, Refusal>> {
         let params = json!({ "agent": agent, "tool": name, "arguments": arguments });
         // A connection the app closed (it restarted) is opened again once.
@@ -231,7 +245,10 @@ impl Server {
             }
             let reply = match self.engine.as_mut()?.call("files", params.clone()) {
                 Ok(reply) => reply,
-                Err(socket::Error::Refused(why)) => return Some(Err(Refusal::new(Reason::BadArguments, why))),
+                Err(socket::Error::Refused(_)) => {
+                    self.engine = None;
+                    return None;
+                }
                 Err(socket::Error::Io(_)) => {
                     self.engine = None;
                     continue;
