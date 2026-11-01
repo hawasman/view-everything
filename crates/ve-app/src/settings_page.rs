@@ -392,6 +392,9 @@ pub struct SettingsPage {
     exclusions_error: Option<String>,
     /// The pending save of typed exclusions; dropping it cancels the save.
     exclusions_pending: Option<gpui::Task<()>>,
+    /// The Launcher's shortcut field, and why its text is not a usable shortcut.
+    shortcut: Entity<InputState>,
+    shortcut_error: Option<String>,
     /// The category names a Query may use, read once.
     categories: CategoryMap,
     /// Where the Permissions are held, granted and revoked.
@@ -495,6 +498,20 @@ impl SettingsPage {
             }
         })
         .detach();
+        let shortcut = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::launcher::DEFAULT_SHORTCUT)
+                .default_value(settings.launcher_shortcut.clone())
+        });
+        cx.subscribe_in(&shortcut, window, |this, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                this.apply_shortcut(window, cx);
+            }
+        })
+        .detach();
+        // The desktop answers a shortcut request later (Wayland).
+        let host_shortcut = cx.global::<crate::host::Host>().shortcut.clone();
+        cx.observe(&host_shortcut, |_, _, cx| cx.notify()).detach();
         let categories = load_categories().unwrap_or_else(|_| CategoryMap::builtin());
         Self {
             settings,
@@ -507,6 +524,8 @@ impl SettingsPage {
             exclusions,
             exclusions_error: None,
             exclusions_pending: None,
+            shortcut,
+            shortcut_error: None,
             categories,
             engine: cx.global::<crate::host::Host>().engine.clone(),
             login_busy: false,
@@ -1145,6 +1164,65 @@ impl SettingsPage {
         panel(cx).child(v_flex().gap(px(16.)).child(keep).child(login))
     }
 
+    /// The Launcher section: its global shortcut, and what the desktop made of it.
+    fn launcher(&self, cx: &mut Context<Self>) -> Div {
+        use crate::launcher::ShortcutStatus;
+        let p = palette(cx);
+        let status = cx.global::<crate::host::Host>().shortcut.read(cx).status().clone();
+        let line = match &self.shortcut_error {
+            Some(error) => div().text_xs().text_color(p.negative).child(error.clone()),
+            None => match status {
+                ShortcutStatus::Pending => caption("Asking the desktop for the shortcut…", cx),
+                ShortcutStatus::Active { trigger } if trigger == self.settings.launcher_shortcut => {
+                    caption(format!("{trigger} opens the Launcher from any app"), cx)
+                }
+                ShortcutStatus::Active { trigger } => caption(
+                    format!("Your desktop bound {trigger} to the Launcher; change it in the desktop's shortcut settings"),
+                    cx,
+                ),
+                ShortcutStatus::Refused(reason) => div().text_xs().text_color(p.warning).child(format!(
+                    "{reason}. Open the Launcher from the tray menu, or bind the command `view-everything --launcher` to a key in your desktop's shortcut settings."
+                )),
+            },
+        };
+        panel(cx).child(
+            v_flex()
+                .gap(px(8.))
+                .child(div().font_weight(FontWeight::MEDIUM).child("Shortcut"))
+                .child(caption(
+                    "Modifiers and one key, e.g. Alt+Space or Ctrl+Shift+K. Enter applies it.",
+                    cx,
+                ))
+                .child(div().w(px(240.)).child(Input::new(&self.shortcut)))
+                .child(line),
+        )
+    }
+
+    /// Asks for the typed shortcut and keeps it once it names one; otherwise shows why not.
+    fn apply_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.shortcut.read(cx).value().to_string();
+        let shortcut = cx.global::<crate::host::Host>().shortcut.clone();
+        let refused = matches!(shortcut.read(cx).status(), crate::launcher::ShortcutStatus::Refused(_));
+        // Unchanged text asks again only after a refusal (the key may be free now).
+        if text.trim() == self.settings.launcher_shortcut && !refused {
+            self.shortcut_error = None;
+            cx.notify();
+            return;
+        }
+        match shortcut.update(cx, |s, cx| s.set(&text, cx)) {
+            Ok(canonical) => {
+                self.shortcut_error = None;
+                self.shortcut.update(cx, |input, cx| input.set_value(canonical.clone(), window, cx));
+                if self.settings.launcher_shortcut != canonical {
+                    self.settings.launcher_shortcut = canonical;
+                    self.commit(cx);
+                }
+            }
+            Err(e) => self.shortcut_error = Some(e),
+        }
+        cx.notify();
+    }
+
     /// The Permissions section: every Permission granted, when, and a switch that revokes it.
     fn permissions(&self, cx: &mut Context<Self>) -> Div {
         let list = self.engine.permissions().list();
@@ -1766,6 +1844,13 @@ impl Render for SettingsPage {
             "Background",
             "The app can keep running in the system tray after its window closes, so the Index stays fresh and Live updates keep running, and can start when you log in.",
             background,
+            cx,
+        ));
+        let launcher = self.launcher(cx);
+        column = column.child(div().h(px(1.)).bg(border)).child(section(
+            "Launcher",
+            "A global shortcut opens the Launcher from any app, even with this window closed while the app stays in the tray: type part of a file or folder name, Enter opens it, Shift+Enter shows it in Browse. The tray menu opens it too.",
+            launcher,
             cx,
         ));
         let permissions = self.permissions(cx);

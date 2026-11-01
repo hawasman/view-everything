@@ -72,7 +72,7 @@ fn find_answers_from_the_running_engine() {
     let Claim::Host(listener) = socket::claim(&socket_path).unwrap() else {
         panic!("nothing else listens there")
     };
-    socket::serve(listener, engine.clone(), Arc::new(|| {}));
+    socket::serve(listener, engine.clone(), Arc::new(|_| {}));
 
     // Written after the first Sync and picked up by the next; the CLI's own data folder holds no
     // Index file, so only the engine can know it.

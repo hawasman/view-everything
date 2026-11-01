@@ -60,6 +60,8 @@ Newline-delimited JSON, one message per line. The client opens with `{"version":
 | --- | --- | --- |
 | `echo` | anything | `result`: the params |
 | `show` | none | shows the window; `result`: `null` |
+| `launcher` | none | opens the [Launcher](launcher.md), or closes it when open; `result`: `null` |
+| `launch.match` | `text` | the Launcher's matches: at most 50 `item`s (`kind` (`file` or `folder`), `name`, `path`, `offline`, `remote`), best first; blank text matches nothing; `end`: `count` |
 | `search` | `query`, `path` (absolute), `select` (`matches`, `largest_folders`, `largest_files`), `limit` | one `item` per Entry (`path`, `name`, `is_dir`, `logical_size`, `on_disk_size`, `modified_ns` (`null` when unknown), `category`, `owner`, `owner_kind`); `end`: `count`, `last_synced` |
 | `tasks` | `follow` (bool) | one `item` per running Task (`task`, `kind`, `label`, `done`, `total`, `unit`); following, then one per change, and one with `outcome` when a Task finishes, until none runs; `end`: `{}` |
 

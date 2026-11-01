@@ -19,6 +19,7 @@ mod filters;
 mod format;
 mod host;
 mod inspector;
+mod launcher;
 mod locations;
 mod motion;
 mod performance;
@@ -46,7 +47,14 @@ use settings::Settings;
 #[cfg(windows)]
 const NO_ELEVATE: &str = "--no-elevate";
 
+/// Opens the running app's Launcher and exits; with no app running, a Launcher that says so.
+/// A command to bind to a key where the desktop refuses the app's own global shortcut.
+const LAUNCHER: &str = "--launcher";
+
 fn main() {
+    if std::env::args().any(|a| a == LAUNCHER) {
+        return launcher_only();
+    }
     #[cfg(windows)]
     if !std::env::args().any(|a| a == NO_ELEVATE) && !ve_scan::is_elevated() {
         // Ok(true): an elevated copy is starting and takes over. Declined or failed: carry on
@@ -112,6 +120,33 @@ fn main() {
             theme::init(settings.theme, cx);
             motion::init(settings.reduce_motion, cx);
             host::Host::start(&settings, categories, volumes, problems, login, socket, cx);
+        });
+}
+
+/// `--launcher`: asks the running app to open its Launcher. With none running (nothing answers
+/// on the engine socket), opens a Launcher of its own that says so, and exits when it closes.
+fn launcher_only() {
+    use ve_engine::socket::{self, Client, Error};
+    if let Some(path) = socket::path() {
+        match Client::connect(&path).and_then(|mut app| app.call("launcher", Default::default())) {
+            Ok(_) => return,
+            Err(Error::Refused(reason)) => {
+                eprintln!("Another version of View Everything is running ({reason}); quit it first.");
+                std::process::exit(1)
+            }
+            Err(e) if !e.is_not_running() => eprintln!("View Everything did not answer: {e}"),
+            Err(_) => {}
+        }
+    }
+    let settings = Settings::load().unwrap_or_default();
+    gpui_kit::application()
+        .with_assets(theme::Assets)
+        .with_quit_mode(QuitMode::Explicit)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            theme::init(settings.theme, cx);
+            motion::init(settings.reduce_motion, cx);
+            launcher::show(cx);
         });
 }
 

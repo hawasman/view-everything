@@ -53,6 +53,12 @@
 - Clicking a program opens it in the Inspector: version, install date, size, each Owner root with its size, and **Show in Browse** for the largest root.
 - The list is read again after each Sync's Owner detection, so a newly installed game appears with its size.
 
+### Launcher
+- **Alt+Space** opens the **Launcher** from any app: a small window that lists files and folders in the Index by name as you type, at most 50, names starting with the text first, then a word in them, then anywhere, newest first. Enter opens one with its default app, Shift+Enter shows it in Browse, Esc or clicking elsewhere closes it. [More](docs/guide/launcher.md)
+- It works with the main window closed while the app stays in the tray, and the tray menu has a **Launcher** item. Entries on an Offline Volume or a Remote are marked and not opened.
+- **Settings → Launcher** changes the shortcut and says whether the desktop gave it. On Wayland the app asks the desktop's GlobalShortcuts portal. Where the desktop refuses, the tray menu still opens the Launcher, and `view-everything --launcher` can be bound to a key; run with the app closed, it opens a Launcher that says the app is not running.
+- The app's socket answers `launcher` and `launch.match`.
+
 ### Index format
 - The Index is now format 8. A format 7 file is converted when loaded, and every Location is detected once at launch, so Owners appear without waiting for a Sync.
 - A file saved by v0.3 can't be read by v0.2.

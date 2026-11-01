@@ -920,6 +920,16 @@ impl Shell {
         cx.notify();
     }
 
+    /// Shift+Enter in the Launcher: Show in Browse of the Entry at `path`, inspected as if it
+    /// had been clicked. A path no longer in the Index changes nothing.
+    pub fn show_path_in_browse(&mut self, path: &std::path::Path, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.engine.shared.index.read().find_path(path) else {
+            return;
+        };
+        self.show_in_browse(id, window, cx);
+        self.inspected = Some(Inspected::Entry(id));
+    }
+
     /// Outlines on the Treemap what the shown list selects, the last-clicked Entry boldest, and
     /// shows that Entry in the Inspector. A list that cannot show what the Treemap selected
     /// leaves its outline alone.

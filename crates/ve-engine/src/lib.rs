@@ -4,6 +4,7 @@
 
 pub mod apps;
 pub mod format;
+pub mod launch;
 mod live;
 pub mod perf;
 pub mod permissions;
