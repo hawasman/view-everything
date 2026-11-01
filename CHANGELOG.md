@@ -57,6 +57,7 @@
 - A program's size is the Folder Size of its Owner roots in the Index, so it matches what Browse shows. A program none of whose folders is indexed shows "—", as do most packages (only folders a package owns wholly are its Owner roots) and every rpm package (rpm file lists are not read yet).
 - Clicking a program opens it in the Inspector: version, install date, size, each Owner root with its size, and **Show in Browse** for the largest root.
 - The list is read again after each Sync's Owner detection, so a newly installed game appears with its size.
+- A **Startup** tab lists what starts when you log in: XDG autostart entries (yours hiding the system's of the same name) and the systemd user units enabled in the default target, with what each runs and the file that defines it, drop-ins applied. Clicking one opens it in the Inspector with its command and file in full. Read-only. Apps now shows in the rail once any program or startup item is known.
 
 ### Index format
 - The Index is now format 8. A format 7 file is converted when loaded, and every Location is detected once at launch, so Owners appear without waiting for a Sync.

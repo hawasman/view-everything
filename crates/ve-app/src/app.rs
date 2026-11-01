@@ -2,7 +2,7 @@
 //! Cleaner, Duplicates, Performance, Tasks, Settings), the Timeline dock with the Moment, the
 //! status strip and the Inspector.
 
-use crate::apps::{AppsPage, InspectApp};
+use crate::apps::{AppsPage, InspectApp, InspectStartup};
 use crate::categories::CategoryPanel;
 use crate::cleaner::{CleanerPage, ShowInBrowse};
 use crate::compare::{Compare, CompareEvent, moment_of, nearest_snapshot};
@@ -268,6 +268,11 @@ impl Shell {
         let apps = cx.new(|cx| AppsPage::new(engine.clone(), window, cx));
         cx.subscribe(&apps, |this, _, inspect: &InspectApp, cx| {
             this.inspected = Some(Inspected::App(inspect.0.clone()));
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe(&apps, |this, _, inspect: &InspectStartup, cx| {
+            this.inspected = Some(Inspected::Startup(inspect.0.clone()));
             cx.notify();
         })
         .detach();
@@ -2444,6 +2449,7 @@ impl Shell {
                 let table = self.engine.perf.processes(self.moment);
                 crate::performance::inspector_panel(inspecting, table.as_deref(), now)
             }
+            Inspected::Startup(key) => Some(crate::apps::startup_panel(&self.apps.read(cx).startup_item(key, cx)?)),
         }
     }
 
@@ -2842,7 +2848,7 @@ impl Render for Shell {
             }
             Page::Apps => {
                 let shown = match &self.inspected {
-                    Some(Inspected::App(key)) => Some(key.clone()),
+                    Some(Inspected::App(key) | Inspected::Startup(key)) => Some(key.clone()),
                     _ => None,
                 };
                 self.apps.update(cx, |a, cx| a.set_selected(shown, cx));
