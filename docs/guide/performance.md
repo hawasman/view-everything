@@ -23,4 +23,4 @@ A second with no sample is a gap, drawn blank: the app was not running, it was n
 
 ## When it records
 
-Recording runs while the window is open, and after it closes only with **keep in tray** on ([Staying current](live-updates-and-background.md#background-tray-and-start-at-login)). A start at login that waits in the tray records only with keep in tray on. On a 12-core desktop, reading the counters once a second measured 0.02 % of one CPU, and an hour of samples takes about 2 MB.
+Recording runs while the window is open, and after it closes only with **keep in tray** on ([Staying current](live-updates-and-background.md#background-tray-and-start-at-login)). A start at login that waits in the tray records only with keep in tray on. On a 12-core desktop, reading the counters once a second measured 0.02 % of one CPU, and an hour of samples takes about 2 MB. The whole app, idle with a 5.7-million-Entry Index, measured 0.09 % of one CPU waiting in the tray while recording, and 0.5 % with the window open on this page.
