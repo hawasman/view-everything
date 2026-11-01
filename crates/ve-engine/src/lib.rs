@@ -2,6 +2,7 @@
 //! updates, Sync scheduling and Snapshots, and the Views computed for a Query. It knows nothing
 //! of a GUI; its clients hold an [`Engine`] and are told to redraw through [`Repaint`].
 
+pub mod agents;
 pub mod apps;
 pub mod format;
 mod live;
@@ -115,6 +116,8 @@ pub struct Shared {
     pub tasks: Tasks,
     /// The Permissions the user granted, read through [`Engine::permissions`].
     pub permissions: permissions::Store,
+    /// Agents' pending approval requests, read through [`Engine::agents`].
+    pub agents: agents::Store,
     /// Called from the background threads whenever something a client shows has changed.
     pub repaint: Repaint,
 }
@@ -249,6 +252,7 @@ impl Engine {
             folders_syncing: Mutex::new(Vec::new()),
             tasks,
             permissions: permissions::Store::default(),
+            agents: agents::Store::default(),
             repaint,
         });
         let (commands, command_rx) = mpsc::channel();
@@ -1411,6 +1415,7 @@ mod tests {
             followed: Mutex::new(HashSet::new()),
             tasks: Tasks::new(),
             permissions: Default::default(),
+            agents: Default::default(),
             repaint: Arc::new(|| {}),
         }
     }

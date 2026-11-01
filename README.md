@@ -23,6 +23,7 @@ It keeps one Index of every file on your Volumes, saved between runs, so searchi
 - **Query:** results as you type, with modifiers such as `ext:`, `size:>1gb`, `dm:yesterday`, `regex:`, `dupe:` and `owner:`. [More](docs/guide/query-language.md)
 - **Saved Queries** for the searches you repeat.
 - **Command line:** `ve find`, `ve top` and `ve export` read the same Index. [More](docs/guide/command-line.md)
+- **Agents:** `ve mcp serve` lets your own agent (any MCP client) read the Index, once you approve it. [More](docs/guide/agents.md)
 
 ### See
 - **Overview:** what is indexed, what can be cleaned up, the Trash, when the Index was last synced; then a used bar per Location, the Categories, and the largest and most recently modified files.

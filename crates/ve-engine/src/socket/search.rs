@@ -90,8 +90,23 @@ pub struct Found {
 /// Runs `search` on `index` with an already parsed Query.
 pub fn run(index: &Index, categories: &CategoryMap, query: Option<&Query>, search: &Search) -> Result<Vec<Row>, String> {
     let filter = Filter::compute(index, query);
-    let scope = scope(index, search.path.as_deref().map(Path::new))?;
-    let mut ids: Vec<EntryId> = match search.select {
+    let mut ids = select(index, &filter, query, search.path.as_deref().map(Path::new), search.select)?;
+    if let Some(limit) = search.limit {
+        ids.truncate(limit);
+    }
+    Ok(ids.into_iter().map(|id| row(index, &filter, categories, id)).collect())
+}
+
+/// The Entries under `path` (everywhere without one) that `select` lists, in its order.
+pub(crate) fn select(
+    index: &Index,
+    filter: &Filter,
+    query: Option<&Query>,
+    path: Option<&Path>,
+    select: Select,
+) -> Result<Vec<EntryId>, String> {
+    let scope = scope(index, path)?;
+    let mut ids: Vec<EntryId> = match select {
         Select::Matches => scope.into_iter().filter(|&id| query.is_none() || filter.is_matched(id)).collect(),
         Select::LargestFiles => scope.into_iter().filter(|&id| !index.is_dir(id) && filter.is_counted(id)).collect(),
         Select::LargestFolders => scope
@@ -99,18 +114,15 @@ pub fn run(index: &Index, categories: &CategoryMap, query: Option<&Query>, searc
             .filter(|&id| index.is_dir(id) && filter.totals(index, id).files > 0)
             .collect(),
     };
-    if search.select == Select::Matches {
+    if select == Select::Matches {
         ids.sort_by_cached_key(|&id| index.path(id));
     } else {
         ids.sort_by_cached_key(|&id| (std::cmp::Reverse(filter.totals(index, id).on_disk), index.path(id)));
     }
-    if let Some(limit) = search.limit {
-        ids.truncate(limit);
-    }
-    Ok(ids.into_iter().map(|id| row(index, &filter, categories, id)).collect())
+    Ok(ids)
 }
 
-fn row(index: &Index, filter: &Filter, categories: &CategoryMap, id: EntryId) -> Row {
+pub(crate) fn row(index: &Index, filter: &Filter, categories: &CategoryMap, id: EntryId) -> Row {
     let totals = filter.totals(index, id);
     let name = index.name(id);
     let owner = index.entry_owner(id);
@@ -128,7 +140,7 @@ fn row(index: &Index, filter: &Filter, categories: &CategoryMap, id: EntryId) ->
 }
 
 /// Live Entries under `path` (not `path` itself), or every live Entry without one.
-fn scope(index: &Index, path: Option<&Path>) -> Result<Vec<EntryId>, String> {
+pub(crate) fn scope(index: &Index, path: Option<&Path>) -> Result<Vec<EntryId>, String> {
     let Some(path) = path else {
         return Ok((0..index.capacity() as u32).map(EntryId).filter(|&id| index.is_live(id)).collect());
     };
@@ -157,18 +169,10 @@ impl Engine {
     /// the Index still loading.
     pub fn find_rows(&self, search: &Search) -> Result<Found, String> {
         let shared = &self.shared;
-        if matches!(shared.status.lock().phase, Phase::LoadingIndex) {
-            return Err("the app is still loading its Index; try again in a moment".into());
+        if self.is_loading_index() {
+            return Err(LOADING.into());
         }
-        let query = match search.query.trim() {
-            "" => None,
-            text => {
-                let context = QueryContext::new(shared.categories.clone(), Local::now())
-                    .with_duplicates(shared.duplicates.lock().set.clone())
-                    .with_cleanables(shared.cleanables.lock().set.clone());
-                Some(Query::parse(text, &context).map_err(|e| format!("bad Query: {e}"))?)
-            }
-        };
+        let query = self.parse_query(&search.query).map_err(|e| format!("bad Query: {e}"))?;
         // Rows are built under the read lock and sent after it is released, so a slow reader
         // never holds up a Sync.
         let index = shared.index.read();
@@ -178,4 +182,27 @@ impl Engine {
             last_synced: LastSynced::of(&index),
         })
     }
+
+    /// Whether the saved Index is still being read: nothing can be answered from it yet.
+    pub(crate) fn is_loading_index(&self) -> bool {
+        matches!(self.shared.status.lock().phase, Phase::LoadingIndex)
+    }
+
+    /// Parses Query `text` as the app knows it now: `dupe:`, `is:duplicate` and `is:cleanable`
+    /// use the Duplicates and Cleanables found so far. `None` for empty text.
+    pub(crate) fn parse_query(&self, text: &str) -> Result<Option<Query>, String> {
+        let shared = &self.shared;
+        match text.trim() {
+            "" => Ok(None),
+            text => {
+                let context = QueryContext::new(shared.categories.clone(), Local::now())
+                    .with_duplicates(shared.duplicates.lock().set.clone())
+                    .with_cleanables(shared.cleanables.lock().set.clone());
+                Query::parse(text, &context).map(Some).map_err(|e| e.to_string())
+            }
+        }
+    }
 }
+
+/// Why the engine cannot answer yet.
+pub(crate) const LOADING: &str = "the app is still loading its Index; try again in a moment";

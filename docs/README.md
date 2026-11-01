@@ -14,6 +14,7 @@
 | [Staying current](guide/live-updates-and-background.md) | Sync, Catch-up, Live updates per platform, tray and start at login |
 | [Remotes](guide/remotes.md) | SSH, S3, FTP, WebDAV and Azure Blob Locations |
 | [Command line](guide/command-line.md) | `ve find`, `ve top`, `ve export` |
+| [Agents (MCP)](guide/agents.md) | `ve mcp serve`, approving an agent, the read-only Files tools and their refusals |
 | [Updates and verifying downloads](guide/updates-and-verification.md) | minisign signatures, the update check, self-update |
 
 ## The project

@@ -53,6 +53,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
+# The desktop notification for an agent's approval request (already in the tree through ksni).
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 
 [dev-dependencies]
 minisign = "0.10"

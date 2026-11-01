@@ -44,11 +44,7 @@ fn hooks(removal: Result<(), String>) -> (Hooks, Arc<Mutex<Calls>>) {
 }
 
 fn granted_before(kind: Kind) -> Permission {
-    Permission {
-        kind,
-        subject: kind.subject().to_owned(),
-        granted_at: None,
-    }
+    Permission::of(kind, None)
 }
 
 #[test]
@@ -111,6 +107,8 @@ fn granting_records_the_time_once_and_saves() {
         kind: Kind::LiveHelper,
         subject: "ve-fanotify".into(),
         granted_at: Some(1_700_000_000),
+        module: None,
+        key: None,
     }];
     assert_eq!(engine.permissions().list(), granted);
     assert_eq!(calls.lock().saved, vec![granted]);
