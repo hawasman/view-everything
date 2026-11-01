@@ -96,6 +96,43 @@ pub struct Program {
     pub installed: Option<i64>,
     /// The Owner its Owner roots carry in the Index.
     pub owner: Owner,
+    /// How the Launcher starts it; `None` when its source names no way to (a library package,
+    /// an `/opt` folder, an rpm package, whose file list this does not read).
+    pub launch: Option<Launch>,
+}
+
+/// A program's launch command.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum Launch {
+    /// A desktop entry file the program installed: its `Exec` line.
+    DesktopEntry(PathBuf),
+    /// A Flatpak application id: `flatpak run <id>`.
+    Flatpak(String),
+    /// A Steam app id: `steam://rungameid/<id>`.
+    Steam(String),
+}
+
+/// The first desktop entry among `files` (paths as a package database lists them, relative or
+/// absolute) that a menu shows: an application with an `Exec`, not hidden, not run in a
+/// terminal.
+fn desktop_entry<'a>(root: &Path, files: impl Iterator<Item = &'a str>) -> Option<Launch> {
+    files
+        .map(|f| f.trim_start_matches('/'))
+        .filter(|f| f.starts_with("usr/share/applications/") && f.ends_with(".desktop"))
+        .map(|f| root.join(f))
+        .find(|path| fs::read_to_string(path).is_ok_and(|text| shown(&text)))
+        .map(Launch::DesktopEntry)
+}
+
+/// Whether a desktop entry is an application a menu shows and a click can start.
+fn shown(text: &str) -> bool {
+    let value = |key| group_value(text, "Desktop Entry", key);
+    value("Type") == Some("Application")
+        && value("Exec").is_some()
+        && value("NoDisplay") != Some("true")
+        && value("Hidden") != Some("true")
+        && value("Terminal") != Some("true")
 }
 
 /// Every installed program the sources list.
@@ -144,12 +181,14 @@ pub fn pacman(root: &Path) -> Vec<Program> {
         .filter_map(|entry| {
             let desc = fs::read_to_string(db.join(&entry).join("desc")).ok()?;
             let name = desc_field(&desc, "%NAME%")?.to_owned();
+            let files = fs::read_to_string(db.join(&entry).join("files")).unwrap_or_default();
             Some(Program {
                 kind: AppKind::Package,
                 source: "pacman",
                 version: desc_field(&desc, "%VERSION%").map(str::to_owned),
                 installed: desc_field(&desc, "%INSTALLDATE%").and_then(|d| d.parse().ok()),
                 owner: owners::package_owner(&name, "pacman"),
+                launch: desktop_entry(root, files.lines()),
                 id: name.clone(),
                 name,
             })
@@ -179,8 +218,11 @@ pub fn dpkg(root: &Path) -> Vec<Program> {
                 return None;
             }
             let arch = field("Architecture").unwrap_or_default();
-            let installed = modified(&info.join(format!("{name}.list"))).or_else(|| modified(&info.join(format!("{name}:{arch}.list"))));
+            let list = [format!("{name}.list"), format!("{name}:{arch}.list")].map(|f| info.join(f));
+            let installed = list.iter().find_map(|l| modified(l));
+            let files = list.iter().find_map(|l| fs::read_to_string(l).ok()).unwrap_or_default();
             Some(Program {
+                launch: desktop_entry(root, files.lines()),
                 name: name.to_owned(),
                 kind: AppKind::Package,
                 source: "dpkg",
@@ -226,6 +268,7 @@ pub fn rpm_query(text: &str) -> Vec<Program> {
                 version: fields.next().filter(|v| !v.is_empty()).map(str::to_owned),
                 installed: fields.next().and_then(|t| t.trim().parse().ok()),
                 owner: owners::package_owner(name, "rpm"),
+                launch: None,
             })
         })
         .collect()
@@ -264,6 +307,7 @@ pub fn flatpak(sources: &Sources) -> Vec<Program> {
                 version,
                 installed: modified(&active),
                 owner,
+                launch: Some(Launch::Flatpak(id.clone())),
                 id,
             });
         }
@@ -360,6 +404,7 @@ pub fn steam(home: &Path) -> Vec<Program> {
                 version: vdf_value(&text, "buildid").map(|b| format!("build {b}")),
                 installed: vdf_value(&text, "LastUpdated").and_then(|t| t.parse().ok()).filter(|&t| t > 0),
                 owner: owners::steam_owner(title),
+                launch: Some(Launch::Steam(appid.to_owned())),
             });
         }
     }
@@ -384,6 +429,7 @@ pub fn opt(root: &Path) -> Vec<Program> {
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64),
                 owner: owners::opt_owner(&name),
+                launch: None,
                 id: name.clone(),
                 name,
             })
@@ -425,6 +471,7 @@ mod tests {
                 version: Some("9.1-1".into()),
                 installed: Some(1_700_000_000),
                 owner: Owner::new(OwnerKind::System, "vim", "pacman"),
+                launch: None,
             }]
         );
     }

@@ -621,6 +621,7 @@ mod tests {
                 version: None,
                 installed,
                 owner: owners::opt_owner(name),
+                launch: None,
             },
             roots: Vec::new(),
             size,
