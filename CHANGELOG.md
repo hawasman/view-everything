@@ -64,6 +64,10 @@
 - Launching the app while it runs brings up the running window (from the tray too) instead of starting a second engine.
 - `ve find`, `ve top` and `ve export` ask the running app, so they see changes from seconds ago, and `dupe:`, `is:duplicate`, `is:cleanable` and `is:offline` work there. With the app closed, `ve` reads the saved Index and says so on stderr.
 
+### Permissions
+- **Settings → Permissions** lists every Permission you granted (the Live updates helper, start at login) with when you granted it. Switching one off revokes it fully: the helper stops and is not started again, the login entry is removed. The Live updates and Start at login switches read and change the same list.
+- Settings files are now version 1. A helper or start at login you had switched on is kept, as a Permission "granted before this version".
+
 ## v0.2.1
 
 ### Half the memory

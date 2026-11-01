@@ -51,3 +51,7 @@ Started as administrator, the app reads each local NTFS Volume's Master File Tab
 On Linux the tray needs a StatusNotifierItem host. GNOME needs the AppIndicator extension (`gnome-shell-extension-appindicator` on Arch). Without one, both switches are disabled and closing the window quits.
 
 Turning a switch off removes what it installed: the autostart entry, the scheduled task or the LaunchAgent.
+
+## Permissions
+
+The Live updates helper and start at login are **Permissions**: approvals beyond the app's core features. **Settings → Permissions** lists each one you granted and when; one granted before v0.3.0 says "Granted before this version". Its switch revokes it fully, the same as switching it off where it was granted: the helper stops and is not started again until you grant it again, and the login entry is removed. The list is kept in `settings.toml`.

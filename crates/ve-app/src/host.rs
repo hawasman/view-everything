@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
 use ve_core::CategoryMap;
+use ve_engine::permissions::{Hooks, Kind};
 use ve_engine::{Config, Engine, Repaint};
 use ve_scan::VolumeInfo;
 
@@ -79,7 +80,7 @@ impl Host {
             })
         };
         let indexed: Vec<VolumeInfo> = volumes.iter().filter(|v| settings.is_indexed(v)).cloned().collect();
-        let paused = login && cfg!(target_os = "linux") && settings.live_helper;
+        let paused = login && cfg!(target_os = "linux") && settings.has(Kind::LiveHelper);
         let config = Config {
             index_path: ve_core::paths::index_path(),
             mounted: volumes.clone(),
@@ -87,12 +88,18 @@ impl Host {
             remotes: settings.remotes.clone(),
             intervals: settings.intervals(&indexed),
             categories: categories.clone(),
-            live_helper: settings.live_helper && !paused,
+            live_helper: settings.has(Kind::LiveHelper) && !paused,
         };
         let engine = Engine::start(config, repaint.clone());
         engine.set_duplicate_exclusions(settings.duplicate_exclusions.clone());
         engine.set_remote_names(&settings.remote_names);
         engine.perf.set_recording(settings.keep_in_tray);
+        // The Engine holds the Permissions; a revoke from any client is undone and saved here.
+        engine.permissions().load(settings.permissions.clone());
+        engine.permissions().set_hooks(Hooks {
+            remove_login_entry: Box::new(|| crate::autostart::set(false)),
+            save: Box::new(Settings::save_permissions),
+        });
         let engine = Arc::new(engine);
 
         let (actions, chosen) = async_channel::unbounded::<TrayAction>();
@@ -236,13 +243,16 @@ impl Host {
         }
     }
 
-    /// Starts the Live updates a login start held back.
+    /// Starts the Live updates a login start held back, if the helper's Permission is still held
+    /// (another client may have revoked it meanwhile).
     pub fn start_live(cx: &mut App) {
         let host = cx.global_mut::<Host>();
         if !std::mem::replace(&mut host.live_paused, false) {
             return;
         }
-        host.engine.set_live_helper(true);
+        if host.engine.permissions().has(Kind::LiveHelper) {
+            host.engine.set_live_helper(true);
+        }
         (host.repaint)();
     }
 

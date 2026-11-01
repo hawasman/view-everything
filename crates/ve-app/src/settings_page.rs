@@ -16,9 +16,11 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use ve_core::paths::load_categories;
 use ve_core::{AzureRemote, CategoryMap, FtpRemote, FtpTls, Query, QueryContext, Remote, S3Remote, WebdavRemote};
-use ve_engine::{Intervals, last_synced_label};
+use ve_engine::permissions::{Kind, Permission};
+use ve_engine::{Engine, Intervals, last_synced_label};
 use ve_scan::VolumeInfo;
 
 /// How long typing in the Duplicate Exclusions pauses before they are saved.
@@ -392,6 +394,8 @@ pub struct SettingsPage {
     exclusions_pending: Option<gpui::Task<()>>,
     /// The category names a Query may use, read once.
     categories: CategoryMap,
+    /// Where the Permissions are held, granted and revoked.
+    engine: Arc<Engine>,
     /// A start-at-login change is in flight.
     login_busy: bool,
     /// Set when the settings file could not be written.
@@ -504,6 +508,7 @@ impl SettingsPage {
             exclusions_error: None,
             exclusions_pending: None,
             categories,
+            engine: cx.global::<crate::host::Host>().engine.clone(),
             login_busy: false,
             problem: None,
             remote_host,
@@ -794,8 +799,15 @@ impl SettingsPage {
 
     /// Saves the settings and tells the window what to apply.
     fn commit(&mut self, cx: &mut Context<Self>) {
-        self.problem = self.settings.save().err().map(|e| format!("Could not save settings: {e}"));
+        self.save();
         self.emit_changed(cx);
+    }
+
+    /// Writes the settings, with the Permissions as the Engine holds them.
+    fn save(&mut self) {
+        let engine = self.engine.clone();
+        let saved = self.settings.save(|| engine.permissions().list());
+        self.problem = saved.err().map(|e| format!("Could not save settings: {e}"));
     }
 
     fn emit_changed(&mut self, cx: &mut Context<Self>) {
@@ -804,7 +816,7 @@ impl SettingsPage {
             mounted: self.volumes.clone(),
             remotes: self.settings.remotes.clone(),
             intervals: self.settings.intervals(&indexed),
-            live_helper: self.settings.live_helper,
+            live_helper: self.engine.permissions().has(Kind::LiveHelper),
             indexed,
         });
         cx.notify();
@@ -1085,10 +1097,9 @@ impl SettingsPage {
                 .items_center()
                 .child(
                     Switch::new("live-helper")
-                        .checked(self.settings.live_helper)
+                        .checked(self.engine.permissions().has(Kind::LiveHelper))
                         .on_click(cx.listener(|this, on: &bool, _, cx| {
-                            this.settings.live_helper = *on;
-                            this.commit(cx);
+                            this.set_permission(Kind::LiveHelper, Kind::LiveHelper.subject().to_owned(), *on, cx)
                         })),
                 )
                 .child("Follow file changes live (asks for administrator authentication)"),
@@ -1124,38 +1135,97 @@ impl SettingsPage {
             .items_center()
             .child(
                 Switch::new("start-at-login")
-                    .checked(self.settings.start_at_login)
+                    .checked(self.engine.permissions().has(Kind::StartAtLogin))
                     .disabled(self.login_busy)
-                    .on_click(cx.listener(|this, on: &bool, _, cx| this.set_start_at_login(*on, cx))),
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        this.set_permission(Kind::StartAtLogin, Kind::StartAtLogin.subject().to_owned(), *on, cx)
+                    })),
             )
             .child("Start at login");
         panel(cx).child(v_flex().gap(px(16.)).child(keep).child(login))
     }
 
-    /// Saves the setting, then makes (or removes) the login entry off the UI thread: on Windows
-    /// that waits for the elevation prompt. A failure puts the switch back and says why.
-    fn set_start_at_login(&mut self, on: bool, cx: &mut Context<Self>) {
-        if self.login_busy {
+    /// The Permissions section: every Permission granted, when, and a switch that revokes it.
+    fn permissions(&self, cx: &mut Context<Self>) -> Div {
+        let list = self.engine.permissions().list();
+        if list.is_empty() {
+            return panel(cx).child(caption("No Permissions granted", cx));
+        }
+        let rule = palette(cx).rule;
+        let rows = list.into_iter().enumerate().map(|(ix, permission)| {
+            let Permission { kind, subject, granted_at } = permission;
+            let about = match granted_at {
+                Some(at) => format!("{subject} · Granted {}", crate::format::time(at.saturating_mul(1_000_000_000))),
+                None => format!("{subject} · Granted before this version"),
+            };
+            h_flex()
+                .gap(px(12.))
+                .items_start()
+                .when(ix > 0, |d| d.pt(px(12.)).border_t_1().border_color(rule))
+                .child(
+                    Switch::new(("revoke-permission", ix))
+                        .checked(true)
+                        .disabled(kind == Kind::StartAtLogin && self.login_busy)
+                        .on_click(cx.listener(move |this, on: &bool, _, cx| {
+                            if !*on {
+                                this.set_permission(kind, subject.clone(), false, cx);
+                            }
+                        })),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.))
+                        .child(div().font_weight(FontWeight::MEDIUM).child(kind.label()))
+                        .child(caption(about, cx))
+                        .child(caption(kind.revoke_note(), cx)),
+                )
+        });
+        panel(cx).child(v_flex().gap(px(12.)).children(rows))
+    }
+
+    /// Grants (`on`) or revokes the Permission of `kind` on `subject` through the Engine. Start at
+    /// login makes or removes its login entry off the UI thread (Windows waits for the elevation
+    /// prompt), and its switch moves once that is done. A failure leaves the Permission as it was
+    /// and says why.
+    fn set_permission(&mut self, kind: Kind, subject: String, on: bool, cx: &mut Context<Self>) {
+        let engine = self.engine.clone();
+        let change = move || {
+            if !on {
+                return engine.permissions().revoke(kind, &subject);
+            }
+            if kind == Kind::StartAtLogin {
+                crate::autostart::set(true)?;
+            }
+            engine.permissions().grant(kind, chrono::Utc::now().timestamp())
+        };
+        if kind != Kind::StartAtLogin {
+            let done = change();
+            self.permission_changed(done, cx);
             return;
         }
-        let before = self.settings.start_at_login;
-        self.login_busy = true;
-        self.settings.start_at_login = on;
-        self.commit(cx);
+        if std::mem::replace(&mut self.login_busy, true) {
+            return;
+        }
+        cx.notify();
         cx.spawn(async move |this, cx| {
-            let done = cx.background_executor().spawn(async move { crate::autostart::set(on) }).await;
+            let done = cx.background_executor().spawn(async move { change() }).await;
             this.update(cx, |this, cx| {
                 this.login_busy = false;
-                if let Err(why) = done {
-                    this.settings.start_at_login = before;
-                    this.commit(cx);
-                    this.problem = Some(why);
-                }
-                cx.notify();
+                this.permission_changed(done, cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Saves what a grant or revoke left, and says why it failed, if it did.
+    fn permission_changed(&mut self, done: Result<(), String>, cx: &mut Context<Self>) {
+        self.commit(cx);
+        if let Err(why) = done {
+            self.problem = Some(why);
+        }
     }
 
     /// The Updates section: the daily-check switch, Check now and what the last check found.
@@ -1207,7 +1277,7 @@ impl SettingsPage {
         self.update_status = status;
         self.settings.last_update_check = Some(at);
         // Only the check time changed: nothing for the window to apply.
-        self.problem = self.settings.save().err().map(|e| format!("Could not save settings: {e}"));
+        self.save();
         cx.notify();
     }
 
@@ -1696,6 +1766,13 @@ impl Render for SettingsPage {
             "Background",
             "The app can keep running in the system tray after its window closes, so the Index stays fresh and Live updates keep running, and can start when you log in.",
             background,
+            cx,
+        ));
+        let permissions = self.permissions(cx);
+        column = column.child(div().h(px(1.)).bg(border)).child(section(
+            "Permissions",
+            "Every approval you granted, and when. Switching one off revokes it fully: the Live updates helper stops and is not started again, the login entry is removed.",
+            permissions,
             cx,
         ));
         #[cfg(feature = "updater")]
