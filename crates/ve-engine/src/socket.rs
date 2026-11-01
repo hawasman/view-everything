@@ -15,6 +15,8 @@
 //! running Tasks' progress; with `{"follow": true}` until none runs; end: `{}`).
 
 pub mod search;
+#[cfg(windows)]
+mod windows;
 
 use crate::Engine;
 use crate::tasks::{Outcome, TaskInfo};
@@ -40,13 +42,17 @@ const TASKS_POLL: Duration = Duration::from_millis(250);
 pub type Show = Arc<dyn Fn() + Send + Sync>;
 
 /// Where the socket is: `$VE_SOCKET`, else `$XDG_RUNTIME_DIR/view-everything/engine.sock`, else a
-/// per-user folder in the temporary folder. `None` where there is no socket yet (Windows).
+/// per-user folder in the temporary folder. On Windows a named pipe, `\\.\pipe\view-everything-<SID>-engine`
+/// (`$VE_SOCKET` names it, or is turned into a pipe name). `None` when the user cannot be identified.
 pub fn path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os(PATH_ENV).filter(|p| !p.is_empty()) {
-        return Some(path.into());
-    }
+    let custom = std::env::var_os(PATH_ENV).filter(|p| !p.is_empty());
+    #[cfg(windows)]
+    return windows::path(custom.as_deref());
     #[cfg(unix)]
     {
+        if let Some(path) = custom {
+            return Some(path.into());
+        }
         let dir = match std::env::var_os("XDG_RUNTIME_DIR").filter(|p| !p.is_empty()) {
             Some(runtime) => PathBuf::from(runtime).join(ve_core::paths::APP_DIR),
             // SAFETY: getuid has no preconditions and cannot fail.
@@ -54,8 +60,6 @@ pub fn path() -> Option<PathBuf> {
         };
         Some(dir.join("engine.sock"))
     }
-    #[cfg(not(unix))]
-    None
 }
 
 /// Why a client could not talk to the engine.
@@ -103,29 +107,45 @@ pub struct Client<S: io::Read + Write = Stream> {
     next_id: u64,
 }
 
+/// How long a client waits for the engine's handshake answer before giving up on it.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The transport: a Unix socket.
 #[cfg(unix)]
 pub type Stream = std::os::unix::net::UnixStream;
-/// No socket transport here yet; connecting always fails.
-#[cfg(not(unix))]
-pub type Stream = std::net::TcpStream;
+/// The transport: a named pipe.
+#[cfg(windows)]
+pub type Stream = windows::Stream;
 
 impl Client {
-    /// Connects to the engine at `path` and shakes hands.
+    /// Connects to the engine at `path` and shakes hands, giving up on a host that does not
+    /// answer within a few seconds.
     pub fn connect(path: &Path) -> Result<Client, Error> {
         #[cfg(unix)]
         {
             let stream = Stream::connect(path)?;
-            Client::handshake(stream.try_clone()?, stream)
+            stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+            let client = Client::handshake(stream.try_clone()?, stream).map_err(timed_out)?;
+            client.reader.get_ref().set_read_timeout(None)?;
+            Ok(client)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            let _ = path;
-            Err(Error::Io(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "no engine socket on this platform yet",
-            )))
+            let stream = windows::connect(path)?;
+            let read = stream.try_clone()?;
+            windows::with_deadline(&stream, HANDSHAKE_TIMEOUT, || Client::handshake(read, stream.try_clone()?))
         }
+    }
+}
+
+/// A read that timed out is not "nothing running" and not a refusal: it says so.
+#[cfg(unix)]
+fn timed_out(e: Error) -> Error {
+    match e {
+        Error::Io(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+            Error::Io(io::Error::new(io::ErrorKind::TimedOut, "the engine did not answer in time"))
+        }
+        other => other,
     }
 }
 
@@ -222,10 +242,11 @@ pub struct Listener {
     inner: std::os::unix::net::UnixListener,
     #[cfg(unix)]
     _lock: std::fs::File,
+    #[cfg(windows)]
+    inner: windows::Pipe,
 }
 
 /// How long a launch that lost the host lock waits for the winner's socket to answer.
-#[cfg(unix)]
 const CLAIM_WAIT: Duration = Duration::from_secs(5);
 
 /// Makes this process the engine's host, unless an app already runs here. Whoever holds an
@@ -261,6 +282,24 @@ pub fn claim(path: &Path) -> io::Result<Claim> {
     if locked.kind() != io::ErrorKind::WouldBlock {
         return Err(locked);
     }
+    await_host(path)
+}
+
+/// Makes this process the engine's host, unless an app already runs here: whoever creates the
+/// pipe's first instance hosts (the pipe is the user's alone, remote clients refused); a launch
+/// that cannot create it connects to the host instead, waiting for it to answer.
+#[cfg(windows)]
+pub fn claim(path: &Path) -> io::Result<Claim> {
+    match windows::Pipe::claim(path) {
+        Ok(inner) => Ok(Claim::Host(Listener { inner })),
+        // ERROR_ACCESS_DENIED: the name is taken by a host's first instance.
+        Err(e) if e.raw_os_error() == Some(windows::ACCESS_DENIED) => await_host(path),
+        Err(e) => Err(e),
+    }
+}
+
+/// Connects to the host that holds the engine socket, waiting for it to start answering.
+fn await_host(path: &Path) -> io::Result<Claim> {
     let deadline = std::time::Instant::now() + CLAIM_WAIT;
     loop {
         match Client::connect(path) {
@@ -272,11 +311,6 @@ pub fn claim(path: &Path) -> io::Result<Claim> {
             Err(Error::Io(e)) => return Err(e),
         }
     }
-}
-
-#[cfg(not(unix))]
-pub fn claim(_path: &Path) -> io::Result<Claim> {
-    Err(io::Error::new(io::ErrorKind::Unsupported, "no engine socket on this platform yet"))
 }
 
 /// Creates `dir` for the user alone (0700), or checks an existing one is the user's and closed
@@ -321,16 +355,57 @@ pub fn serve(listener: Listener, engine: Arc<Engine>, show: Show) {
             }
         })
         .expect("spawning the socket thread");
-    #[cfg(not(unix))]
-    let _ = (listener, engine, show);
+    #[cfg(windows)]
+    std::thread::Builder::new()
+        .name("engine socket".into())
+        .spawn(move || {
+            let mut listener = listener;
+            loop {
+                let stream = match listener.inner.accept() {
+                    Ok(stream) => stream,
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                };
+                let (engine, show) = (engine.clone(), show.clone());
+                let _ = std::thread::Builder::new().name("engine client".into()).spawn(move || {
+                    let Ok(read) = stream.try_clone() else { return };
+                    let _ = connection(read, stream, &engine, &show);
+                });
+            }
+        })
+        .expect("spawning the socket thread");
+}
+
+/// The longest request line the engine reads; a client sending more is refused and dropped.
+const MAX_LINE: u64 = 1024 * 1024;
+
+/// Reads one line of at most [`MAX_LINE`] bytes into `line` (0 at end of input).
+fn read_capped(reader: &mut impl BufRead, line: &mut String) -> io::Result<usize> {
+    let n = io::Read::take(&mut *reader, MAX_LINE + 1).read_line(line)?;
+    if n as u64 > MAX_LINE {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "request line too long"));
+    }
+    Ok(n)
 }
 
 /// Serves one connection: the handshake, then requests until the client hangs up.
 fn connection(read: impl io::Read, write: impl Write, engine: &Engine, show: &Show) -> io::Result<()> {
     let mut reader = BufReader::new(read);
     let mut out = BufWriter::new(write);
+    match serve_lines(&mut reader, &mut out, engine, show) {
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            send(&mut out, &json!({ "id": null, "error": format!("unreadable request: {e}") }))?;
+            out.flush()
+        }
+        other => other,
+    }
+}
+
+fn serve_lines(reader: &mut impl BufRead, out: &mut BufWriter<impl Write>, engine: &Engine, show: &Show) -> io::Result<()> {
     let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
+    if read_capped(reader, &mut line)? == 0 {
         return Ok(());
     }
     let version = serde_json::from_str::<Value>(&line)
@@ -339,7 +414,7 @@ fn connection(read: impl io::Read, write: impl Write, engine: &Engine, show: &Sh
     if version != Some(VERSION) {
         let theirs = version.map_or("no version".to_owned(), |v| format!("version {v}"));
         send(
-            &mut out,
+            out,
             &json!({
                 "error": format!("this engine speaks protocol version {VERSION}; the client sent {theirs}"),
                 "expected": VERSION,
@@ -348,19 +423,19 @@ fn connection(read: impl io::Read, write: impl Write, engine: &Engine, show: &Sh
         return out.flush();
     }
     send(
-        &mut out,
+        out,
         &json!({ "version": VERSION, "engine": concat!("view-everything ", env!("CARGO_PKG_VERSION")) }),
     )?;
     out.flush()?;
     loop {
         line.clear();
-        if reader.read_line(&mut line)? == 0 {
+        if read_capped(reader, &mut line)? == 0 {
             return Ok(());
         }
         let request = match serde_json::from_str::<Value>(&line) {
             Ok(request) => request,
             Err(e) => {
-                send(&mut out, &json!({ "id": null, "error": format!("not a JSON request: {e}") }))?;
+                send(out, &json!({ "id": null, "error": format!("not a JSON request: {e}") }))?;
                 out.flush()?;
                 continue;
             }
@@ -368,14 +443,14 @@ fn connection(read: impl io::Read, write: impl Write, engine: &Engine, show: &Sh
         let id = request.get("id").cloned().unwrap_or(Value::Null);
         let params = request.get("params").cloned().unwrap_or(Value::Null);
         match request.get("method").and_then(Value::as_str).unwrap_or("") {
-            "echo" => send(&mut out, &json!({ "id": id, "result": params }))?,
+            "echo" => send(out, &json!({ "id": id, "result": params }))?,
             "show" => {
                 show();
-                send(&mut out, &json!({ "id": id, "result": null }))?;
+                send(out, &json!({ "id": id, "result": null }))?;
             }
-            "search" => answer_search(&mut out, &id, params, engine)?,
-            "tasks" => answer_tasks(&mut out, &id, &params, engine)?,
-            other => send(&mut out, &json!({ "id": id, "error": format!("unknown method `{other}`") }))?,
+            "search" => answer_search(out, &id, params, engine)?,
+            "tasks" => answer_tasks(out, &id, &params, engine)?,
+            other => send(out, &json!({ "id": id, "error": format!("unknown method `{other}`") }))?,
         }
         out.flush()?;
     }

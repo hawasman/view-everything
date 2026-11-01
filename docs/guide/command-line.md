@@ -46,7 +46,7 @@ Last Synced goes to stderr, so pipes stay clean. So does `ve: the app is not run
 
 ## The app's socket
 
-While it runs, the app listens on `$XDG_RUNTIME_DIR/view-everything/engine.sock` (a per-user folder in the temporary folder where there is no `XDG_RUNTIME_DIR`). The folder is open to your account only, so other users on the machine cannot read your Index through it; the app refuses a folder that is not. `VE_SOCKET` moves the socket, into a folder that is yours alone or does not exist yet. Windows has no socket yet; there `ve` always reads the file.
+While it runs, the app listens on `$XDG_RUNTIME_DIR/view-everything/engine.sock` (a per-user folder in the temporary folder where there is no `XDG_RUNTIME_DIR`). The folder is open to your account only, so other users on the machine cannot read your Index through it; the app refuses a folder that is not. `VE_SOCKET` moves the socket, into a folder that is yours alone or does not exist yet. On Windows it is a named pipe, `\\.\pipe\view-everything-<your user's SID>-engine`, that only your account can open and that refuses connections from other machines; `VE_SOCKET` names a different pipe. A request line longer than 1 MiB is refused, and a client gives up on an app that does not answer its handshake within 5 seconds (`ve` then reads the file).
 
 Asking the app, `dupe:` and `is:duplicate` use the Duplicates it has found so far, `is:cleanable` what the Cleaner last found, and `is:offline` the Volumes mounted now. Reading the file, `dupe:`, `is:duplicate` and `is:cleanable` find nothing, and `is:offline` is a bad Query: the file does not know which Volumes are mounted.
 

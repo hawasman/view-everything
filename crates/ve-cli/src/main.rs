@@ -202,7 +202,7 @@ fn run(args: &Args, out: &mut impl Write, err: &mut impl Write) -> Result<usize,
 /// Asks the running app. `None` when it cannot be reached, having said so on `err`.
 fn from_app(search: &Search, err: &mut impl Write) -> Result<Option<Found>, Failure> {
     let Some(socket) = ve_engine::socket::path() else {
-        writeln!(err, "ve: reading the saved Index file (this system has no app socket yet)")?;
+        writeln!(err, "ve: reading the saved Index file (cannot work out where the app socket is)")?;
         return Ok(None);
     };
     let mut client = match ve_engine::socket::Client::connect(&socket) {
