@@ -10,7 +10,8 @@
 | [Cleaner and Cleanup Rules](guide/cleanup-rules.md) | what the Cleaner finds, how Clean checks before removing, writing your own rules |
 | [Duplicates](guide/duplicates.md) | finding and trashing Duplicates, Duplicate Exclusions, how files are compared |
 | [Snapshots, Compare with and Export](guide/snapshots-and-export.md) | daily Snapshots, the Change column, CSV and PNG export |
-| [Performance](guide/performance.md) | CPU, memory and disks now and over the last hour, the Moment, gaps |
+| [Performance](guide/performance.md) | CPU, memory, disks and processes now and over the last hour, the Moment, gaps |
+| [Network](guide/network.md) | throughput and totals per interface over the last hour; why per-app traffic is not shown |
 | [Staying current](guide/live-updates-and-background.md) | Sync, Catch-up, Live updates per platform, tray and start at login |
 | [Remotes](guide/remotes.md) | SSH, S3, FTP, WebDAV and Azure Blob Locations |
 | [Command line](guide/command-line.md) | `ve find`, `ve top`, `ve export` |

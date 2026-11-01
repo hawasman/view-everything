@@ -6,6 +6,7 @@ pub mod agents;
 pub mod apps;
 pub mod format;
 mod live;
+pub mod net;
 pub mod perf;
 pub mod permissions;
 pub mod socket;
@@ -201,6 +202,8 @@ pub struct Engine {
     newest_query: Arc<AtomicU64>,
     indexer: Mutex<Option<JoinHandle<()>>>,
     pub perf: perf::Perf,
+    /// The Network Module's interfaces (`net.live`, `net.at`, `net.summary`), from `perf`'s samples.
+    pub net: net::Net,
     /// The Apps Module's installed programs (`apps.list`).
     pub apps: apps::Apps,
 }
@@ -276,8 +279,10 @@ impl Engine {
         }
         let _ = commands.send(Command::SetLiveHelper(live_helper));
         let _ = queries.send(String::new());
+        let perf = perf::Perf::start(perf::platform_backend(), shared.repaint.clone());
         Engine {
-            perf: perf::Perf::start(perf::platform_backend(), shared.repaint.clone()),
+            net: net::Net::new(&perf),
+            perf,
             shared,
             commands,
             queries,

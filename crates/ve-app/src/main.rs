@@ -22,6 +22,7 @@ mod host;
 mod inspector;
 mod locations;
 mod motion;
+mod network;
 mod performance;
 mod scope;
 mod selection;
