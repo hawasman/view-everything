@@ -56,9 +56,18 @@ pub struct Attached {
 }
 
 impl Host {
-    /// Starts the Engine, the tray and the loops that serve them, and registers the host. Opens
-    /// the first window unless this is a login start with a tray to wait in.
-    pub fn start(settings: &Settings, categories: CategoryMap, volumes: Vec<VolumeInfo>, problems: Vec<String>, login: bool, cx: &mut App) {
+    /// Starts the Engine, the tray, the engine socket (when `socket` is bound) and the loops that
+    /// serve them, and registers the host. Opens the first window unless this is a login start
+    /// with a tray to wait in.
+    pub fn start(
+        settings: &Settings,
+        categories: CategoryMap,
+        volumes: Vec<VolumeInfo>,
+        problems: Vec<String>,
+        login: bool,
+        socket: Option<ve_engine::socket::Listener>,
+        cx: &mut App,
+    ) {
         let wires = Arc::new(Mutex::new(Wires::default()));
         let repaint: Repaint = {
             let wires = wires.clone();
@@ -86,6 +95,14 @@ impl Host {
         let engine = Arc::new(engine);
 
         let (actions, chosen) = async_channel::unbounded::<TrayAction>();
+        // A client's `show` (a second launch of the app) opens the window as the tray's Open does.
+        if let Some(listener) = socket {
+            let actions = actions.clone();
+            let show = Arc::new(move || {
+                let _ = actions.send_blocking(TrayAction::Open);
+            });
+            ve_engine::socket::serve(listener, engine.clone(), show);
+        }
         let tray = Tray::start(
             actions,
             TrayState {
