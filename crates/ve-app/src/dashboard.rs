@@ -5,8 +5,8 @@
 
 use crate::app::volume_name;
 use crate::dashboard_summary::{
-    Answer, Cleanable, Fullest, Question, RANKING_RULE, Summary, ago, disk_answer, group_by_filesystem, oldest, rank, slowing_answer,
-    summarize, talking_answer,
+    Answer, Cleanable, Fullest, Question, RANKING_RULE, Summary, ago, disk_answer, group_by_filesystem, oldest, percent, rank,
+    slowing_answer, summarize, talking_answer,
 };
 use crate::format;
 use crate::inspector::Inspected;
@@ -84,6 +84,16 @@ fn locations_phrase(locations: &[Location]) -> String {
     format!("{count} {}", if count == 1 { "Location" } else { "Locations" })
 }
 
+/// Seconds the slowing and talking answers stand before they are read again.
+const MACHINE_EVERY: i64 = 5;
+
+/// The slowing and talking answers over the hour up to second `at`.
+struct Machine {
+    at: i64,
+    slowing: Answer,
+    talking: Answer,
+}
+
 /// The machine's name, when the system says it.
 fn hostname() -> Option<String> {
     let name = std::fs::read_to_string("/etc/hostname").ok()?;
@@ -93,8 +103,10 @@ fn hostname() -> Option<String> {
 
 pub struct DashboardPage {
     engine: Arc<Engine>,
-    /// The slowing and talking answers and the second they were read.
-    machine: Option<(i64, Answer, Answer)>,
+    /// The slowing and talking answers, once read.
+    machine: Option<Machine>,
+    /// Reading them again, off the UI thread.
+    reading_machine: Option<Task<()>>,
     cleaner: Entity<crate::cleaner::CleanerPage>,
     trash: Trash,
     /// The newest summary the worker computed.
@@ -140,6 +152,7 @@ impl DashboardPage {
         let mut page = Self {
             engine,
             machine: None,
+            reading_machine: None,
             cleaner,
             trash,
             latest,
@@ -150,7 +163,7 @@ impl DashboardPage {
             editing: None,
             host: hostname(),
         };
-        // The finding line shows what the Cleaner's background look found.
+        // The disk answer and the Cleanable figure show what the Cleaner's background look found.
         cx.observe(&page.cleaner, |_, _, cx| cx.notify()).detach();
         page.set_context(settings, Vec::new(), cx);
         page
@@ -263,19 +276,48 @@ impl DashboardPage {
             .collect()
     }
 
-    /// The slowing and talking answers over the hour up to `now`, read again once a second.
-    fn machine(&mut self, now: i64) -> (Answer, Answer) {
-        if let Some((at, slowing, talking)) = &self.machine
-            && *at == now
-        {
-            return (slowing.clone(), talking.clone());
+    /// The slowing and talking answers over the last hour. Read off the UI thread when they are
+    /// older than [`MACHINE_EVERY`]; the page redraws only if they changed. Until the first
+    /// reading they say "—".
+    fn machine(&mut self, now: i64, cx: &mut Context<Self>) -> (Answer, Answer) {
+        let stale = self.machine.as_ref().is_none_or(|m| now - m.at >= MACHINE_EVERY);
+        if stale && self.reading_machine.is_none() {
+            let engine = self.engine.clone();
+            self.reading_machine = Some(cx.spawn(async move |this, cx| {
+                let machine = cx
+                    .background_spawn(async move {
+                        let from = now - ve_engine::perf::SPAN + 1;
+                        Machine {
+                            at: now,
+                            slowing: slowing_answer(&engine.perf.summary(from, now)),
+                            // The open connections slot in here once `net.summary` records them.
+                            talking: talking_answer(&engine.net.summary(from, now), None),
+                        }
+                    })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    let changed = this
+                        .machine
+                        .as_ref()
+                        .is_none_or(|m| m.slowing != machine.slowing || m.talking != machine.talking);
+                    this.machine = Some(machine);
+                    this.reading_machine = None;
+                    if changed {
+                        cx.notify();
+                    }
+                });
+            }));
         }
-        let from = now - ve_engine::perf::SPAN + 1;
-        let slowing = slowing_answer(&self.engine.perf.summary(from, now));
-        // The open connections slot in here once `net.summary` records them.
-        let talking = talking_answer(&self.engine.net.summary(from, now), None);
-        self.machine = Some((now, slowing.clone(), talking.clone()));
-        (slowing, talking)
+        let unread = |question| Answer {
+            question,
+            severity: None,
+            text: "—".to_owned(),
+            inspect: None,
+        };
+        match &self.machine {
+            Some(m) => (m.slowing.clone(), m.talking.clone()),
+            None => (unread(Question::Slowing), unread(Question::Talking)),
+        }
     }
 
     /// Files in the Index on the Volume or Remote with this identity, once the summary is in.
@@ -387,12 +429,7 @@ enum Finding {
     Looking {
         spinning: bool,
     },
-    Found {
-        reclaim: u64,
-        count: usize,
-        /// The part of `reclaim` that needs administrator rights.
-        admin: u64,
-    },
+    Found(Cleanable),
     Nothing,
 }
 
@@ -414,7 +451,7 @@ impl Render for DashboardPage {
         } else if self.engine.shared.is_loading() || self.shown.is_none() {
             Finding::Looking { spinning: false }
         } else if count > 0 {
-            Finding::Found { reclaim, count, admin }
+            Finding::Found(Cleanable { reclaim, count, admin })
         } else {
             Finding::Nothing
         };
@@ -446,7 +483,7 @@ impl Render for DashboardPage {
             .justify_between()
             .gap(px(GAP))
             .child(crate::ui::title_row("Overview", Some(facts), cx))
-            .when(matches!(finding, Finding::Found { .. }), |d| {
+            .when(matches!(finding, Finding::Found(_)), |d| {
                 d.child(
                     div().flex_none().child(
                         button("open-cleaner", "Open Cleaner")
@@ -471,15 +508,11 @@ impl Render for DashboardPage {
             });
         let cleanable = match finding {
             Finding::Looking { .. } => None,
-            Finding::Found { reclaim, count, admin } => Some(Cleanable { reclaim, count, admin }),
-            Finding::Nothing => Some(Cleanable {
-                reclaim: 0,
-                count: 0,
-                admin: 0,
-            }),
+            Finding::Found(c) => Some(c),
+            Finding::Nothing => Some(Cleanable::default()),
         };
         let owner = self.shown.as_ref().and_then(|s| s.owners.first().cloned());
-        let (slowing, talking) = self.machine(now);
+        let (slowing, talking) = self.machine(now, cx);
         let mut answers = [disk_answer(fullest, cleanable, owner.as_ref()), slowing, talking];
         rank(&mut answers);
         let answers = self.answers_panel(answers, matches!(finding, Finding::Looking { spinning: true }), cx);
@@ -494,7 +527,7 @@ impl Render for DashboardPage {
         };
         let cleanable = match &finding {
             Finding::Looking { .. } => (dash(), Some("not looked yet".into())),
-            Finding::Found { reclaim, count, .. } => (
+            Finding::Found(Cleanable { reclaim, count, .. }) => (
                 format::size(*reclaim).into(),
                 Some(format!("{} Cleanable{}", format::count(*count as u64), if *count == 1 { "" } else { "s" }).into()),
             ),
@@ -592,11 +625,7 @@ impl DashboardPage {
         let p = palette(cx);
         let mut rows = v_flex().mt(px(8.));
         for (ix, answer) in answers.into_iter().enumerate() {
-            let module = match answer.question {
-                Question::Disk => "Browse",
-                Question::Slowing => "Performance",
-                Question::Talking => "Network",
-            };
+            let module = answer.question.module();
             let severity = match answer.severity {
                 Some(s) => h_flex()
                     .gap(px(8.))
@@ -610,7 +639,7 @@ impl DashboardPage {
                             .bg(p.free)
                             .child(div().h_full().w(relative(s.clamp(0., 1.))).bg(p.accent)),
                     )
-                    .child(div().w(px(36.)).text_right().text_color(p.text).child(format!("{:.0}%", s * 100.))),
+                    .child(div().w(px(36.)).text_right().text_color(p.text).child(percent(s))),
                 None => h_flex().justify_end().w(px(104.)).text_color(p.muted).child("—"),
             };
             let (question, inspect) = (answer.question, answer.inspect);

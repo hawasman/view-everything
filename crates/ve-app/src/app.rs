@@ -1263,7 +1263,8 @@ impl Shell {
             }
             // The busiest process of the hour, if it is still in the Moment's table.
             Some(Inspected::Process(id)) => self.inspect_process(id, cx),
-            other => self.inspected = other,
+            Some(other) => self.inspected = Some(other),
+            None => {}
         }
     }
 

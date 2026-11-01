@@ -348,6 +348,15 @@ impl Question {
             Question::Talking => "Talking on the network",
         }
     }
+
+    /// The Module page following the answer opens.
+    pub fn module(self) -> &'static str {
+        match self {
+            Question::Disk => "Browse",
+            Question::Slowing => "Performance",
+            Question::Talking => "Network",
+        }
+    }
 }
 
 /// How the Overview orders its answers, as the page states it.
@@ -379,13 +388,14 @@ pub struct Fullest<'a> {
     pub total: u64,
 }
 
-fn percent(share: f32) -> String {
+/// A share of 0 to 1 as a whole percentage.
+pub fn percent(share: f32) -> String {
     format!("{:.0}%", share * 100.)
 }
 
 /// What the Cleaner found: `count` Cleanables of `reclaim` bytes, `admin` of them freed only
 /// with administrator rights.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Cleanable {
     pub reclaim: u64,
     pub count: usize,
@@ -461,15 +471,14 @@ pub fn slowing_answer(perf: &ve_engine::perf::Summary) -> Answer {
             inspect: None,
         };
     }
-    let cpu = format!("CPU {} busy", perf.cpu.map_or("—".to_owned(), percent));
-    let memory = format!("memory {} taken", perf.memory.map_or("—".to_owned(), percent));
+    let known = |share: Option<f32>| share.map_or("—".to_owned(), percent);
+    let (cpu, memory) = (known(perf.cpu), known(perf.memory));
     // The busier subsystem leads.
-    let (mut first, second) = if perf.memory.unwrap_or(0.) > perf.cpu.unwrap_or(0.) {
-        (memory, cpu)
+    let subsystems = if perf.memory.unwrap_or(0.) > perf.cpu.unwrap_or(0.) {
+        format!("Memory {memory} taken, CPU {cpu} busy")
     } else {
-        (cpu, memory)
+        format!("CPU {cpu} busy, memory {memory} taken")
     };
-    first[..1].make_ascii_uppercase();
     let process = match &perf.top {
         Some(top) => format!("{} the busiest process at {} CPU", top.name, percent(top.cpu)),
         None => "busiest process —".to_owned(),
@@ -477,7 +486,7 @@ pub fn slowing_answer(perf: &ve_engine::perf::Summary) -> Answer {
     Answer {
         question: Question::Slowing,
         severity,
-        text: format!("{first}, {second} in the last hour · {process}"),
+        text: format!("{subsystems} in the last hour · {process}"),
         inspect: perf.top.as_ref().map(|t| crate::inspector::Inspected::Process(t.id)),
     }
 }
@@ -504,16 +513,18 @@ pub fn talking_answer(net: &ve_engine::net::Summary, connections: Option<u32>) -
     };
     let (severity, busiest) = match net.busiest() {
         Some(i) => {
+            // For the ranking an unknown direction counts as none; shown, it stays unknown.
             let rate = i.moved() / net.seconds as u64;
-            (
-                (rate as f64 / REFERENCE_RATE).min(1.) as f32,
-                format!(
+            let moved = match i.received.zip(i.sent) {
+                Some((received, sent)) => format!(
                     "{} moved {} in the last hour, {}/s on average",
                     i.name,
-                    crate::format::size(i.moved()),
+                    crate::format::size(received + sent),
                     crate::format::size(rate)
                 ),
-            )
+                None => format!("{} the busiest interface in the last hour; what it moved —", i.name),
+            };
+            ((rate as f64 / REFERENCE_RATE).min(1.) as f32, moved)
         }
         None => (0., "nothing moved in the last hour".to_owned()),
     };
@@ -885,6 +896,15 @@ mod tests {
         assert_eq!((answers[1].severity, answers[1].text.as_str()), (None, "not read yet"));
         assert_eq!((answers[2].severity, answers[2].text.as_str()), (None, NOT_RECORDED));
         assert_eq!(talking_answer(&net(0, 0), Some(3)).text, NOT_RECORDED);
+        // A direction never read is not shown as a total.
+        let mut half = net(60, 6_000_000);
+        half.interfaces[0].sent = None;
+        let half = talking_answer(&half, None);
+        assert_eq!(
+            half.text,
+            "wlan0 the busiest interface in the last hour; what it moved — · connections not recorded"
+        );
+        assert!(half.severity.is_some_and(|s| s > 0.));
 
         // CPU read but memory not: the unknown share says —, never 0%.
         let cpu_only = slowing_answer(&perf(60, Some(0.4), None, None));

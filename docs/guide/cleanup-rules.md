@@ -51,7 +51,7 @@ Command rules are never run with admin rights.
 
 - The Category breakdown shows how much of the reclaimable space each Category takes, for every Cleanable or for the ticked Cleanup Plan.
 - **Show in Browse** on a Cleanable opens Browse with the Query set to its folder.
-- The Overview's finding line and its Cleanable figure show the total the Cleaner could reclaim; Open Cleaner and Review Cleanup Plan open the Cleaner.
+- The Overview's disk answer ("what is filling the disk") and its Cleanable figure show the total the Cleaner could reclaim, with the share that needs administrator; Open Cleaner opens the Cleaner.
 
 ## Write your own rules
 
