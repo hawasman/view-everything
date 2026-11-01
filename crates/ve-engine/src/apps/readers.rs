@@ -339,7 +339,7 @@ pub(super) fn group_entries<'a>(text: &'a str, group: &'a str) -> impl Iterator<
 }
 
 /// The last non-empty value of `key` in `[group]`.
-pub(super) fn group_value<'a>(text: &'a str, group: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn group_value<'a>(text: &'a str, group: &'a str, key: &str) -> Option<&'a str> {
     group_entries(text, group)
         .filter(|(k, _)| *k == key)
         .map(|(_, v)| v)
@@ -404,11 +404,17 @@ pub fn steam(home: &Path) -> Vec<Program> {
                 version: vdf_value(&text, "buildid").map(|b| format!("build {b}")),
                 installed: vdf_value(&text, "LastUpdated").and_then(|t| t.parse().ok()).filter(|&t| t > 0),
                 owner: owners::steam_owner(title),
-                launch: Some(Launch::Steam(appid.to_owned())),
+                launch: (!steam_tool(title)).then(|| Launch::Steam(appid.to_owned())),
             });
         }
     }
     programs
+}
+
+/// Whether a Steam app is one of the tools Steam installs for its games (redistributables, the
+/// Linux runtimes, Proton), which Steam does not start on its own.
+fn steam_tool(title: &str) -> bool {
+    title == "Steamworks Common Redistributables" || title.starts_with("Steam Linux Runtime") || title.starts_with("Proton ")
 }
 
 /// The folders in `/opt`, each one program, dated by when the folder was created where the
@@ -600,10 +606,16 @@ mod tests {
             &manifest("70", "Half-Life", "Half-Life"),
         );
         write(&other.join("steamapps/appmanifest_9.acf"), &manifest("9", "Uninstalled", "Missing"));
+        // A tool Steam installs for its games is listed, but not started.
+        write(
+            &other.join("steamapps/appmanifest_1628350.acf"),
+            &manifest("1628350", "Steam Linux Runtime 3.0 (sniper)", "SteamLinuxRuntime_sniper"),
+        );
+        fs::create_dir_all(other.join("steamapps/common/SteamLinuxRuntime_sniper")).unwrap();
         fs::create_dir_all(other.join("steamapps/common/Half-Life")).unwrap();
         let mut summary: Vec<_> = steam(&home)
             .into_iter()
-            .map(|p| (p.name, p.id, p.version, p.installed, p.owner))
+            .map(|p| (p.name, p.id, p.version, p.installed, p.owner, p.launch))
             .collect();
         summary.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
@@ -614,14 +626,24 @@ mod tests {
                     "427520".to_owned(),
                     Some("build 1234".to_owned()),
                     Some(1_710_000_000),
-                    Owner::new(OwnerKind::Game, "Factorio", "Steam")
+                    Owner::new(OwnerKind::Game, "Factorio", "Steam"),
+                    Some(Launch::Steam("427520".into()))
                 ),
                 (
                     "Half-Life".into(),
                     "70".into(),
                     Some("build 1234".into()),
                     Some(1_710_000_000),
-                    Owner::new(OwnerKind::Game, "Half-Life", "Steam")
+                    Owner::new(OwnerKind::Game, "Half-Life", "Steam"),
+                    Some(Launch::Steam("70".into()))
+                ),
+                (
+                    "Steam Linux Runtime 3.0 (sniper)".into(),
+                    "1628350".into(),
+                    Some("build 1234".into()),
+                    Some(1_710_000_000),
+                    Owner::new(OwnerKind::Game, "Steam Linux Runtime 3.0 (sniper)", "Steam"),
+                    None
                 ),
             ]
         );

@@ -77,19 +77,7 @@ impl Launch {
 /// The value of `key` in a desktop entry's `[Desktop Entry]` group, with the string escapes
 /// (`\s`, `\n`, `\t`, `\r`, `\\`) undone.
 fn entry_value(text: &str, key: &str) -> Option<String> {
-    let mut inside = false;
-    let mut found = None;
-    for line in text.lines().map(str::trim) {
-        if let Some(group) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-            inside = group == "Desktop Entry";
-        } else if inside
-            && let Some((k, v)) = line.split_once('=')
-            && k.trim() == key
-        {
-            found = Some(v.trim());
-        }
-    }
-    let raw = found.filter(|v| !v.is_empty())?;
+    let raw = crate::apps::group_value(text, "Desktop Entry", key)?;
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars();
     while let Some(c) = chars.next() {

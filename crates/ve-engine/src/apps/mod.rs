@@ -6,6 +6,7 @@
 mod readers;
 mod startup;
 
+pub(crate) use readers::group_value;
 pub use readers::{AppKind, Launch, Program, Sources};
 pub use startup::{Scope, StartupItem, StartupKind};
 

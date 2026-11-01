@@ -28,7 +28,7 @@ The programs are those **Apps** lists that the Launcher knows how to start:
 | **Flatpak** | a Flatpak application (row: its id) | `flatpak run <id>` |
 | **Game** | a Steam game (row: its app id) | `steam://rungameid/<id>`, which Steam opens |
 
-Others are not listed, since no command to start them is known: packages without such a desktop entry (libraries, and tools that run in a terminal), rpm packages, and folders in `/opt`. A program starts on its own: it keeps running when the app quits.
+Others are not listed, since no command to start them is known: packages without such a desktop entry (libraries, and tools that run in a terminal), rpm packages, folders in `/opt`, and the tools Steam installs for its games (Steamworks Common Redistributables, the Steam Linux Runtimes, Proton), which Steam does not start on their own. A program starts on its own: it keeps running when the app quits.
 
 ## With the main window closed
 
