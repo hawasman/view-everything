@@ -79,10 +79,15 @@ pub struct Apps {
     cache: Mutex<Cache>,
 }
 
-/// What the programs were read under: the sources, every Location's Last Synced (stamped once
-/// Owner detection of that Location finished) and how many Owner roots the Index holds (so two
-/// detections within one second still tell apart).
-type ReadKey = (Option<Sources>, Vec<Option<i64>>, usize);
+/// What the programs were read under.
+#[derive(PartialEq)]
+struct ReadKey {
+    sources: Option<Sources>,
+    /// Every Location's Last Synced, stamped once Owner detection of that Location finished.
+    synced: Vec<Option<i64>>,
+    /// How many Owner roots the Index holds, so two detections within one second differ.
+    owner_roots: usize,
+}
 
 #[derive(Default)]
 struct Cache {
@@ -111,34 +116,37 @@ impl Apps {
         *self.sources.lock() = sources;
     }
 
-    /// The installed programs, sized from the Index as it is now. The sources are read again
-    /// once a Location's Owner detection has finished since the last read; otherwise only the
-    /// sizes are redone, and only when the Index changed. Reads files without an Index lock.
+    /// The installed programs, sized from the Index as it is now: the same list, at no cost,
+    /// while the Index has not changed. The sources are read again once a Location's Owner
+    /// detection has finished since the last read; otherwise only the sizes are redone. Reads
+    /// files without an Index lock.
     pub fn list(&self, shared: &Shared) -> Arc<Vec<App>> {
         let mut cache = self.cache.lock();
         let sources = self.sources.lock().clone();
-        let (synced, roots) = {
+        let key = {
             let index = shared.index.read();
-            let synced: Vec<Option<i64>> = index.volumes().map(|(_, v)| v.last_synced).collect();
-            (synced, index.owner_roots().count())
+            if let (Some((sized_at, apps)), Some((read_under, _))) = (&cache.apps, &cache.programs)
+                && *sized_at == index.generation()
+                && read_under.sources == sources
+            {
+                return apps.clone();
+            }
+            ReadKey {
+                sources,
+                synced: index.volumes().map(|(_, v)| v.last_synced).collect(),
+                owner_roots: index.owner_roots().count(),
+            }
         };
-        let key = (sources, synced, roots);
         let programs = match &cache.programs {
             Some((read_under, programs)) if *read_under == key => programs.clone(),
             _ => {
-                let programs = Arc::new(key.0.as_ref().map(readers::read).unwrap_or_default());
+                let programs = Arc::new(key.sources.as_ref().map(readers::read).unwrap_or_default());
                 cache.programs = Some((key, programs.clone()));
-                cache.apps = None;
                 programs
             }
         };
         let index = shared.index.read();
         let generation = index.generation();
-        if let Some((sized_at, apps)) = &cache.apps
-            && *sized_at == generation
-        {
-            return apps.clone();
-        }
         let apps = Arc::new(size(&index, &programs));
         drop(index);
         cache.apps = Some((generation, apps.clone()));
@@ -207,5 +215,98 @@ mod tests {
         assert_eq!(apps[0].roots, [(PathBuf::from("/a"), 9400), (PathBuf::from("/b"), 30)]);
         assert_eq!(apps[0].size, Some(9430));
         assert_eq!((apps[1].size, apps[1].roots.len()), (None, 0));
+    }
+
+    /// Owner detection's files, from memory: `(path, text)`.
+    struct Files(&'static [(&'static str, &'static str)]);
+
+    impl owners::Disk for Files {
+        fn read(&self, path: &Path) -> Option<String> {
+            self.0
+                .iter()
+                .find(|(p, _)| Path::new(p) == path)
+                .map(|(_, text)| (*text).to_owned())
+        }
+        fn list(&self, path: &Path) -> Vec<String> {
+            let mut names: Vec<String> = self
+                .0
+                .iter()
+                .filter_map(|(p, _)| Path::new(p).strip_prefix(path).ok()?.iter().next()?.to_str().map(str::to_owned))
+                .collect();
+            names.dedup();
+            names
+        }
+    }
+
+    const MANIFEST: &str = "\"AppState\"\n{\n\t\"appid\"\t\t\"70\"\n\t\"name\"\t\t\"Half-Life\"\n\t\"installdir\"\t\t\"HL\"\n}\n";
+
+    /// The readers name each program's Owner as Owner detection does, so every source's
+    /// programs find the roots detection gave them.
+    #[test]
+    #[cfg(unix)]
+    fn programs_read_from_each_source_find_the_roots_detection_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, home) = (dir.path().join("root"), dir.path().join("home"));
+        let write = |path: PathBuf, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(root.join("var/lib/pacman/local/vim-9.1-1/desc"), "%NAME%\nvim\n");
+        std::fs::create_dir_all(root.join("opt/tool")).unwrap();
+        let gimp = root.join("var/lib/flatpak/app/org.gimp.GIMP");
+        std::fs::create_dir_all(gimp.join("x86_64/stable/active")).unwrap();
+        std::os::unix::fs::symlink("x86_64/stable", gimp.join("current")).unwrap();
+        write(home.join(".local/share/Steam/steamapps/appmanifest_70.acf"), MANIFEST);
+        std::fs::create_dir_all(home.join(".local/share/Steam/steamapps/common/HL")).unwrap();
+        let programs = readers::read(&Sources { root, home: Some(home) });
+
+        // An Index of `/` holding each program's folder, its roots found by Owner detection.
+        let mut index = Index::new();
+        let dir_meta = EntryMeta {
+            is_dir: true,
+            ..EntryMeta::default()
+        };
+        let file = EntryMeta {
+            logical: 100,
+            on_disk: 100,
+            ..EntryMeta::default()
+        };
+        let v = index.add_volume(Path::new("/"), "ext4", "id", dir_meta, SyncState::Walk);
+        let volume_root = index.volume(v).unwrap().root;
+        for path in [
+            "usr/share/vim/vimrc",
+            "usr/share/doc/README",
+            "opt/tool/bin",
+            "var/lib/flatpak/app/org.gimp.GIMP/files/gimp",
+            "games/steamapps/common/HL/hl.bin",
+            "games/steamapps/appmanifest_70.acf",
+        ] {
+            let parts: Vec<&str> = path.split('/').collect();
+            let mut at = volume_root;
+            for (i, name) in parts.iter().enumerate() {
+                let meta = if i + 1 == parts.len() { file } else { dir_meta };
+                at = index.child_named(at, name).unwrap_or_else(|| index.insert(at, name, meta));
+            }
+        }
+        let disk = Files(&[
+            ("/games/steamapps/appmanifest_70.acf", MANIFEST),
+            (
+                "/var/lib/pacman/local/vim-9.1-1/files",
+                "%FILES%\nusr/\nusr/share/\nusr/share/vim/\nusr/share/vim/vimrc\n",
+            ),
+        ]);
+        let detected = owners::detect(&index, v, Some(owners::Platform::Linux), &disk);
+        index.set_owners(volume_root, detected);
+
+        let sized: Vec<(&str, Option<u64>)> = size(&index, &programs).iter().map(|a| (a.program.source, a.size)).collect();
+        assert_eq!(
+            sized,
+            [
+                ("pacman", Some(100)),
+                ("Flatpak", Some(100)),
+                ("Steam", Some(100)),
+                ("/opt", Some(100))
+            ]
+        );
     }
 }

@@ -18,8 +18,9 @@ use std::time::Duration;
 use ve_engine::Engine;
 use ve_engine::apps::App as InstalledApp;
 
-/// How often the list is asked for again while the Index changes; the Engine re-reads the
-/// sources only after Owner detection, so a refresh between Syncs only redoes the sizes.
+/// How often the list is asked for again. The Engine answers with the same list while the
+/// Index is unchanged, re-reads the sources only after Owner detection, and otherwise only
+/// redoes the sizes.
 const REFRESH: Duration = Duration::from_secs(5);
 
 /// What stands in for a value no source gives or no Index folder holds.
@@ -224,23 +225,13 @@ impl AppsPage {
             )
             .col_resizable(false)
         });
-        // Asks again whenever the Index has changed since the last answer; the Engine works
-        // off the UI thread, and any wait for the Index lock happens there too.
+        // The Engine works off the UI thread, and any wait for the Index lock happens there too.
         let refresh = cx.spawn(async move |this, cx| {
-            let mut answered: Option<u64> = None;
             loop {
                 let engine = engine.clone();
-                let fresh = cx
-                    .background_spawn(async move {
-                        let generation = engine.shared.index.read().generation();
-                        (answered != Some(generation)).then(|| (generation, engine.apps_list()))
-                    })
-                    .await;
-                if let Some((generation, apps)) = fresh {
-                    answered = Some(generation);
-                    if this.update(cx, |page, cx| page.set_apps(apps, cx)).is_err() {
-                        return;
-                    }
+                let apps = cx.background_spawn(async move { engine.apps_list() }).await;
+                if this.update(cx, |page, cx| page.set_apps(apps, cx)).is_err() {
+                    return;
                 }
                 cx.background_executor().timer(REFRESH).await;
             }
@@ -252,17 +243,22 @@ impl AppsPage {
         }
     }
 
+    /// Shows `apps`; nothing is redrawn when the Engine answered with the list shown.
     fn set_apps(&mut self, apps: Arc<Vec<InstalledApp>>, cx: &mut Context<Self>) {
-        self.loaded = true;
-        self.table.update(cx, |t, cx| {
+        let changed = self.table.update(cx, |t, cx| {
             let list = t.delegate_mut();
-            if !Arc::ptr_eq(&list.apps, &apps) {
-                list.apps = apps;
-                list.sorted();
-                cx.notify();
+            if Arc::ptr_eq(&list.apps, &apps) {
+                return false;
             }
+            list.apps = apps;
+            list.sorted();
+            cx.notify();
+            true
         });
-        cx.notify();
+        if changed || !self.loaded {
+            self.loaded = true;
+            cx.notify();
+        }
     }
 
     /// Whether any installed program is known: the rail shows Apps only then.
