@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use ve_engine::perf::{Backend, CoreKind, Counters, CpuCounters, CpuTimes, DiskCounters, LinuxBackend, Perf, Reading, Sample};
+use ve_engine::perf::{Backend, CoreKind, Counters, CpuCounters, CpuTimes, DiskCounters, LinuxBackend, Perf, Reading, Sample, Swap};
 use ve_engine::timeline::Moment;
 
 fn put(root: &Path, relative: &str, text: &str) {
@@ -118,7 +118,13 @@ fn a_second_reads_cpu_memory_and_each_whole_disk() {
     assert_eq!(m.used, 8_000_000 * 1024);
     assert_eq!(m.free, 2_000_000 * 1024);
     assert_eq!(m.available, Reading::Value(9_000_000 * 1024));
-    assert_eq!((m.swap_total, m.swap_used), (8_000_000 * 1024, 1_000_000 * 1024));
+    assert_eq!(
+        m.swap,
+        Reading::Value(Swap {
+            total: 8_000_000 * 1024,
+            used: 1_000_000 * 1024
+        })
+    );
 
     let names: Vec<&str> = s.disks.value().unwrap().iter().map(|d| &*d.name).collect();
     assert_eq!(names, ["sda", "nvme0n1"], "partitions and loop devices are not disks");
@@ -188,8 +194,13 @@ fn cores_the_kernel_does_not_tell_apart_are_unknown() {
 fn what_cannot_be_read_is_unsupported_not_zero() {
     let dir = tempfile::tempdir().unwrap();
     put(dir.path(), "proc/stat", &stat((100, 100), &[]));
-    // An old kernel: no MemAvailable. No diskstats at all. A thermal zone the app does not read.
-    put(dir.path(), "proc/meminfo", "MemTotal: 1000 kB\nMemFree: 100 kB\n");
+    // An old kernel: no MemAvailable, no swap fields. No diskstats at all. A thermal zone the
+    // app does not read.
+    put(
+        dir.path(),
+        "proc/meminfo",
+        "MemTotal: 1000 kB\nMemFree: 100 kB\nBuffers: 10 kB\nCached: 300 kB\n",
+    );
     put(dir.path(), "sys/class/thermal/thermal_zone0/temp", "45000\n");
     let perf = linux(dir.path());
     perf.tick(1);
@@ -198,7 +209,9 @@ fn what_cannot_be_read_is_unsupported_not_zero() {
 
     let s = at(&perf, 2);
     assert_eq!(s.cpu.value().unwrap().busy, Reading::Value(0.5));
-    assert_eq!(s.memory.value().unwrap().available, Reading::Unsupported);
+    let m = s.memory.value().unwrap();
+    assert_eq!((m.available.clone(), m.swap.clone()), (Reading::Unsupported, Reading::Unsupported));
+    assert_eq!((m.cache, m.used), (310 * 1024, 590 * 1024));
     assert_eq!(s.disks, Reading::Unsupported);
     assert_eq!(
         (s.gpu.clone(), s.temperature.clone(), s.power.clone()),

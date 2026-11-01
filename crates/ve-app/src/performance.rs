@@ -125,10 +125,10 @@ fn kpis(s: &Sample, cx: &App) -> Div {
         Reading::Value(m) => (format::size(m.used), Some(format!("of {}", format::size(m.total)))),
         Reading::Unsupported => (UNSUPPORTED.to_owned(), None),
     };
-    let swap = match &s.memory {
-        Reading::Value(m) if m.swap_total == 0 => ("none".to_owned(), None),
-        Reading::Value(m) => (format::size(m.swap_used), Some(format!("of {}", format::size(m.swap_total)))),
-        Reading::Unsupported => (UNSUPPORTED.to_owned(), None),
+    let swap = match s.memory.value().map(|m| &m.swap) {
+        Some(Reading::Value(swap)) if swap.total == 0 => ("none".to_owned(), None),
+        Some(Reading::Value(swap)) => (format::size(swap.used), Some(format!("of {}", format::size(swap.total)))),
+        Some(Reading::Unsupported) | None => (UNSUPPORTED.to_owned(), None),
     };
     let (read, write) = match &s.disks {
         Reading::Value(d) => (total(d, |d| &d.read), total(d, |d| &d.write)),
@@ -248,10 +248,10 @@ fn memory_panel(memory: &Reading<Memory>, cx: &App) -> Div {
                 ))
                 .child(fact_row(
                     "Swap used",
-                    if m.swap_total == 0 {
-                        "no swap".to_owned()
-                    } else {
-                        format!("{} of {}", format::size(m.swap_used), format::size(m.swap_total))
+                    match &m.swap {
+                        Reading::Value(swap) if swap.total == 0 => "no swap".to_owned(),
+                        Reading::Value(swap) => format!("{} of {}", format::size(swap.used), format::size(swap.total)),
+                        Reading::Unsupported => UNSUPPORTED.to_owned(),
                     },
                     cx,
                 ))

@@ -93,8 +93,14 @@ pub struct Memory {
     pub free: u64,
     /// What programs could still get without swapping, as the kernel estimates it.
     pub available: Reading<u64>,
-    pub swap_total: u64,
-    pub swap_used: u64,
+    pub swap: Reading<Swap>,
+}
+
+/// Swap space, in bytes; `total` 0 is a system without swap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Swap {
+    pub total: u64,
+    pub used: u64,
 }
 
 /// What a backend reads at one instant: cumulative counters plus instantaneous memory.

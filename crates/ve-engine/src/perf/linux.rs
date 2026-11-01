@@ -1,7 +1,7 @@
 //! The Linux backend: `/proc/stat`, `/proc/meminfo`, `/proc/diskstats` and `/sys`, all read
 //! under a root path so tests can point it at a fixture tree.
 
-use super::{Backend, CoreKind, Counters, CpuCounters, CpuTimes, DiskCounters, Memory};
+use super::{Backend, CoreKind, Counters, CpuCounters, CpuTimes, DiskCounters, Memory, Reading, Swap};
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -96,7 +96,8 @@ fn cpu_counters(text: &str) -> Option<CpuCounters> {
 
 /// `/proc/meminfo`, in bytes, read in one pass. Cache is what the kernel can give back
 /// (buffers, page cache, reclaimable slab) less shared memory, which it cannot; used is what
-/// is left.
+/// is left. Without the fields used and cache come from, there is no composition to show;
+/// swap is unknown without both of its fields.
 fn memory(text: &str) -> Option<Memory> {
     const NAMES: [&str; 9] = [
         "MemTotal",
@@ -120,17 +121,23 @@ fn memory(text: &str) -> Option<Memory> {
             .map(|kb| kb * 1024);
     }
     let [total, free, available, buffers, cached, reclaimable, shmem, swap_total, swap_free] = fields;
-    let (total, free) = (total?, free?);
-    let cache = (buffers.unwrap_or(0) + cached.unwrap_or(0) + reclaimable.unwrap_or(0)).saturating_sub(shmem.unwrap_or(0));
-    let swap_total = swap_total.unwrap_or(0);
+    let (total, free, buffers, cached) = (total?, free?, buffers?, cached?);
+    // Older kernels lack these two: they have no reclaimable slab or shared memory to count.
+    let cache = (buffers + cached + reclaimable.unwrap_or(0)).saturating_sub(shmem.unwrap_or(0));
+    let swap = match (swap_total, swap_free) {
+        (Some(total), Some(free)) => Reading::Value(Swap {
+            total,
+            used: total.saturating_sub(free),
+        }),
+        _ => Reading::Unsupported,
+    };
     Some(Memory {
         total,
         used: total.saturating_sub(free).saturating_sub(cache),
         cache,
         free,
         available: available.into(),
-        swap_total,
-        swap_used: swap_total.saturating_sub(swap_free.unwrap_or(0)),
+        swap,
     })
 }
 
