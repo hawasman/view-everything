@@ -47,8 +47,8 @@ impl Interface {
     }
 }
 
-/// The interfaces of second `time` from the readings `prev` and `now`, `seconds` apart. An
-/// interface only `prev` had is gone: it is not in this second.
+/// The interfaces of a sample from the readings `prev` and `now`, `seconds` apart. An
+/// interface only `prev` had is gone: it is not in this sample.
 pub(crate) fn interfaces(seconds: i64, prev: &[InterfaceCounters], now: &[InterfaceCounters]) -> Vec<Interface> {
     now.iter()
         .map(|n| {
@@ -75,12 +75,10 @@ pub struct NetSample {
 #[derive(Clone, Debug, PartialEq)]
 pub struct InterfaceSummary {
     pub name: Arc<str>,
-    /// Bytes moved in the seconds that were recorded.
+    /// Bytes moved in the seconds that were recorded with a known count (not an interface's
+    /// first second, nor one whose counter was reset).
     pub received: u64,
     pub sent: u64,
-    /// The busiest second's rates, in bytes per second.
-    pub peak_receive: u64,
-    pub peak_send: u64,
     /// The last second it was there.
     pub last_seen: i64,
 }
@@ -156,8 +154,6 @@ impl Net {
                                     name: i.name.clone(),
                                     received: 0,
                                     sent: 0,
-                                    peak_receive: 0,
-                                    peak_send: 0,
                                     last_seen: time,
                                 },
                             );
@@ -167,8 +163,6 @@ impl Net {
                     let s = &mut summary.interfaces[at];
                     s.received += i.received.value().copied().unwrap_or(0);
                     s.sent += i.sent.value().copied().unwrap_or(0);
-                    s.peak_receive = s.peak_receive.max(i.receive_rate().value().copied().unwrap_or(0));
-                    s.peak_send = s.peak_send.max(i.send_rate().value().copied().unwrap_or(0));
                     s.last_seen = time;
                 }
             }

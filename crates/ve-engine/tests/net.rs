@@ -138,7 +138,6 @@ fn an_interface_that_goes_away_keeps_its_history() {
     assert_eq!(hour.seconds, 3);
     let tun = hour.interfaces.iter().find(|i| &*i.name == "tun0").expect("tun0 kept");
     assert_eq!((tun.received, tun.sent, tun.last_seen), (7000, 3000, 101));
-    assert_eq!((tun.peak_receive, tun.peak_send), (7000, 3000));
     let names: Vec<&str> = hour.interfaces.iter().map(|i| &*i.name).collect();
     assert_eq!(names, vec!["eth0", "tun0", "usb0"]);
     assert_eq!(hour.busiest().map(|i| &*i.name), Some("tun0"));

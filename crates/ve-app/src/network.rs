@@ -61,7 +61,7 @@ pub fn page(sample: Option<&NetSample>, hour: &Summary, moment: Moment, now: i64
                 .gap(px(GAP))
                 .child(head)
                 .child(kpis(&s.interfaces, hour, cx))
-                .child(interfaces_panel(&s.interfaces, hour, cx)),
+                .child(interfaces_panel(&s.interfaces, hour, moment, now, cx)),
         )
         .into_any_element()
 }
@@ -89,11 +89,11 @@ fn kpis(interfaces: &Reading<Vec<Interface>>, hour: &Summary, cx: &App) -> Div {
 const NUMBER_W: f32 = 130.;
 
 /// One row per interface at the Moment, then those seen in the last hour but not then.
-fn interfaces_panel(interfaces: &Reading<Vec<Interface>>, hour: &Summary, cx: &App) -> Div {
+fn interfaces_panel(interfaces: &Reading<Vec<Interface>>, hour: &Summary, moment: Moment, now: i64, cx: &App) -> Div {
     let p = palette(cx);
     let body = match interfaces {
         Reading::Unsupported => caption(UNSUPPORTED, cx).into_any_element(),
-        Reading::Value(now) => {
+        Reading::Value(there) => {
             let of = |name: &str| hour.interfaces.iter().find(|s| &*s.name == name);
             let cell = |text: String, muted: bool| {
                 div()
@@ -128,15 +128,19 @@ fn interfaces_panel(interfaces: &Reading<Vec<Interface>>, hour: &Summary, cx: &A
             };
             // Busiest over the hour first; the kernel's order after that.
             let moved = |name: &str| of(name).map_or(0, |s| s.received + s.sent);
-            let mut order: Vec<&Interface> = now.iter().collect();
+            let mut order: Vec<&Interface> = there.iter().collect();
             order.sort_by_key(|i| std::cmp::Reverse(moved(&i.name)));
             let present = order
                 .into_iter()
                 .map(|i| row(i.name.to_string(), None, i.receive_rate(), i.send_rate(), of(&i.name)));
-            let gone = hour.interfaces.iter().filter(|s| !now.iter().any(|i| i.name == s.name)).map(|s| {
+            let missing = match moment {
+                Moment::Live => "gone",
+                Moment::At(_) => "not there at this Moment",
+            };
+            let gone = hour.interfaces.iter().filter(|s| !there.iter().any(|i| i.name == s.name)).map(|s| {
                 row(
                     s.name.to_string(),
-                    Some(format!("not there now · last seen {}", when(s.last_seen, s.last_seen))),
+                    Some(format!("{missing} · last seen {}", when(s.last_seen, now))),
                     Reading::Unsupported,
                     Reading::Unsupported,
                     Some(s),
@@ -150,7 +154,7 @@ fn interfaces_panel(interfaces: &Reading<Vec<Interface>>, hour: &Summary, cx: &A
                 .children(
                     ["Receive", "Send", "Received, hour", "Sent, hour"].map(|t| div().w(px(NUMBER_W)).flex_none().text_right().child(t)),
                 );
-            if now.is_empty() && hour.interfaces.is_empty() {
+            if there.is_empty() && hour.interfaces.is_empty() {
                 caption("No interfaces besides loopback", cx).into_any_element()
             } else {
                 v_flex().child(header).children(present).children(gone).into_any_element()

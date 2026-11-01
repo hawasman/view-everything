@@ -10,7 +10,7 @@ The Network Module shows what each network interface is receiving and sending, n
 - **Received, last hour** and **Sent, last hour**: what every interface moved in the seconds of the last hour that were recorded, and the interface that moved the most.
 - **Interfaces**: one row per interface (`eth0`, `wlp3s0`, `tun0`…) with its receive and send rates that second and its totals for the hour. Loopback (`lo`) is left out: it is no link.
 
-An interface that goes away (a VPN that disconnects, a USB tether unplugged) keeps its row for the rest of the hour, marked "not there now" with the last second it was seen; scrub back to see its rates then. A new interface shows "—" for its first second, since a rate needs two readings; so does a counter that went back (the interface was reset). A counter of a 32-bit kernel that wraps past its limit is still read as the bytes moved.
+An interface that goes away (a VPN that disconnects, a USB tether unplugged) keeps its row for the rest of the hour, marked "gone" with the last second it was seen (at a past Moment, "not there at this Moment"); scrub back to see its rates then. A new interface shows "—" for its first second, since a rate needs two readings; so does a counter that went back (the interface was reset), and the hour's totals leave those seconds out. A counter of a 32-bit kernel that wraps past its limit is still read as the bytes moved.
 
 The page says, in one line, that per-app traffic needs administrator rights and is not available yet. There is no button and nothing asks for them.
 

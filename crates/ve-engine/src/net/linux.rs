@@ -9,10 +9,10 @@ pub(crate) fn interface_counters(text: &str, names: &mut Vec<Arc<str>>) -> Vec<I
     text.lines()
         .filter_map(|line| {
             // "  eth0: rx_bytes rx_packets ... (8 receive fields) tx_bytes ..."; the two header
-            // lines hold no colon before their first field.
+            // lines hold no colon.
             let (name, fields) = line.split_once(':')?;
             let name = name.trim();
-            if name.is_empty() || name == "lo" || name.contains('|') {
+            if name.is_empty() || name == "lo" {
                 return None;
             }
             let mut fields = fields.split_ascii_whitespace();
