@@ -76,9 +76,9 @@ pub struct NetSample {
 pub struct InterfaceSummary {
     pub name: Arc<str>,
     /// Bytes moved in the seconds that were recorded with a known count (not an interface's
-    /// first second, nor one whose counter was reset).
-    pub received: u64,
-    pub sent: u64,
+    /// first second, nor one whose counter was reset); `None` while no second had one.
+    pub received: Option<u64>,
+    pub sent: Option<u64>,
     /// The last second it was there.
     pub last_seen: i64,
 }
@@ -95,10 +95,14 @@ pub struct Summary {
 impl Summary {
     /// The interface that moved the most bytes, either way.
     pub fn busiest(&self) -> Option<&InterfaceSummary> {
-        self.interfaces
-            .iter()
-            .filter(|i| i.received + i.sent > 0)
-            .max_by_key(|i| i.received + i.sent)
+        self.interfaces.iter().filter(|i| i.moved() > 0).max_by_key(|i| i.moved())
+    }
+}
+
+impl InterfaceSummary {
+    /// Bytes received plus sent, counting an unknown total as none: for ranking, not showing.
+    pub fn moved(&self) -> u64 {
+        self.received.unwrap_or(0) + self.sent.unwrap_or(0)
     }
 }
 
@@ -152,8 +156,8 @@ impl Net {
                                 at,
                                 InterfaceSummary {
                                     name: i.name.clone(),
-                                    received: 0,
-                                    sent: 0,
+                                    received: None,
+                                    sent: None,
                                     last_seen: time,
                                 },
                             );
@@ -161,8 +165,8 @@ impl Net {
                         }
                     };
                     let s = &mut summary.interfaces[at];
-                    s.received += i.received.value().copied().unwrap_or(0);
-                    s.sent += i.sent.value().copied().unwrap_or(0);
+                    add(&mut s.received, i.received.value());
+                    add(&mut s.sent, i.sent.value());
                     s.last_seen = time;
                 }
             }
@@ -198,4 +202,11 @@ fn total_rate(sample: &Sample) -> Option<u64> {
         .flat_map(|i| [i.receive_rate(), i.send_rate()])
         .filter_map(|r| r.value().copied())
         .reduce(|a, b| a + b)
+}
+
+/// Adds a known count to a total, which becomes known with it.
+fn add(total: &mut Option<u64>, count: Option<&u64>) {
+    if let Some(&count) = count {
+        *total = Some(total.unwrap_or(0) + count);
+    }
 }

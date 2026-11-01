@@ -3,7 +3,7 @@
 //! such as a space, `-`, `_` or `.`, or at a capital after a small letter, as in `MyReport`), then
 //! one holding it anywhere; within each, the most recently modified first. Matching ignores case.
 
-use crate::{Engine, Phase};
+use crate::Engine;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -122,8 +122,8 @@ impl Engine {
         if needle.is_empty() {
             return Ok(Vec::new());
         }
-        if matches!(self.shared.status.lock().phase, Phase::LoadingIndex) {
-            return Err("the app is still loading its Index; try again in a moment".into());
+        if self.is_loading_index() {
+            return Err(crate::socket::search::LOADING.into());
         }
         let index = self.shared.index.read();
         // Each thread keeps only its best, so a one-letter text over millions of Entries never

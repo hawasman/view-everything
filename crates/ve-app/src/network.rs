@@ -71,18 +71,23 @@ fn kpis(interfaces: &Reading<Vec<Interface>>, hour: &Summary, cx: &App) -> Div {
         Reading::Value(i) => (rate(&total(i, Interface::receive_rate)), rate(&total(i, Interface::send_rate))),
         Reading::Unsupported => (UNSUPPORTED.to_owned(), UNSUPPORTED.to_owned()),
     };
-    let received: u64 = hour.interfaces.iter().map(|i| i.received).sum();
-    let sent: u64 = hour.interfaces.iter().map(|i| i.sent).sum();
+    let received = hour.interfaces.iter().filter_map(|i| i.received).reduce(|a, b| a + b);
+    let sent = hour.interfaces.iter().filter_map(|i| i.sent).reduce(|a, b| a + b);
     let busiest = hour.busiest().map(|i| format!("most on {}", i.name));
     kpi_strip(
         vec![
             ("Receiving".into(), receiving.into(), None),
             ("Sending".into(), sending.into(), None),
-            ("Received, last hour".into(), format::size(received).into(), busiest.map(Into::into)),
-            ("Sent, last hour".into(), format::size(sent).into(), None),
+            ("Received, last hour".into(), moved(received).into(), busiest.map(Into::into)),
+            ("Sent, last hour".into(), moved(sent).into(), None),
         ],
         cx,
     )
+}
+
+/// Bytes moved, "—" while unknown.
+fn moved(bytes: Option<u64>) -> String {
+    bytes.map_or_else(|| UNKNOWN.to_owned(), format::size)
 }
 
 /// Width of each number column of the interfaces table.
@@ -104,9 +109,7 @@ fn interfaces_panel(interfaces: &Reading<Vec<Interface>>, hour: &Summary, moment
                     .child(text)
             };
             let row = |name: String, note: Option<String>, receive: Reading<u64>, send: Reading<u64>, moved: Option<&InterfaceSummary>| {
-                let totals = moved.map_or((UNKNOWN.to_owned(), UNKNOWN.to_owned()), |m| {
-                    (format::size(m.received), format::size(m.sent))
-                });
+                let totals = moved.map_or((None, None), |m| (m.received, m.sent));
                 h_flex()
                     .h(px(32.))
                     .items_center()
@@ -123,11 +126,11 @@ fn interfaces_panel(interfaces: &Reading<Vec<Interface>>, hour: &Summary, moment
                     )
                     .child(cell(rate(&receive), receive.value().is_none()))
                     .child(cell(rate(&send), send.value().is_none()))
-                    .child(cell(totals.0, moved.is_none()))
-                    .child(cell(totals.1, moved.is_none()))
+                    .child(cell(self::moved(totals.0), totals.0.is_none()))
+                    .child(cell(self::moved(totals.1), totals.1.is_none()))
             };
             // Busiest over the hour first; the kernel's order after that.
-            let moved = |name: &str| of(name).map_or(0, |s| s.received + s.sent);
+            let moved = |name: &str| of(name).map_or(0, InterfaceSummary::moved);
             let mut order: Vec<&Interface> = there.iter().collect();
             order.sort_by_key(|i| std::cmp::Reverse(moved(&i.name)));
             let present = order

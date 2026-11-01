@@ -76,7 +76,10 @@ fn a_step_of_two_seconds_is_a_rate_per_second() {
     );
     // The hour's totals are the bytes moved, not the rate.
     let summary = net.summary(0, 200);
-    assert_eq!((summary.interfaces[0].received, summary.interfaces[0].sent), (4000, 1000));
+    assert_eq!(
+        (summary.interfaces[0].received, summary.interfaces[0].sent),
+        (Some(4000), Some(1000))
+    );
 }
 
 #[test]
@@ -137,9 +140,15 @@ fn an_interface_that_goes_away_keeps_its_history() {
     let hour = net.summary(0, 103);
     assert_eq!(hour.seconds, 3);
     let tun = hour.interfaces.iter().find(|i| &*i.name == "tun0").expect("tun0 kept");
-    assert_eq!((tun.received, tun.sent, tun.last_seen), (7000, 3000, 101));
+    assert_eq!((tun.received, tun.sent, tun.last_seen), (Some(7000), Some(3000), 101));
     let names: Vec<&str> = hour.interfaces.iter().map(|i| &*i.name).collect();
     assert_eq!(names, vec!["eth0", "tun0", "usb0"]);
+    let usb = &hour.interfaces[2];
+    assert_eq!(
+        (usb.received, usb.sent),
+        (None, None),
+        "only its first second: moved unknown, not zero"
+    );
     assert_eq!(hour.busiest().map(|i| &*i.name), Some("tun0"));
 }
 
