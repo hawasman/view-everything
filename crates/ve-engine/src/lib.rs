@@ -4,8 +4,10 @@
 
 pub mod format;
 mod live;
+pub mod perf;
 pub mod socket;
 pub mod tasks;
+pub mod timeline;
 pub mod view;
 
 use chrono::{Local, Utc};
@@ -191,6 +193,7 @@ pub struct Engine {
     /// How many Queries were sent; the view thread stops computing one when this has moved on.
     newest_query: Arc<AtomicU64>,
     indexer: Mutex<Option<JoinHandle<()>>>,
+    pub perf: perf::Perf,
 }
 
 impl Engine {
@@ -263,6 +266,7 @@ impl Engine {
         let _ = commands.send(Command::SetLiveHelper(live_helper));
         let _ = queries.send(String::new());
         Engine {
+            perf: perf::Perf::start(perf::platform_backend(), shared.repaint.clone()),
             shared,
             commands,
             queries,
