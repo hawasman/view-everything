@@ -144,6 +144,10 @@ The strip at the foot of the window that holds the Moment and lets the user scru
 The one point in time the whole window shows: Live, or a chosen time. Each Module reads it its own way — Files shows the nearest Snapshot, Performance and Network the sample taken then.
 _Avoid_: date, time cursor, position
 
+**Process**:
+A program running on the machine, as Performance lists it: known by its PID and its start time together, so a PID the system reuses names another Process. Not a Task, which is the app's own background work.
+_Avoid_: task, job (for these)
+
 **Launcher**:
 The window the global hotkey opens anywhere on the desktop: a single line that finds Entries, installed apps and app actions by name, keyboard only. Not the Query box, which is the Files Module's search.
 _Avoid_: search (for this), spotlight, palette

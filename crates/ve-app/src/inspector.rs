@@ -27,6 +27,8 @@ pub enum Inspected {
     Duplicates(EntryId),
     /// An installed program, by its key (`ve_engine::apps::App::key`).
     App(String),
+    /// A running or past process, by its PID and start time.
+    Process(ve_engine::perf::ProcessId),
 }
 
 /// The width of the pane.

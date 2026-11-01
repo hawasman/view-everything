@@ -198,6 +198,10 @@ pub struct Shell {
     selected_size: Cell<Option<(SelectedSizeKey, u64)>>,
     /// What the Inspector shows.
     inspected: Option<Inspected>,
+    /// The Performance page's process table.
+    processes: Entity<TableState<crate::performance::ProcessList>>,
+    /// The process the Inspector shows, while it shows one.
+    process: Option<crate::performance::Inspecting>,
     /// The Entry a list selection last put in the Inspector.
     last_outlined: Option<ve_core::EntryId>,
     /// Show in Browse: the Entry to select once the View of this Query text arrives.
@@ -265,6 +269,13 @@ impl Shell {
             cx.notify();
         })
         .detach();
+        let processes = {
+            let shell = cx.weak_entity();
+            let on_inspect: crate::performance::OnInspect = Rc::new(move |id, cx| {
+                let _ = shell.update(cx, |this, cx| this.inspect_process(id, cx));
+            });
+            cx.new(|cx| TableState::new(crate::performance::ProcessList::new(on_inspect), window, cx).col_resizable(false))
+        };
         // A first list, or none left, shows or hides Apps in the rail.
         cx.observe(&apps, |_, _, cx| cx.notify()).detach();
         let treemap_depth = settings.treemap_depth;
@@ -576,6 +587,8 @@ impl Shell {
             list_width: Rc::default(),
             selected_size: Cell::new(None),
             inspected: None,
+            processes,
+            process: None,
             last_outlined: None,
             reveal_on_view: None,
             tick: None,
@@ -2416,7 +2429,34 @@ impl Shell {
                 );
                 Some(crate::apps::panel(&app, show))
             }
+            Inspected::Process(id) => {
+                let inspecting = self.process.as_ref().filter(|p| p.id == *id)?;
+                let table = self.engine.perf.processes(self.moment);
+                crate::performance::inspector_panel(inspecting, table.as_deref(), now)
+            }
         }
+    }
+
+    /// Opens process `id` of the Moment's table in the Inspector and reads its command line
+    /// and user off the UI thread.
+    fn inspect_process(&mut self, id: ve_engine::perf::ProcessId, cx: &mut Context<Self>) {
+        let Some(seen) = self.engine.perf.processes(self.moment).filter(|t| t.get(id).is_some()) else {
+            return;
+        };
+        self.inspected = Some(Inspected::Process(id));
+        self.process = Some(crate::performance::Inspecting { id, seen, details: None });
+        let engine = self.engine.clone();
+        cx.spawn(async move |this, cx| {
+            let details = cx.background_spawn(async move { engine.perf.details(id) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(p) = this.process.as_mut().filter(|p| p.id == id) {
+                    p.details = Some(details);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     /// A Duplicate group: size, copies and wasted space; Open, Show in Browse and Trash others…
@@ -2771,7 +2811,17 @@ impl Render for Shell {
             Page::Duplicates => self.duplicates_page(cx).into_any_element(),
             Page::Performance => {
                 let sample = self.engine.perf.at(self.moment);
-                crate::performance::page(sample.as_deref(), self.moment, now, cx)
+                let table = self.engine.perf.processes(self.moment);
+                let selected = match &self.inspected {
+                    Some(Inspected::Process(id)) => Some(*id),
+                    _ => None,
+                };
+                self.processes.update(cx, |t, cx| {
+                    if t.delegate_mut().show(table, selected) {
+                        cx.notify();
+                    }
+                });
+                crate::performance::page(sample.as_deref(), self.moment, now, &self.processes, cx)
             }
             Page::Apps => {
                 let shown = match &self.inspected {

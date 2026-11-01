@@ -16,6 +16,7 @@
 
 ### Performance
 - A new Module, **Performance → System** (Linux), appears in the rail with its first sample: the whole machine's and each logical CPU's busy share, with performance and efficiency cores told apart where the kernel reports them; memory used, cache and buffers, free, available and swap; read and write throughput per disk. GPU, temperature and power read "unsupported" rather than zero; a reading the app could not take shows "—". [More](docs/guide/performance.md)
+- **Processes** on Performance → System: every running process with its CPU share, resident memory and, while the page is open, storage read and write per second, sortable by any column. A process is known by its PID and start time, so a recycled PID never shows another process's history. Click one for its command line, user, start time, parent and CPU time in the Inspector. At a past Moment the table shows the 200 busiest and largest processes kept for that second. [More](docs/guide/performance.md#processes)
 - The app keeps one sample a second for the last hour, in memory only, while the window is open or keep in tray is on. The Timeline dock shows that hour as CPU bars on Performance; press or drag on it to see any second, **Back to Live** to return. Seconds with no sample are drawn as gaps, never as idle.
 - The **Moment** on the dock is shared by every page: Browse compares with the Snapshot nearest it, Performance shows the sample of that second. Back to Live shows on every page while the Moment is not Live.
 

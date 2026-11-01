@@ -1,11 +1,18 @@
-//! The Linux backend: `/proc/stat`, `/proc/meminfo`, `/proc/diskstats` and `/sys`, all read
-//! under a root path so tests can point it at a fixture tree.
+//! The Linux backend: `/proc/stat`, `/proc/meminfo`, `/proc/diskstats`, `/proc/<pid>` and
+//! `/sys`, all read under a root path so tests can point it at a fixture tree.
 
-use super::{Backend, CoreKind, Counters, CpuCounters, CpuTimes, DiskCounters, Memory, Reading, Swap};
+use super::{
+    Backend, CoreKind, Counters, CpuCounters, CpuTimes, Details, DiskCounters, Io, Memory, ProcessCounters, ProcessCountersTable,
+    ProcessId, Reading, Swap,
+};
+use std::collections::HashSet;
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// Process names kept for sharing before the set starts over (names in kept samples stay).
+const MAX_NAMES: usize = 4096;
 
 pub struct LinuxBackend {
     root: PathBuf,
@@ -15,6 +22,12 @@ pub struct LinuxBackend {
     buf: String,
     /// Every disk name seen, shared by all samples.
     names: Vec<Arc<str>>,
+    /// Process names, shared by every table that has them.
+    process_names: HashSet<Arc<str>>,
+    /// `btime` of `/proc/stat`, read once: `None` until then, `Some(None)` if it is missing.
+    boot_time: Option<Option<i64>>,
+    ticks_per_second: u64,
+    page_size: u64,
 }
 
 impl LinuxBackend {
@@ -27,6 +40,10 @@ impl LinuxBackend {
             core_kinds,
             buf: String::new(),
             names: Vec::new(),
+            process_names: HashSet::new(),
+            boot_time: None,
+            ticks_per_second: sysconf_or(SysConf::TicksPerSecond, 100),
+            page_size: sysconf_or(SysConf::PageSize, 4096),
         }
     }
 
@@ -36,6 +53,32 @@ impl LinuxBackend {
         fs::File::open(self.root.join(relative))
             .and_then(|mut f| f.read_to_string(&mut self.buf))
             .is_ok()
+    }
+
+    /// One process from `/proc/<pid>`, or `None` if it exited while being read.
+    fn process(&mut self, pid: u32, io: bool) -> Option<ProcessCounters> {
+        let dir = format!("proc/{pid}");
+        if !self.load(&format!("{dir}/stat")) {
+            return None;
+        }
+        let stat = parse_stat(&self.buf)?;
+        let name = intern(&mut self.process_names, stat.name);
+        let (ppid, cpu_ticks, start) = (stat.ppid, stat.cpu_ticks, stat.start);
+        let rss = stat.rss_pages.map(|pages| pages * self.page_size);
+        let io = if io && self.load(&format!("{dir}/io")) {
+            parse_io(&self.buf)
+        } else {
+            None
+        };
+        Some(ProcessCounters {
+            id: ProcessId { pid, start },
+            ppid,
+            uid: owner(&self.root.join(&dir)),
+            name,
+            cpu_ticks,
+            rss,
+            io,
+        })
     }
 }
 
@@ -55,6 +98,164 @@ impl Backend for LinuxBackend {
             memory: memory.into(),
             disks: disks.into(),
         }
+    }
+
+    fn processes(&mut self, io: bool) -> Reading<ProcessCountersTable> {
+        let Ok(entries) = fs::read_dir(self.root.join("proc")) else {
+            return Reading::Unsupported;
+        };
+        let pids: Vec<u32> = entries.flatten().filter_map(|e| e.file_name().to_str()?.parse().ok()).collect();
+        if self.boot_time.is_none() {
+            let btime = if self.load("proc/stat") { boot_time(&self.buf) } else { None };
+            self.boot_time = Some(btime);
+        }
+        let processes = pids.into_iter().filter_map(|pid| self.process(pid, io)).collect();
+        Reading::Value(ProcessCountersTable {
+            processes,
+            boot_time: self.boot_time.flatten(),
+            ticks_per_second: self.ticks_per_second,
+        })
+    }
+
+    fn details(&mut self, id: ProcessId) -> Option<Details> {
+        let dir = format!("proc/{}", id.pid);
+        if !self.load(&format!("{dir}/stat")) || parse_stat(&self.buf)?.start != id.start {
+            return None;
+        }
+        let command = if self.load(&format!("{dir}/cmdline")) {
+            let args: Vec<&str> = self.buf.split('\0').filter(|a| !a.is_empty()).collect();
+            (!args.is_empty()).then(|| args.join(" "))
+        } else {
+            None
+        };
+        let user = owner(&self.root.join(&dir)).map(|uid| {
+            let name = if self.load("etc/passwd") { user_name(&self.buf, uid) } else { None };
+            name.unwrap_or_else(|| format!("uid {uid}"))
+        });
+        Some(Details {
+            command: command.into(),
+            user: user.into(),
+        })
+    }
+}
+
+/// The shared copy of process name `name` in `names`.
+fn intern(names: &mut HashSet<Arc<str>>, name: &str) -> Arc<str> {
+    if let Some(n) = names.get(name) {
+        return n.clone();
+    }
+    if names.len() >= MAX_NAMES {
+        names.clear();
+    }
+    let n: Arc<str> = name.into();
+    names.insert(n.clone());
+    n
+}
+
+/// The fields of `/proc/<pid>/stat` a table row needs.
+struct Stat<'a> {
+    name: &'a str,
+    ppid: u32,
+    cpu_ticks: u64,
+    start: u64,
+    rss_pages: Option<u64>,
+}
+
+/// `pid (name) state ppid ...`: the name may hold spaces and parentheses, so it runs to the
+/// last `)`. User and system time are fields 14 and 15, the start time field 22, resident
+/// pages field 24.
+fn parse_stat(text: &str) -> Option<Stat<'_>> {
+    let open = text.find('(')?;
+    let close = text.rfind(')')?;
+    let name = text.get(open + 1..close)?;
+    // Field 3 (state) is the first after the name.
+    let mut fields = text.get(close + 1..)?.split_ascii_whitespace();
+    let mut at = 2;
+    let mut field = |n: usize| -> Option<u64> {
+        let value = fields.nth(n - at - 1)?.parse().ok();
+        at = n;
+        value
+    };
+    let ppid = u32::try_from(field(4)?).ok()?;
+    let cpu_ticks = field(14)? + field(15)?;
+    let start = field(22)?;
+    Some(Stat {
+        name,
+        ppid,
+        cpu_ticks,
+        start,
+        rss_pages: field(24),
+    })
+}
+
+/// Storage bytes read and written, from `/proc/<pid>/io`.
+fn parse_io(text: &str) -> Option<Io> {
+    let mut read = None;
+    let mut write = None;
+    for line in text.lines() {
+        let Some((name, value)) = line.split_once(':') else { continue };
+        let slot = match name {
+            "read_bytes" => &mut read,
+            "write_bytes" => &mut write,
+            _ => continue,
+        };
+        *slot = value.trim().parse().ok();
+    }
+    Some(Io {
+        read: read?,
+        write: write?,
+    })
+}
+
+/// The `btime` line of `/proc/stat`: when the machine started, in Unix seconds.
+fn boot_time(text: &str) -> Option<i64> {
+    text.lines().find_map(|l| l.strip_prefix("btime ")?.trim().parse().ok())
+}
+
+/// The user owning `/proc/<pid>`, which is the user the process runs as.
+fn owner(dir: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        fs::metadata(dir).ok().map(|m| m.uid())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
+/// The name `/etc/passwd` gives user `uid`.
+fn user_name(passwd: &str, uid: u32) -> Option<String> {
+    passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        (fields.nth(1)?.parse::<u32>().ok()? == uid).then(|| name.to_owned())
+    })
+}
+
+enum SysConf {
+    TicksPerSecond,
+    PageSize,
+}
+
+/// A `sysconf` value, or `fallback` where there is none.
+fn sysconf_or(what: SysConf, fallback: u64) -> u64 {
+    #[cfg(unix)]
+    {
+        let name = match what {
+            SysConf::TicksPerSecond => libc::_SC_CLK_TCK,
+            SysConf::PageSize => libc::_SC_PAGESIZE,
+        };
+        // SAFETY: sysconf only reads a system constant.
+        let value = unsafe { libc::sysconf(name) };
+        u64::try_from(value).ok().filter(|&v| v > 0).unwrap_or(fallback)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = what;
+        fallback
     }
 }
 

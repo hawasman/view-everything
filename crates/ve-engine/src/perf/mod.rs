@@ -1,12 +1,16 @@
 //! The Performance recorder (#37): once a second it reads the system's counters through a
 //! [`Backend`], turns two readings into a [`Sample`] and keeps the last hour of them on a
-//! [`Timeline`]. Readings a backend cannot take are [`Reading::Unsupported`], never zero.
-//! Recording runs only while a client asks for it (the window is open, or keep-in-tray is
-//! on); the seconds it did not run are gaps.
+//! [`Timeline`]. Every two seconds it also reads the process table (#50). Readings a backend
+//! cannot take are [`Reading::Unsupported`], never zero. Recording runs only while a client
+//! asks for it (the window is open, or keep-in-tray is on); the seconds it did not run are
+//! gaps.
 
 mod linux;
+mod process;
 
 pub use linux::LinuxBackend;
+use process::PrevProcesses;
+pub use process::{Details, Io, Process, ProcessCounters, ProcessCountersTable, ProcessId, Processes, RETAINED};
 
 use crate::Repaint;
 use crate::timeline::{Moment, Timeline};
@@ -22,6 +26,9 @@ pub const SPAN: i64 = 3600;
 /// The longest step between two readings still turned into rates. A longer one means the
 /// recorder stalled or was paused; that stretch is a gap, not an average over it.
 const MAX_STEP: i64 = 3;
+
+/// Seconds between two readings of the process table.
+const PROCESS_STEP: i64 = 2;
 
 /// The bytes one sector of `/proc/diskstats` stands for, whatever the device's own sector size.
 const SECTOR: u64 = 512;
@@ -116,6 +123,20 @@ pub struct Counters {
 /// Reads a platform's counters. A Windows backend is the next implementation.
 pub trait Backend: Send + 'static {
     fn read(&mut self) -> Counters;
+
+    /// Every running process; `io` asks for each one's I/O counters as well, which costs a
+    /// read per process.
+    fn processes(&mut self, io: bool) -> Reading<ProcessCountersTable> {
+        let _ = io;
+        Reading::Unsupported
+    }
+
+    /// The command line and user of the running process `id`; `None` once it has exited
+    /// (its PID gone, or now another process's).
+    fn details(&mut self, id: ProcessId) -> Option<Details> {
+        let _ = id;
+        None
+    }
 }
 
 /// The backend for this platform, if there is one.
@@ -164,11 +185,14 @@ pub struct Sample {
     pub gpu: Reading<f32>,
     pub temperature: Reading<f32>,
     pub power: Reading<f32>,
+    /// The process table as of this second (read every two seconds), the top [`RETAINED`].
+    pub processes: Reading<Arc<Processes>>,
 }
 
 impl Sample {
     /// Bytes this sample holds, for the memory budget. Disk names are shared by every sample
-    /// (see [`Disk::name`]), so they are not counted here.
+    /// (see [`Disk::name`]), and the process table by the seconds it stands for, so neither is
+    /// counted here.
     pub fn heap_size(&self) -> usize {
         let cores = self.cpu.value().map_or(0, |c| c.cores.capacity() * size_of::<Core>());
         let disks = self.disks.value().map_or(0, |d| d.capacity() * size_of::<Disk>());
@@ -179,7 +203,7 @@ impl Sample {
 /// How far a cumulative counter moved from `prev` to `now`. A 32-bit counter (a 32-bit
 /// kernel's) that passed its limit wrapped, which shows as a small step past it; any other
 /// step back is a reset (the device came back), which says nothing about the second.
-fn delta(prev: u64, now: u64) -> Option<u64> {
+pub(crate) fn delta(prev: u64, now: u64) -> Option<u64> {
     if now >= prev {
         return Some(now - prev);
     }
@@ -198,7 +222,7 @@ fn busy_share(prev: CpuTimes, now: CpuTimes) -> Reading<f32> {
 }
 
 /// The sample of second `time` from the readings `prev` (taken `seconds` earlier) and `now`.
-fn sample(time: i64, seconds: i64, prev: &Counters, now: &Counters) -> Sample {
+fn sample(time: i64, seconds: i64, prev: &Counters, now: &Counters, processes: Reading<Arc<Processes>>) -> Sample {
     let kind_of = |id: u32| match now.core_kinds.binary_search_by_key(&id, |&(i, _)| i) {
         Ok(i) => now.core_kinds[i].1,
         Err(_) => CoreKind::Unknown,
@@ -250,6 +274,7 @@ fn sample(time: i64, seconds: i64, prev: &Counters, now: &Counters) -> Sample {
         gpu: Reading::Unsupported,
         temperature: Reading::Unsupported,
         power: Reading::Unsupported,
+        processes,
     }
 }
 
@@ -260,10 +285,24 @@ struct Reader {
     /// The previous reading and its second; dropped when recording pauses, so a resumed
     /// recorder starts a new run instead of averaging over the pause.
     prev: Option<(i64, Counters)>,
+    /// The previous process reading, dropped with `prev`.
+    prev_processes: Option<PrevProcesses>,
+    /// The kept part of the newest process table, which the seconds until the next one show.
+    retained: Reading<Arc<Processes>>,
+}
+
+impl Reader {
+    fn restart(&mut self) {
+        self.prev = None;
+        self.prev_processes = None;
+        self.retained = Reading::Unsupported;
+    }
 }
 
 struct State {
     timeline: Timeline<Sample>,
+    /// The newest full process table: the live view lists every process.
+    live_processes: Option<Arc<Processes>>,
     recording: bool,
     stopping: bool,
 }
@@ -271,7 +310,8 @@ struct State {
 struct Inner {
     reader: Mutex<Reader>,
     state: Mutex<State>,
-    /// A client shows live readings: every sample repaints, not just the first.
+    /// A client shows live readings: every sample repaints, not just the first, and each
+    /// process's I/O is read.
     watched: AtomicBool,
     wake: Condvar,
     repaint: Repaint,
@@ -287,9 +327,15 @@ impl Perf {
     pub fn manual(backend: Box<dyn Backend>, repaint: Repaint) -> Perf {
         Perf {
             inner: Arc::new(Inner {
-                reader: Mutex::new(Reader { backend, prev: None }),
+                reader: Mutex::new(Reader {
+                    backend,
+                    prev: None,
+                    prev_processes: None,
+                    retained: Reading::Unsupported,
+                }),
                 state: Mutex::new(State {
                     timeline: Timeline::new(SPAN),
+                    live_processes: None,
                     recording: false,
                     stopping: false,
                 }),
@@ -326,11 +372,12 @@ impl Perf {
             state.recording = on;
             self.inner.wake.notify_all();
         }
-        self.inner.reader.lock().prev = None;
+        self.inner.reader.lock().restart();
     }
 
-    /// Whether a client shows live readings: then every sample repaints. Otherwise only the
-    /// first sample of a run does (so the rail can show Performance).
+    /// Whether a client shows live readings (the Performance page is open): then every sample
+    /// repaints and per-process I/O is read. Otherwise only the first sample of a run repaints
+    /// (so the rail can show Performance), and no process's I/O is read.
     pub fn set_watched(&self, on: bool) {
         self.inner.watched.store(on, Ordering::Relaxed);
     }
@@ -355,6 +402,22 @@ impl Perf {
             Moment::Live => self.live(),
             Moment::At(time) => self.inner.state.lock().timeline.at(time).cloned(),
         }
+    }
+
+    /// The process table shown at `moment`: every process for Live, the kept top
+    /// [`RETAINED`] of that second's table for a time. `None` is a gap, or a platform that
+    /// cannot read processes.
+    pub fn processes(&self, moment: Moment) -> Option<Arc<Processes>> {
+        let state = self.inner.state.lock();
+        match moment {
+            Moment::Live => state.timeline.latest().and(state.live_processes.clone()),
+            Moment::At(time) => state.timeline.at(time)?.processes.value().cloned(),
+        }
+    }
+
+    /// The command line and user of running process `id`, read now; `None` once it has exited.
+    pub fn details(&self, id: ProcessId) -> Option<Details> {
+        self.inner.reader.lock().backend.details(id)
     }
 
     /// Whether at least one second is recorded.
@@ -386,14 +449,21 @@ impl Perf {
         self.inner.state.lock().timeline.gaps(from, to)
     }
 
-    /// Bytes the kept samples take in memory.
+    /// Bytes the kept samples take in memory, each process table counted once.
     pub fn memory_bytes(&self) -> usize {
         let state = self.inner.state.lock();
-        state
-            .timeline
-            .range(i64::MIN, i64::MAX)
-            .map(|(_, s)| s.heap_size() + size_of::<(i64, Arc<Sample>)>() + 2 * size_of::<usize>())
-            .sum()
+        let mut last: Option<&Arc<Processes>> = None;
+        let mut bytes = 0;
+        for (_, s) in state.timeline.range(i64::MIN, i64::MAX) {
+            bytes += s.heap_size() + size_of::<(i64, Arc<Sample>)>() + 2 * size_of::<usize>();
+            if let Reading::Value(table) = &s.processes
+                && last.is_none_or(|l| !Arc::ptr_eq(l, table))
+            {
+                bytes += table.heap_size() + 2 * size_of::<usize>();
+                last = Some(table);
+            }
+        }
+        bytes
     }
 }
 
@@ -441,19 +511,25 @@ fn record(inner: &Arc<Inner>) {
 
 impl Inner {
     fn tick(&self, now: i64) {
-        let sample = {
+        let (sample, live_processes) = {
             let mut reader = self.reader.lock();
             let counters = reader.backend.read();
+            let live = self.read_processes(&mut reader, now, &counters);
             let sample = match reader.prev.take() {
-                Some((then, prev)) if now > then && now - then <= MAX_STEP => Some(sample(now, now - then, &prev, &counters)),
+                Some((then, prev)) if now > then && now - then <= MAX_STEP => {
+                    Some(sample(now, now - then, &prev, &counters, reader.retained.clone()))
+                }
                 _ => None,
             };
             reader.prev = Some((now, counters));
-            sample
+            (sample, live)
         };
         let first = {
             let mut state = self.state.lock();
             state.timeline.expire(now);
+            if let Some(live) = live_processes {
+                state.live_processes = live;
+            }
             let Some(sample) = sample else { return };
             let first = state.timeline.is_empty();
             state.timeline.push(now, Arc::new(sample));
@@ -462,6 +538,36 @@ impl Inner {
         if first || self.watched.load(Ordering::Relaxed) {
             (self.repaint)();
         }
+    }
+
+    /// Reads the process table when one is due (none yet, or the last is two seconds old),
+    /// keeps its top part in `reader.retained` for the samples and returns the full table for
+    /// the live view: `Some(None)` when there is none (it cannot be read, or this reading only
+    /// primes the next). `None` when no table was due.
+    fn read_processes(&self, reader: &mut Reader, now: i64, counters: &Counters) -> Option<Option<Arc<Processes>>> {
+        let due = match &reader.prev_processes {
+            Some(p) => now - p.time >= PROCESS_STEP || now <= p.time,
+            None => true,
+        } || matches!(reader.retained, Reading::Unsupported);
+        if !due {
+            return None;
+        }
+        let io = self.watched.load(Ordering::Relaxed);
+        let machine_ticks = counters.cpu.value().map(|c| c.total.total);
+        let read = reader.backend.processes(io);
+        let prev = reader.prev_processes.take().filter(|p| now > p.time && now - p.time <= MAX_STEP);
+        reader.retained = Reading::Unsupported;
+        let Reading::Value(read) = read else {
+            return Some(None);
+        };
+        reader.prev_processes = Some(PrevProcesses::of(now, &read, machine_ticks));
+        // The first reading of a run only primes the next: it has no CPU shares.
+        let Some(prev) = prev else {
+            return Some(None);
+        };
+        let full = Arc::new(process::table(now, &read, machine_ticks, &prev));
+        reader.retained = Reading::Value(full.retained());
+        Some(Some(full))
     }
 }
 

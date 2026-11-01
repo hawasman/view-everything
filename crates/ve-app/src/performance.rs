@@ -1,17 +1,22 @@
 //! The Performance page (#37): the system at the Moment (CPU per core, memory composition,
-//! throughput per disk) and its lane on the Timeline dock, the last hour of CPU use with the
-//! seconds nothing was recorded left blank.
+//! throughput per disk, the process table) and its lane on the Timeline dock, the last hour of
+//! CPU use with the seconds nothing was recorded left blank. A click on a process opens it in
+//! the Inspector (#50).
 
 use crate::format;
-use crate::theme::{FS_BODY, GAP, RADIUS_CHIP, palette};
-use crate::ui::{caption, empty_state, kpi_strip, panel, section_title, swatch, title_row};
+use crate::inspector::Panel;
+use crate::theme::{FS_BODY, FS_SMALL, GAP, RADIUS_CHIP, palette};
+use crate::ui::{Tone, caption, empty_state, kpi_strip, panel, section_title, swatch, title_row};
 use chrono::{Local, TimeZone as _};
-use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::component::table::{Column, ColumnSort, DataTable, TableDelegate, TableState};
+use gpui_kit::component::{Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::Cell;
+use std::cmp::Ordering;
 use std::rc::Rc;
-use ve_engine::perf::{CoreKind, Cpu, Disk, Memory, Perf, Reading, SPAN, Sample};
+use std::sync::Arc;
+use ve_engine::perf::{CoreKind, Cpu, Details, Disk, Memory, Perf, Process, ProcessId, Processes, RETAINED, Reading, SPAN, Sample};
 use ve_engine::timeline::Moment;
 
 /// What a reading that has no reader on this platform says.
@@ -81,8 +86,9 @@ fn fact_row(label: impl Into<SharedString>, value: impl Into<SharedString>, cx: 
         .child(div().child(value.into()))
 }
 
-/// The Performance page at `moment`: `sample` is the sample then, `None` a gap.
-pub fn page(sample: Option<&Sample>, moment: Moment, now: i64, cx: &App) -> AnyElement {
+/// The Performance page at `moment`: `sample` is the sample then, `None` a gap; `processes`
+/// the table of its processes, which the Shell keeps up to date.
+pub fn page(sample: Option<&Sample>, moment: Moment, now: i64, processes: &Entity<TableState<ProcessList>>, cx: &App) -> AnyElement {
     let facts = match (moment, sample) {
         (Moment::Live, Some(s)) => format!("Live · sampled at {}", when(s.time, now)),
         (Moment::Live, None) => "Live · no sample yet".to_owned(),
@@ -101,17 +107,23 @@ pub fn page(sample: Option<&Sample>, moment: Moment, now: i64, cx: &App) -> AnyE
         .size_full()
         .overflow_y_scroll()
         .child(
-            v_flex().pb(px(GAP)).gap(px(GAP)).child(head).child(kpis(s, cx)).child(
-                h_flex().items_start().gap(px(GAP)).child(cpu_panel(&s.cpu, cx).flex_1()).child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap(px(GAP))
-                        .child(memory_panel(&s.memory, cx))
-                        .child(disks_panel(&s.disks, cx))
-                        .child(sensors_panel(s, cx)),
-                ),
-            ),
+            v_flex()
+                .pb(px(GAP))
+                .gap(px(GAP))
+                .child(head)
+                .child(kpis(s, cx))
+                .child(
+                    h_flex().items_start().gap(px(GAP)).child(cpu_panel(&s.cpu, cx).flex_1()).child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(GAP))
+                            .child(memory_panel(&s.memory, cx))
+                            .child(disks_panel(&s.disks, cx))
+                            .child(sensors_panel(s, cx)),
+                    ),
+                )
+                .child(processes_panel(&s.processes, moment, processes, cx)),
         )
         .into_any_element()
 }
@@ -412,4 +424,307 @@ fn recorded_text(seconds: usize) -> String {
     } else {
         format!("{seconds} s")
     }
+}
+
+/// Height of the process table: about a dozen rows, the page scrolling around it.
+const PROCESSES_H: f32 = 420.;
+
+fn processes_panel(reading: &Reading<Arc<Processes>>, moment: Moment, table: &Entity<TableState<ProcessList>>, cx: &App) -> Div {
+    let body = match reading {
+        Reading::Unsupported => caption(UNSUPPORTED, cx).into_any_element(),
+        Reading::Value(_) => div()
+            .h(px(PROCESSES_H))
+            .child(
+                DataTable::new(table)
+                    .small()
+                    .bordered(false)
+                    .stripe(false)
+                    .header_row_height(px(30.)),
+            )
+            .into_any_element(),
+    };
+    let note = match (moment, reading) {
+        (_, Reading::Unsupported) => None,
+        (Moment::Live, _) => Some(format!(
+            "{} running · I/O is read while this page is open",
+            table.read(cx).delegate().order.len()
+        )),
+        (Moment::At(_), Reading::Value(p)) => Some(format!("The top {RETAINED} by CPU and memory, as read at {}", when(p.time, p.time))),
+    };
+    panel(cx).child(
+        v_flex()
+            .gap(px(GAP))
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(section_title("Processes", cx))
+                    .children(note.map(|n| caption(n, cx))),
+            )
+            .child(body),
+    )
+}
+
+/// A click on a process: inspect it.
+pub type OnInspect = Rc<dyn Fn(ProcessId, &mut App)>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortBy {
+    Name,
+    Pid,
+    Cpu,
+    Memory,
+    Read,
+    Write,
+}
+
+/// (title, width, sort, right-aligned)
+const PROCESS_COLUMNS: [(&str, f32, SortBy, bool); 6] = [
+    ("Name", 260., SortBy::Name, false),
+    ("PID", 80., SortBy::Pid, true),
+    ("CPU", 80., SortBy::Cpu, true),
+    ("Memory", 100., SortBy::Memory, true),
+    ("Read", 100., SortBy::Read, true),
+    ("Write", 100., SortBy::Write, true),
+];
+
+/// The process table of the Moment, sortable by any column.
+pub struct ProcessList {
+    table: Option<Arc<Processes>>,
+    /// Indices into the table's list, in the order shown.
+    order: Vec<usize>,
+    sort: SortBy,
+    descending: bool,
+    /// The process the Inspector shows.
+    selected: Option<ProcessId>,
+    on_inspect: OnInspect,
+}
+
+/// Unknown values sort after known ones whichever the direction.
+fn known_first<T: PartialOrd>(a: Option<T>, b: Option<T>, descending: bool) -> Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) if descending => b.partial_cmp(&a).unwrap_or(Ordering::Equal),
+        (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
+        (a, b) => b.is_some().cmp(&a.is_some()),
+    }
+}
+
+impl ProcessList {
+    /// A list showing nothing until [`ProcessList::show`]; busiest first.
+    pub fn new(on_inspect: OnInspect) -> Self {
+        Self {
+            table: None,
+            order: Vec::new(),
+            sort: SortBy::Cpu,
+            descending: true,
+            selected: None,
+            on_inspect,
+        }
+    }
+
+    /// Shows `table` (the Moment's) with `selected` marked; true if anything changed.
+    pub fn show(&mut self, table: Option<Arc<Processes>>, selected: Option<ProcessId>) -> bool {
+        let same = match (&self.table, &table) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if same && self.selected == selected {
+            return false;
+        }
+        self.selected = selected;
+        if !same {
+            self.table = table;
+            self.sorted();
+        }
+        true
+    }
+
+    fn sorted(&mut self) {
+        let Some(table) = &self.table else {
+            self.order.clear();
+            return;
+        };
+        let list = &table.list;
+        let (sort, descending) = (self.sort, self.descending);
+        let by_name = |a: &Process, b: &Process| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id));
+        let io = |p: &Process, f: fn(&ve_engine::perf::Io) -> u64| p.io.value().map(f);
+        self.order = (0..list.len()).collect();
+        self.order.sort_by(|&a, &b| {
+            let (a, b) = (&list[a], &list[b]);
+            match sort {
+                SortBy::Name if descending => by_name(b, a),
+                SortBy::Name => by_name(a, b),
+                SortBy::Pid if descending => b.id.cmp(&a.id),
+                SortBy::Pid => a.id.cmp(&b.id),
+                SortBy::Cpu => known_first(a.cpu.value(), b.cpu.value(), descending),
+                SortBy::Memory => known_first(a.rss.value(), b.rss.value(), descending),
+                SortBy::Read => known_first(io(a, |i| i.read), io(b, |i| i.read), descending),
+                SortBy::Write => known_first(io(a, |i| i.write), io(b, |i| i.write), descending),
+            }
+            .then_with(|| by_name(a, b))
+        });
+    }
+
+    fn process_at(&self, row: usize) -> Option<&Process> {
+        Some(&self.table.as_ref()?.list[*self.order.get(row)?])
+    }
+}
+
+impl TableDelegate for ProcessList {
+    fn columns_count(&self, _: &App) -> usize {
+        PROCESS_COLUMNS.len()
+    }
+
+    fn rows_count(&self, _: &App) -> usize {
+        self.order.len()
+    }
+
+    fn column(&self, ix: usize, _: &App) -> Column {
+        let (name, width, by, right) = PROCESS_COLUMNS[ix];
+        let column = Column::new(name, name).width(width);
+        let column = if right { column.text_right() } else { column };
+        column.sort(match (by == self.sort, self.descending) {
+            (false, _) => ColumnSort::Default,
+            (true, true) => ColumnSort::Descending,
+            (true, false) => ColumnSort::Ascending,
+        })
+    }
+
+    fn perform_sort(&mut self, col: usize, sort: ColumnSort, _: &mut Window, _: &mut Context<TableState<Self>>) {
+        self.sort = PROCESS_COLUMNS[col].2;
+        self.descending = sort != ColumnSort::Ascending;
+        self.sorted();
+    }
+
+    fn render_th(&mut self, col_ix: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
+        div()
+            .size_full()
+            .text_size(px(FS_SMALL))
+            .child(self.column(col_ix, cx).name.clone())
+    }
+
+    fn render_last_empty_col(&mut self, _: &mut Window, _: &mut Context<TableState<Self>>) -> impl IntoElement {
+        div().w_0()
+    }
+
+    fn render_tr(&mut self, row: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> Stateful<Div> {
+        let id = self.process_at(row).map(|p| p.id);
+        let selected = id.is_some() && id == self.selected;
+        div()
+            .id(("process-row", row))
+            .when(selected, |d| d.child(crate::selection::highlight(true, cx)))
+            .on_click(cx.listener(move |table, _: &ClickEvent, _, cx| {
+                let list = table.delegate_mut();
+                let Some(id) = list.process_at(row).map(|p| p.id) else {
+                    return;
+                };
+                list.selected = Some(id);
+                let inspect = list.on_inspect.clone();
+                inspect(id, cx);
+                cx.notify();
+            }))
+    }
+
+    fn render_td(&mut self, row: usize, col: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
+        let Some(p) = self.process_at(row) else {
+            return div().into_any_element();
+        };
+        let palette = palette(cx);
+        let (text, known) = match col {
+            0 => (p.name.to_string(), true),
+            1 => (p.id.pid.to_string(), true),
+            2 => (process_share(&p.cpu), p.cpu.value().is_some()),
+            3 => (bytes(&p.rss), p.rss.value().is_some()),
+            4 => (io_rate(&p.io, |i| i.read), p.io.value().is_some()),
+            _ => (io_rate(&p.io, |i| i.write), p.io.value().is_some()),
+        };
+        h_flex()
+            .size_full()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_size(px(FS_BODY))
+            .text_color(if known && col != 1 { palette.text } else { palette.muted })
+            .when(PROCESS_COLUMNS[col].3, |d| d.justify_end())
+            .child(div().min_w_0().truncate().child(text))
+            .into_any_element()
+    }
+}
+
+/// A process's CPU share, to a tenth of a percent: most are well under one.
+fn process_share(reading: &Reading<f32>) -> String {
+    reading.value().map_or_else(|| UNKNOWN.to_owned(), |v| format!("{:.1} %", v * 100.))
+}
+
+fn bytes(reading: &Reading<u64>) -> String {
+    reading.value().map_or_else(|| UNKNOWN.to_owned(), |&b| format::size(b))
+}
+
+fn io_rate(reading: &Reading<ve_engine::perf::Io>, part: fn(&ve_engine::perf::Io) -> u64) -> String {
+    reading
+        .value()
+        .map_or_else(|| UNKNOWN.to_owned(), |io| format!("{}/s", format::size(part(io))))
+}
+
+/// "2 h 05 min", "3 min 12 s", "4.2 s".
+fn duration(seconds: f64) -> String {
+    let whole = seconds as u64;
+    match whole {
+        0..60 => format!("{seconds:.1} s"),
+        60..3600 => format!("{} min {:02} s", whole / 60, whole % 60),
+        _ => format!("{} h {:02} min", whole / 3600, whole % 3600 / 60),
+    }
+}
+
+/// The process the Inspector shows: the table it was clicked in, and its command line and user
+/// once read (`None` while reading; `Some(None)` once it has exited).
+pub struct Inspecting {
+    pub id: ProcessId,
+    pub seen: Arc<Processes>,
+    pub details: Option<Option<Details>>,
+}
+
+/// The Inspector's view of a process: its identity and details, and its readings in `table`
+/// (the Moment's), "—" where it is not in it.
+pub fn inspector_panel(inspecting: &Inspecting, table: Option<&Processes>, now: i64) -> Option<Panel> {
+    let id = inspecting.id;
+    let current = table.and_then(|t| Some((t, t.get(id)?)));
+    let (table, process) = current.or_else(|| Some((&*inspecting.seen, inspecting.seen.get(id)?)))?;
+    let fact = |label: &str, value: String| (SharedString::from(label.to_owned()), SharedString::from(value));
+    let unknown = || UNKNOWN.to_owned();
+    let details = inspecting.details.as_ref().and_then(Option::as_ref);
+    let parent = match process.ppid {
+        0 => "none".to_owned(),
+        ppid => match table.by_pid(ppid) {
+            Some(parent) => format!("{} · PID {ppid}", parent.name),
+            None => format!("PID {ppid}"),
+        },
+    };
+    let readings = current.map(|(_, p)| p);
+    let facts = vec![
+        fact(
+            "Command line",
+            details.and_then(|d| d.command.value().cloned()).unwrap_or_else(unknown),
+        ),
+        fact("User", details.and_then(|d| d.user.value().cloned()).unwrap_or_else(unknown)),
+        fact("Started", table.started(process).map_or_else(unknown, |t| when(t, now))),
+        fact("Parent", parent),
+        fact("CPU time", duration(table.cpu_seconds(process))),
+        fact("CPU", readings.map_or_else(unknown, |p| process_share(&p.cpu))),
+        fact("Memory", readings.map_or_else(unknown, |p| bytes(&p.rss))),
+        fact("Read", readings.map_or_else(unknown, |p| io_rate(&p.io, |i| i.read))),
+        fact("Write", readings.map_or_else(unknown, |p| io_rate(&p.io, |i| i.write))),
+    ];
+    let tag = match inspecting.details {
+        Some(None) => Some(("Exited".into(), Tone::Neutral)),
+        _ => None,
+    };
+    Some(Panel {
+        kind: "Process",
+        tag,
+        title: process.name.to_string().into(),
+        subtitle: Some(format!("PID {}", id.pid).into()),
+        facts,
+        actions: Vec::new(),
+    })
 }
