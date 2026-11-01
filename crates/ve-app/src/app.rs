@@ -102,6 +102,8 @@ enum Page {
     Duplicates,
     /// The system at the Moment: CPU, memory, disks.
     Performance,
+    /// Each network interface's throughput at the Moment.
+    Network,
     Apps,
     /// Tasks and Locations, from the rail's Work block.
     Work,
@@ -498,6 +500,7 @@ impl Shell {
             Ok("apps") => Page::Apps,
             Ok("work" | "tasks") => Page::Work,
             Ok("performance") => Page::Performance,
+            Ok("network") => Page::Network,
             Ok("overview" | "dashboard") => Page::Overview,
             // The scroll measurement needs the Browse list on screen.
             _ if std::env::var_os("VE_BENCH").is_some() => Page::Browse,
@@ -607,6 +610,7 @@ impl Shell {
                 this.engine.set_query(this.query.read(cx).value().to_string());
             }
             this.engine.perf.set_watched(false);
+            this.engine.perf.set_process_io(false);
             this.engine.perf.set_recording(this.settings_page.read(cx).settings().keep_in_tray);
             if cx.has_global::<Host>() {
                 let remembered = this.remember(cx);
@@ -1772,10 +1776,14 @@ impl Shell {
             .child(self.nav("nav-browse", "Browse", None, Page::Browse, true, cx))
             .child(self.nav("nav-cleaner", "Cleaner", None, Page::Cleaner, true, cx))
             .child(self.nav("nav-duplicates", "Duplicates", None, Page::Duplicates, true, cx))
-            // A Module appears once it has data (ADR-0015): Performance with its first sample.
+            // A Module appears once it has data (ADR-0015): Performance with its first sample,
+            // Network beside it once a sample has interfaces.
             .when(self.engine.perf.has_samples(), |d| {
                 d.child(group_label("Performance", cx))
                     .child(self.nav("nav-performance", "System", None, Page::Performance, true, cx))
+            })
+            .when(self.engine.net.has_samples(), |d| {
+                d.child(self.nav("nav-network", "Network", None, Page::Network, true, cx))
             })
             .when(self.apps.read(cx).has_apps(cx), |d| {
                 d.child(self.nav("nav-apps", "Apps", None, Page::Apps, true, cx))
@@ -1903,7 +1911,7 @@ impl Shell {
         };
         let moment = crate::performance::moment_label(self.moment, now);
         let context = match (self.page, dates.first()) {
-            (Page::Performance, _) => None,
+            (Page::Performance | Page::Network, _) => None,
             (Page::Browse, _) if self.moment != Moment::Live => Some(match active {
                 Some(date) => format!("Snapshot {date}"),
                 None => "No Snapshot".to_owned(),
@@ -1934,15 +1942,17 @@ impl Shell {
                         .build(cx, cx.listener(|this, _, _, cx| this.set_moment(Moment::Live, cx))),
                 )
             });
+        // Pressing or dragging on a Module's lane moves the Moment to that second.
+        let scrub = || -> crate::performance::Scrub {
+            let shell = cx.weak_entity();
+            Rc::new(move |time, cx| {
+                let _ = shell.update(cx, |this, cx| this.set_moment(Moment::At(time), cx));
+            })
+        };
         let lane = match self.page {
             Page::Browse => Some(self.snapshot_lane(active, &dates, cx)),
-            Page::Performance => {
-                let shell = cx.weak_entity();
-                let scrub: crate::performance::Scrub = Rc::new(move |time, cx| {
-                    let _ = shell.update(cx, |this, cx| this.set_moment(Moment::At(time), cx));
-                });
-                Some(crate::performance::lane(&self.engine.perf, self.moment, now, scrub, cx))
-            }
+            Page::Performance => Some(crate::performance::lane(&self.engine.perf, self.moment, now, scrub(), cx)),
+            Page::Network => Some(crate::network::lane(&self.engine.net, self.moment, now, scrub(), cx)),
             _ => None,
         };
         v_flex()
@@ -2778,8 +2788,10 @@ impl Render for Shell {
         if self.page == Page::Browse {
             self.map_files_moment(cx);
         }
-        // Live readings repaint each second only while the Performance page shows them.
-        self.engine.perf.set_watched(self.page == Page::Performance);
+        // Live readings repaint each second only while the Performance or Network page shows
+        // them; each process's I/O is read only while Performance does.
+        self.engine.perf.set_watched(matches!(self.page, Page::Performance | Page::Network));
+        self.engine.perf.set_process_io(self.page == Page::Performance);
         // The Apps sizes walk program folders under the Index lock: redone only while shown.
         let apps_shown = self.page == Page::Apps;
         self.apps.update(cx, |apps, cx| apps.set_shown(apps_shown, cx));
@@ -2822,6 +2834,11 @@ impl Render for Shell {
                     }
                 });
                 crate::performance::page(sample.as_deref(), self.moment, now, &self.processes, cx)
+            }
+            Page::Network => {
+                let sample = self.engine.net.at(self.moment);
+                let hour = self.engine.net.summary(now - ve_engine::perf::SPAN + 1, now);
+                crate::network::page(sample.as_ref(), &hour, self.moment, now, cx)
             }
             Page::Apps => {
                 let shown = match &self.inspected {

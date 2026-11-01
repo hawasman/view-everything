@@ -6,6 +6,7 @@
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use ve_engine::net::InterfaceCounters;
 use ve_engine::perf::{
     Backend, Counters, CpuCounters, CpuTimes, Io, LinuxBackend, Perf, ProcessCounters, ProcessCountersTable, ProcessId, RETAINED, Reading,
 };
@@ -149,7 +150,7 @@ fn io_is_read_only_while_a_client_watches() {
     perf.tick(101);
     assert_eq!(io(&perf, 101), Reading::Unsupported, "nobody watches");
 
-    perf.set_watched(true);
+    perf.set_process_io(true);
     machine(root, 3);
     process(root, &writer, 0, 1, (8192, 16384));
     perf.tick(103);
@@ -160,7 +161,7 @@ fn io_is_read_only_while_a_client_watches() {
     perf.tick(105);
     assert_eq!(io(&perf, 105), Reading::Value(Io { read: 2048, write: 8192 }));
 
-    perf.set_watched(false);
+    perf.set_process_io(false);
     machine(root, 7);
     perf.tick(107);
     assert_eq!(io(&perf, 107), Reading::Unsupported, "watching stopped");
@@ -219,6 +220,7 @@ struct Many {
     readings: u64,
     count: u32,
     names: Vec<Arc<str>>,
+    interfaces: Vec<Arc<str>>,
 }
 
 impl Many {
@@ -227,6 +229,7 @@ impl Many {
             readings: 0,
             count,
             names: (0..count).map(|i| Arc::from(format!("worker-{i}"))).collect(),
+            interfaces: (0..8).map(|i| Arc::from(format!("veth{i}"))).collect(),
         }
     }
 }
@@ -247,6 +250,17 @@ impl Backend for Many {
             core_kinds: Arc::from([]),
             memory: Reading::Unsupported,
             disks: Reading::Unsupported,
+            // A busy machine's worth of interfaces, for the memory budget.
+            network: Reading::Value(
+                self.interfaces
+                    .iter()
+                    .map(|name| InterfaceCounters {
+                        name: name.clone(),
+                        received: 1000 * n,
+                        sent: 100 * n,
+                    })
+                    .collect(),
+            ),
         }
     }
 
@@ -260,7 +274,6 @@ impl Backend for Many {
                         start: u64::from(i),
                     },
                     ppid: 1,
-                    uid: Some(1000),
                     name: self.names[i as usize].clone(),
                     // CPU grows with the PID; memory shrinks with it.
                     cpu_ticks: u64::from(i) * n,

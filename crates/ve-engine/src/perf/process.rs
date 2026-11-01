@@ -30,8 +30,6 @@ pub struct Io {
 pub struct ProcessCounters {
     pub id: ProcessId,
     pub ppid: u32,
-    /// The user it runs as, by id.
-    pub uid: Option<u32>,
     /// One allocation per name, shared by every reading that has it.
     pub name: Arc<str>,
     /// User plus system time, in clock ticks.
@@ -56,7 +54,6 @@ pub struct ProcessCountersTable {
 pub struct Process {
     pub id: ProcessId,
     pub ppid: u32,
-    pub uid: Option<u32>,
     pub name: Arc<str>,
     /// Share of the whole machine's CPU time since the previous table, 0 to 1; unknown for a
     /// process that was not running then.
@@ -192,7 +189,6 @@ pub(super) fn table(time: i64, now: &ProcessCountersTable, machine_ticks: Option
             Process {
                 id: c.id,
                 ppid: c.ppid,
-                uid: c.uid,
                 name: c.name.clone(),
                 cpu,
                 rss: c.rss.into(),

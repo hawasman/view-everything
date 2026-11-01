@@ -13,6 +13,7 @@ use process::PrevProcesses;
 pub use process::{Details, Io, Process, ProcessCounters, ProcessCountersTable, ProcessId, Processes, RETAINED};
 
 use crate::Repaint;
+use crate::net::{Interface, InterfaceCounters};
 use crate::timeline::{Moment, Timeline};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
@@ -118,6 +119,8 @@ pub struct Counters {
     pub core_kinds: Arc<[(u32, CoreKind)]>,
     pub memory: Reading<Memory>,
     pub disks: Reading<Vec<DiskCounters>>,
+    /// The network interfaces' byte counts (the Network Module's, recorded here).
+    pub network: Reading<Vec<InterfaceCounters>>,
 }
 
 /// Reads a platform's counters. A Windows backend is the next implementation.
@@ -187,16 +190,19 @@ pub struct Sample {
     pub power: Reading<f32>,
     /// The process table as of this second (read every two seconds), the top [`RETAINED`].
     pub processes: Reading<Arc<Processes>>,
+    /// Each network interface's bytes received and sent since the previous reading.
+    pub network: Reading<Vec<Interface>>,
 }
 
 impl Sample {
-    /// Bytes this sample holds, for the memory budget. Disk names are shared by every sample
-    /// (see [`Disk::name`]), and the process table by the seconds it stands for, so neither is
-    /// counted here.
+    /// Bytes this sample holds, for the memory budget. Disk and interface names are shared by
+    /// every sample (see [`Disk::name`]), and the process table by the seconds it stands for,
+    /// so none is counted here.
     pub fn heap_size(&self) -> usize {
         let cores = self.cpu.value().map_or(0, |c| c.cores.capacity() * size_of::<Core>());
         let disks = self.disks.value().map_or(0, |d| d.capacity() * size_of::<Disk>());
-        size_of::<Self>() + cores + disks
+        let interfaces = self.network.value().map_or(0, |i| i.capacity() * size_of::<Interface>());
+        size_of::<Self>() + cores + disks + interfaces
     }
 }
 
@@ -266,6 +272,10 @@ fn sample(time: i64, seconds: i64, prev: &Counters, now: &Counters, processes: R
         ),
         _ => Reading::Unsupported,
     };
+    let network = match (&prev.network, &now.network) {
+        (Reading::Value(p), Reading::Value(n)) => Reading::Value(crate::net::interfaces(seconds as i64, p, n)),
+        _ => Reading::Unsupported,
+    };
     Sample {
         time,
         cpu,
@@ -275,6 +285,7 @@ fn sample(time: i64, seconds: i64, prev: &Counters, now: &Counters, processes: R
         temperature: Reading::Unsupported,
         power: Reading::Unsupported,
         processes,
+        network,
     }
 }
 
@@ -307,26 +318,29 @@ struct State {
     stopping: bool,
 }
 
-struct Inner {
+/// The recorder's state, shared by the [`Perf`] handle, its thread and the
+/// [`Net`](crate::net::Net) handle, which reads the same Timeline.
+pub(crate) struct Store {
     reader: Mutex<Reader>,
     state: Mutex<State>,
-    /// A client shows live readings: every sample repaints, not just the first, and each
-    /// process's I/O is read.
+    /// A client shows live readings: every sample repaints, not just the first.
     watched: AtomicBool,
+    /// A client shows the process table: each process's I/O is read.
+    process_io: AtomicBool,
     wake: Condvar,
     repaint: Repaint,
 }
 
 /// The engine's handle on Performance recording. Dropping it stops the recorder thread.
 pub struct Perf {
-    inner: Arc<Inner>,
+    inner: Arc<Store>,
 }
 
 impl Perf {
     /// A recorder reading `backend`, with no thread: samples are taken by [`Perf::tick`].
     pub fn manual(backend: Box<dyn Backend>, repaint: Repaint) -> Perf {
         Perf {
-            inner: Arc::new(Inner {
+            inner: Arc::new(Store {
                 reader: Mutex::new(Reader {
                     backend,
                     prev: None,
@@ -340,6 +354,7 @@ impl Perf {
                     stopping: false,
                 }),
                 watched: AtomicBool::new(false),
+                process_io: AtomicBool::new(false),
                 wake: Condvar::new(),
                 repaint,
             }),
@@ -375,11 +390,17 @@ impl Perf {
         self.inner.reader.lock().restart();
     }
 
-    /// Whether a client shows live readings (the Performance page is open): then every sample
-    /// repaints and per-process I/O is read. Otherwise only the first sample of a run repaints
-    /// (so the rail can show Performance), and no process's I/O is read.
+    /// Whether a client shows live readings (a Performance or Network page is open): then
+    /// every sample repaints. Otherwise only the first sample of a run does (so the rail can
+    /// show the Modules).
     pub fn set_watched(&self, on: bool) {
         self.inner.watched.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether a client shows the process table (the Performance page is open): then each
+    /// process's I/O is read with it, which costs a read per process. Otherwise it is not.
+    pub fn set_process_io(&self, on: bool) {
+        self.inner.process_io.store(on, Ordering::Relaxed);
     }
 
     /// Reads the counters as of second `now` and records that second's sample (the recorder
@@ -433,15 +454,12 @@ impl Perf {
     /// `from` to `to` (inclusive) cut into `buckets` equal slices, each with the highest
     /// `value` of its samples, or `None` where no sample has one: a gap.
     pub fn peaks(&self, from: i64, to: i64, buckets: usize, value: impl Fn(&Sample) -> Option<f32>) -> Vec<Option<f32>> {
-        let mut peaks = vec![None; buckets];
-        let span = (to - from + 1).max(1) as usize;
-        let state = self.inner.state.lock();
-        for (t, s) in state.timeline.range(from, to) {
-            if let (Some(v), Some(peak)) = (value(s), peaks.get_mut((t - from) as usize * buckets / span)) {
-                *peak = Some(peak.map_or(v, |p: f32| p.max(v)));
-            }
-        }
-        peaks
+        self.inner.peaks(from, to, buckets, value)
+    }
+
+    /// The store behind this handle, for the Network handle.
+    pub(crate) fn store(&self) -> Arc<Store> {
+        self.inner.clone()
     }
 
     /// The runs of seconds from `from` to `to` with no sample, as inclusive (first, last).
@@ -449,7 +467,8 @@ impl Perf {
         self.inner.state.lock().timeline.gaps(from, to)
     }
 
-    /// Bytes the kept samples take in memory, each process table counted once.
+    /// Bytes the kept samples take in memory, each process table counted once, the live full
+    /// table included.
     pub fn memory_bytes(&self) -> usize {
         let state = self.inner.state.lock();
         let mut last: Option<&Arc<Processes>> = None;
@@ -462,6 +481,11 @@ impl Perf {
                 bytes += table.heap_size() + 2 * size_of::<usize>();
                 last = Some(table);
             }
+        }
+        if let Some(live) = &state.live_processes
+            && last.is_none_or(|l| !Arc::ptr_eq(l, live))
+        {
+            bytes += live.heap_size();
         }
         bytes
     }
@@ -476,7 +500,7 @@ impl Drop for Perf {
 
 /// The recorder thread: parked while recording is off, otherwise one sample at the start of
 /// each second.
-fn record(inner: &Arc<Inner>) {
+fn record(inner: &Arc<Store>) {
     loop {
         {
             let mut state = inner.state.lock();
@@ -509,7 +533,35 @@ fn record(inner: &Arc<Inner>) {
     }
 }
 
-impl Inner {
+impl Store {
+    /// Runs `f` on the Timeline, under its lock.
+    pub(crate) fn timeline<R>(&self, f: impl FnOnce(&Timeline<Sample>) -> R) -> R {
+        f(&self.state.lock().timeline)
+    }
+
+    /// `from` to `to` (inclusive) cut into `buckets` equal slices, each with the highest
+    /// `value` of its samples, or `None` where no sample has one: a gap.
+    pub(crate) fn peaks<T: PartialOrd + Copy>(
+        &self,
+        from: i64,
+        to: i64,
+        buckets: usize,
+        value: impl Fn(&Sample) -> Option<T>,
+    ) -> Vec<Option<T>> {
+        let mut peaks = vec![None; buckets];
+        let span = (to - from + 1).max(1) as usize;
+        let state = self.state.lock();
+        for (t, s) in state.timeline.range(from, to) {
+            if let (Some(v), Some(peak)) = (value(s), peaks.get_mut((t - from) as usize * buckets / span)) {
+                *peak = Some(match *peak {
+                    Some(p) if p >= v => p,
+                    _ => v,
+                });
+            }
+        }
+        peaks
+    }
+
     fn tick(&self, now: i64) {
         let (sample, live_processes) = {
             let mut reader = self.reader.lock();
@@ -552,7 +604,7 @@ impl Inner {
         if !due {
             return None;
         }
-        let io = self.watched.load(Ordering::Relaxed);
+        let io = self.process_io.load(Ordering::Relaxed);
         let machine_ticks = counters.cpu.value().map(|c| c.total.total);
         let read = reader.backend.processes(io);
         let prev = reader.prev_processes.take().filter(|p| now > p.time && now - p.time <= MAX_STEP);
@@ -581,6 +633,7 @@ impl Backend for NoBackend {
             core_kinds: Arc::from([]),
             memory: Reading::Unsupported,
             disks: Reading::Unsupported,
+            network: Reading::Unsupported,
         }
     }
 }

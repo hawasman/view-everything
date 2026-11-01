@@ -32,7 +32,8 @@ It keeps one Index of every file on your Volumes, saved between runs, so searchi
 - **Apps:** installed packages, Flatpaks, Steam games and `/opt` programs on Linux, each with its size on disk from its Owner roots. [More](docs/guide/apps.md)
 - **Snapshots and Compare with:** a daily Snapshot of folder sizes, and a Change column showing what grew. [More](docs/guide/snapshots-and-export.md)
 - **Export** to CSV or the Treemap to PNG. [More](docs/guide/snapshots-and-export.md#export)
-- **Performance:** CPU per core (performance and efficiency cores told apart), memory composition and per-disk throughput, now or at any second of the last hour on the Timeline dock (Linux). [More](docs/guide/performance.md)
+- **Performance:** CPU per core (performance and efficiency cores told apart), memory composition, per-disk throughput and every process by CPU, memory and I/O, now or at any second of the last hour on the Timeline dock (Linux). [More](docs/guide/performance.md)
+- **Network:** receive and send throughput per interface and what each moved in the last hour, on the same Timeline; an interface that goes away keeps its history (Linux). [More](docs/guide/network.md)
 
 ### Clean
 - **Cleaner:** temporary files, caches and build artefacts (`target/`, `node_modules`, `.next` …), each with its size and a safe default tick. Every item is checked again on disk before it is removed. Add your own Cleanup Rules in TOML. [More](docs/guide/cleanup-rules.md)

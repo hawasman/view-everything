@@ -1,5 +1,5 @@
-//! The Linux backend: `/proc/stat`, `/proc/meminfo`, `/proc/diskstats`, `/proc/<pid>` and
-//! `/sys`, all read under a root path so tests can point it at a fixture tree.
+//! The Linux backend: `/proc/stat`, `/proc/meminfo`, `/proc/diskstats`, `/proc/net/dev`,
+//! `/proc/<pid>` and `/sys`, all read under a root path so tests can point it at a fixture tree.
 
 use super::{
     Backend, CoreKind, Counters, CpuCounters, CpuTimes, Details, DiskCounters, Io, Memory, ProcessCounters, ProcessCountersTable,
@@ -20,7 +20,10 @@ pub struct LinuxBackend {
     core_kinds: Arc<[(u32, CoreKind)]>,
     /// Reused for every file read, so a sample allocates no text.
     buf: String,
-    /// Every disk name seen, shared by all samples.
+    /// Reused for each process's file path.
+    relative: String,
+    path: PathBuf,
+    /// Every disk and network interface name seen, shared by all samples.
     names: Vec<Arc<str>>,
     /// Process names, shared by every table that has them.
     process_names: HashSet<Arc<str>>,
@@ -39,6 +42,8 @@ impl LinuxBackend {
             root,
             core_kinds,
             buf: String::new(),
+            relative: String::new(),
+            path: PathBuf::new(),
             names: Vec::new(),
             process_names: HashSet::new(),
             boot_time: None,
@@ -55,17 +60,29 @@ impl LinuxBackend {
             .is_ok()
     }
 
+    /// Reads `root/proc/<pid>/<file>` into the shared buffer, building the path in reused
+    /// buffers: hundreds of processes are read every two seconds. False if it cannot be read.
+    fn load_process(&mut self, pid: u32, file: &str) -> bool {
+        use std::fmt::Write as _;
+        self.relative.clear();
+        let _ = write!(self.relative, "proc/{pid}/{file}");
+        self.path.as_mut_os_string().clear();
+        self.path.push(&self.root);
+        self.path.push(&self.relative);
+        self.buf.clear();
+        fs::File::open(&self.path).and_then(|mut f| f.read_to_string(&mut self.buf)).is_ok()
+    }
+
     /// One process from `/proc/<pid>`, or `None` if it exited while being read.
     fn process(&mut self, pid: u32, io: bool) -> Option<ProcessCounters> {
-        let dir = format!("proc/{pid}");
-        if !self.load(&format!("{dir}/stat")) {
+        if !self.load_process(pid, "stat") {
             return None;
         }
         let stat = parse_stat(&self.buf)?;
         let name = intern(&mut self.process_names, stat.name);
         let (ppid, cpu_ticks, start) = (stat.ppid, stat.cpu_ticks, stat.start);
         let rss = stat.rss_pages.map(|pages| pages * self.page_size);
-        let io = if io && self.load(&format!("{dir}/io")) {
+        let io = if io && self.load_process(pid, "io") {
             parse_io(&self.buf)
         } else {
             None
@@ -73,7 +90,6 @@ impl LinuxBackend {
         Some(ProcessCounters {
             id: ProcessId { pid, start },
             ppid,
-            uid: owner(&self.root.join(&dir)),
             name,
             cpu_ticks,
             rss,
@@ -92,11 +108,17 @@ impl Backend for LinuxBackend {
         } else {
             None
         };
+        let network = if self.load("proc/net/dev") {
+            Some(crate::net::interface_counters(&self.buf, &mut self.names))
+        } else {
+            None
+        };
         Counters {
             cpu: cpu.into(),
             core_kinds: self.core_kinds.clone(),
             memory: memory.into(),
             disks: disks.into(),
+            network: network.into(),
         }
     }
 
@@ -118,17 +140,16 @@ impl Backend for LinuxBackend {
     }
 
     fn details(&mut self, id: ProcessId) -> Option<Details> {
-        let dir = format!("proc/{}", id.pid);
-        if !self.load(&format!("{dir}/stat")) || parse_stat(&self.buf)?.start != id.start {
+        if !self.load_process(id.pid, "stat") || parse_stat(&self.buf)?.start != id.start {
             return None;
         }
-        let command = if self.load(&format!("{dir}/cmdline")) {
+        let command = if self.load_process(id.pid, "cmdline") {
             let args: Vec<&str> = self.buf.split('\0').filter(|a| !a.is_empty()).collect();
             (!args.is_empty()).then(|| args.join(" "))
         } else {
             None
         };
-        let user = owner(&self.root.join(&dir)).map(|uid| {
+        let user = owner(&self.root.join(format!("proc/{}", id.pid))).map(|uid| {
             let name = if self.load("etc/passwd") { user_name(&self.buf, uid) } else { None };
             name.unwrap_or_else(|| format!("uid {uid}"))
         });

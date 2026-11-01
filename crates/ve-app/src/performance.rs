@@ -24,11 +24,11 @@ const UNSUPPORTED: &str = "unsupported";
 /// What a reading that is unknown this second says: never zero.
 const UNKNOWN: &str = "—";
 
-/// Height of the CPU lane on the dock.
+/// Height of a Module's lane on the dock.
 const LANE_H: f32 = 28.;
 
 /// Columns the hour is drawn in: three seconds each, about a pixel at the window's width.
-const COLUMNS: usize = 1200;
+pub const COLUMNS: usize = 1200;
 
 /// Moves the Moment to the given second; the dock's lane calls it while scrubbing.
 pub type Scrub = Rc<dyn Fn(i64, &mut App)>;
@@ -329,11 +329,35 @@ fn sensors_panel(s: &Sample, cx: &App) -> Div {
 /// The dock's lane on Performance: CPU use over the last hour, one column per pixel, blank
 /// where no second was recorded. Pressing or dragging on it moves the Moment there.
 pub fn lane(perf: &Perf, moment: Moment, now: i64, scrub: Scrub, cx: &App) -> AnyElement {
+    let from = now - SPAN + 1;
+    let lane = Lane {
+        id: "perf-lane",
+        // The busiest second of each column; the engine leaves a column with no sample empty.
+        peaks: perf.peaks(from, now, COLUMNS, |s| s.cpu.value().and_then(|c| c.busy.value().copied())),
+        recorded: perf.count(from, now),
+        note: None,
+    };
+    lane_of(lane, moment, now, scrub, cx)
+}
+
+/// What a Module's lane draws over the last hour.
+pub struct Lane {
+    pub id: &'static str,
+    /// One bar per column, 0 to 1; `None` is a column with no sample, left blank.
+    pub peaks: Vec<Option<f32>>,
+    /// Seconds of the hour with a sample.
+    pub recorded: usize,
+    /// What the bars' full height stands for, where it is not 100 %.
+    pub note: Option<String>,
+}
+
+/// Draws `lane` on the dock: a bar per column, the Moment's second marked; pressing or
+/// dragging on it moves the Moment there.
+pub fn lane_of(lane: Lane, moment: Moment, now: i64, scrub: Scrub, cx: &App) -> AnyElement {
     let p = palette(cx);
     let from = now - SPAN + 1;
-    // The busiest second of each column; the engine leaves a column with no sample empty.
-    let peaks = perf.peaks(from, now, COLUMNS, |s| s.cpu.value().and_then(|c| c.busy.value().copied()));
-    let recorded = perf.count(from, now);
+    let Lane { id, peaks, recorded, note } = lane;
+    let columns = peaks.len().max(1);
     let bounds: Rc<Cell<Bounds<Pixels>>> = Rc::default();
     let time_at = {
         let bounds = bounds.clone();
@@ -357,7 +381,7 @@ pub fn lane(perf: &Perf, moment: Moment, now: i64, scrub: Scrub, cx: &App) -> An
         move |b, _, window, _| {
             let width = f32::from(b.size.width);
             let height = f32::from(b.size.height);
-            let column = width / COLUMNS as f32;
+            let column = width / columns as f32;
             for (i, v) in peaks.iter().enumerate() {
                 // No sample in the column: a gap, left blank.
                 let Some(v) = *v else { continue };
@@ -391,12 +415,13 @@ pub fn lane(perf: &Perf, moment: Moment, now: i64, scrub: Scrub, cx: &App) -> An
             scrub(time_at(e.position.x), cx);
         }
     };
+    let recorded = format!("{} of the last hour recorded; blank is a gap", recorded_text(recorded));
     v_flex()
         .h(px(48.))
         .flex_none()
         .child(
             div()
-                .id("perf-lane")
+                .id(id)
                 .relative()
                 .h(px(LANE_H))
                 .cursor_pointer()
@@ -409,7 +434,10 @@ pub fn lane(perf: &Perf, moment: Moment, now: i64, scrub: Scrub, cx: &App) -> An
                 .justify_between()
                 .child(caption("1 h ago", cx))
                 .child(caption(
-                    format!("{} of the last hour recorded; blank is a gap", recorded_text(recorded)),
+                    match note {
+                        Some(note) => format!("{recorded} · top is {note}"),
+                        None => recorded,
+                    },
                     cx,
                 ))
                 .child(caption("Now", cx)),
@@ -547,7 +575,11 @@ impl ProcessList {
         };
         let list = &table.list;
         let (sort, descending) = (self.sort, self.descending);
-        let by_name = |a: &Process, b: &Process| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.id.cmp(&b.id));
+        // Compared without allocating: ties fall back to the name for every column.
+        fn lower(p: &Process) -> impl Iterator<Item = char> + '_ {
+            p.name.chars().flat_map(char::to_lowercase)
+        }
+        let by_name = |a: &Process, b: &Process| lower(a).cmp(lower(b)).then(a.id.cmp(&b.id));
         let io = |p: &Process, f: fn(&ve_engine::perf::Io) -> u64| p.io.value().map(f);
         self.order = (0..list.len()).collect();
         self.order.sort_by(|&a, &b| {
