@@ -20,6 +20,7 @@ mod host;
 mod inspector;
 mod locations;
 mod motion;
+mod performance;
 mod scope;
 mod selection;
 mod settings;

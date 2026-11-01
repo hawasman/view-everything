@@ -83,6 +83,7 @@ impl Host {
         let engine = Engine::start(config, repaint.clone());
         engine.set_duplicate_exclusions(settings.duplicate_exclusions.clone());
         engine.set_remote_names(&settings.remote_names);
+        engine.perf.set_recording(settings.keep_in_tray);
         let engine = Arc::new(engine);
 
         let (actions, chosen) = async_channel::unbounded::<TrayAction>();

@@ -1,9 +1,10 @@
 //! The window: the Module rail, the top bar with the Query, the pages (Overview, Browse,
-//! Cleaner, Duplicates, Tasks, Settings), the Timeline dock, the status strip and the Inspector.
+//! Cleaner, Duplicates, Performance, Tasks, Settings), the Timeline dock with the Moment, the
+//! status strip and the Inspector.
 
 use crate::categories::CategoryPanel;
 use crate::cleaner::{CleanerPage, ShowInBrowse};
-use crate::compare::{Compare, CompareEvent};
+use crate::compare::{Compare, CompareEvent, moment_of, nearest_snapshot};
 use crate::dashboard::{Act, DashboardPage};
 use crate::duplicates::{DuplicatesPanel, InspectGroup};
 use crate::explorer::FlatList;
@@ -42,6 +43,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use ve_core::CategoryMap;
 use ve_engine::tasks::Outcome;
+use ve_engine::timeline::Moment;
 use ve_engine::view::Focus;
 use ve_engine::{Engine, Phase, last_synced_label};
 use ve_scan::VolumeInfo;
@@ -97,6 +99,8 @@ enum Page {
     Browse,
     Cleaner,
     Duplicates,
+    /// The system at the Moment: CPU, memory, disks.
+    Performance,
     /// Tasks and Locations, from the rail's Work block.
     Work,
     Settings,
@@ -135,7 +139,7 @@ const LIST_MIN_WIDTH_BESIDE_FILTERS: f32 = 400.;
 pub struct Remembered {
     page: Page,
     show_tree: bool,
-    compare: Option<chrono::NaiveDate>,
+    moment: Moment,
     expanded: HashSet<ve_core::EntryId>,
     tree_selection: crate::selection::Selection,
     list_selection: crate::selection::Selection,
@@ -149,8 +153,14 @@ pub struct Shell {
     query_debounce: Option<gpui::Task<()>>,
     table: Entity<TableState<FlatList>>,
     tree: Entity<TableState<TreeList>>,
-    /// The Snapshot the tree's Change column compares with.
+    /// The Snapshot the tree's Change column compares with: the one nearest the Moment.
     compare: Entity<Compare>,
+    /// The one point in time the window shows (Live or a chosen second); each page reads it its
+    /// own way.
+    moment: Moment,
+    /// The Moment and Snapshot count Browse last mapped to a Snapshot, so a comparison that
+    /// failed or was cancelled is not started again until either changes.
+    files_moment: Option<(Moment, usize)>,
     /// Whether the Explorer shows the tree rather than the flat list.
     show_tree: bool,
     duplicates: Entity<DuplicatesPanel>,
@@ -464,6 +474,7 @@ impl Shell {
             Ok("cleaner") => Page::Cleaner,
             Ok("duplicates") => Page::Duplicates,
             Ok("work" | "tasks") => Page::Work,
+            Ok("performance") => Page::Performance,
             Ok("overview" | "dashboard") => Page::Overview,
             // The scroll measurement needs the Browse list on screen.
             _ if std::env::var_os("VE_BENCH").is_some() => Page::Browse,
@@ -525,6 +536,8 @@ impl Shell {
             table,
             tree,
             compare,
+            moment: Moment::Live,
+            files_moment: None,
             // The 10M-Entry measurement scrolls the flat list, so it must be the one on screen.
             show_tree: !cfg!(feature = "bench") || std::env::var_os("VE_BENCH").is_none(),
             filters,
@@ -560,11 +573,15 @@ impl Shell {
         if let Some(remembered) = cx.global_mut::<Host>().remembered.take() {
             shell.restore(remembered, cx);
         }
+        // Recording runs while a window is open, and after it closes only with keep-in-tray on.
+        shell.engine.perf.set_recording(true);
         cx.on_release(|this, cx| {
             // Text typed within the debounce has not reached the Engine yet; send it now.
             if this.query_debounce.take().is_some() {
                 this.engine.set_query(this.query.read(cx).value().to_string());
             }
+            this.engine.perf.set_watched(false);
+            this.engine.perf.set_recording(this.settings_page.read(cx).settings().keep_in_tray);
             if cx.has_global::<Host>() {
                 let remembered = this.remember(cx);
                 cx.global_mut::<Host>().remembered = Some(remembered);
@@ -580,7 +597,7 @@ impl Shell {
         Remembered {
             page: self.page,
             show_tree: self.show_tree,
-            compare: self.compare.read(cx).active(),
+            moment: self.moment,
             expanded: tree.expanded().clone(),
             tree_selection: tree.selection.clone(),
             list_selection: self.table.read(cx).delegate().selection.clone(),
@@ -591,9 +608,7 @@ impl Shell {
     fn restore(&mut self, r: Remembered, cx: &mut Context<Self>) {
         self.page = r.page;
         self.show_tree = r.show_tree;
-        if r.compare.is_some() {
-            self.compare.update(cx, |c, cx| c.choose(r.compare, cx));
-        }
+        self.moment = r.moment;
         self.tree.update(cx, |t, _| {
             let tree = t.delegate_mut();
             tree.set_expanded(r.expanded);
@@ -1731,6 +1746,11 @@ impl Shell {
             .child(self.nav("nav-browse", "Browse", None, Page::Browse, true, cx))
             .child(self.nav("nav-cleaner", "Cleaner", None, Page::Cleaner, true, cx))
             .child(self.nav("nav-duplicates", "Duplicates", None, Page::Duplicates, true, cx))
+            // A Module appears once it has data (ADR-0015): Performance with its first sample.
+            .when(self.engine.perf.has_samples(), |d| {
+                d.child(group_label("Performance", cx))
+                    .child(self.nav("nav-performance", "System", None, Page::Performance, true, cx))
+            })
             .child(div().flex_1().min_h_0())
             .child(self.work_block(rows, now, cx))
             .children(self.update_row(cx))
@@ -1820,20 +1840,48 @@ impl Shell {
             .child(self.find_box(cx))
     }
 
-    /// The Timeline dock: slim on every page; on Browse a days lane with a tick per Snapshot.
-    fn dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Moves the window to `moment`; each page reads it its own way.
+    fn set_moment(&mut self, moment: Moment, cx: &mut Context<Self>) {
+        self.moment = moment;
+        cx.notify();
+    }
+
+    /// Files shows the Snapshot nearest the Moment: compares with it once Browse is shown and
+    /// the Moment (or the Snapshots on disk) changed since the last time.
+    fn map_files_moment(&mut self, cx: &mut Context<Self>) {
+        let (active, dates) = {
+            let c = self.compare.read(cx);
+            (c.active(), c.dates().len())
+        };
+        let key = (self.moment, dates);
+        if self.files_moment == Some(key) {
+            return;
+        }
+        self.files_moment = Some(key);
+        let wanted = nearest_snapshot(self.compare.read(cx).dates(), self.moment);
+        if wanted != active {
+            self.compare.update(cx, |c, cx| c.choose(wanted, cx));
+        }
+    }
+
+    /// The Timeline dock: the Moment on every page, Back to Live once it is not; on Browse a
+    /// days lane with a tick per Snapshot, on Performance the last hour of samples.
+    fn dock(&self, now: i64, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let (active, working, dates) = {
             let c = self.compare.read(cx);
             (c.active(), c.working(), c.dates().to_vec())
         };
-        let browse = self.page == Page::Browse;
-        let moment = active.map_or_else(|| "Moment: Live".to_owned(), |d| format!("At {d}"));
-        let snapshots = match dates.first() {
-            Some(latest) => format!("Snapshots {} · latest {latest}", dates.len()),
-            None => "Snapshots 0".to_owned(),
+        let moment = crate::performance::moment_label(self.moment, now);
+        let context = match (self.page, dates.first()) {
+            (Page::Performance, _) => None,
+            (Page::Browse, _) if self.moment != Moment::Live => Some(match active {
+                Some(date) => format!("Snapshot {date}"),
+                None => "No Snapshot".to_owned(),
+            }),
+            (_, Some(latest)) => Some(format!("Snapshots {} · latest {latest}", dates.len())),
+            (_, None) => Some("Snapshots 0".to_owned()),
         };
-        let compare = self.compare.clone();
         let header = h_flex()
             .h(px(40.))
             .flex_none()
@@ -1841,74 +1889,33 @@ impl Shell {
             .items_center()
             .text_size(px(FS_BODY))
             .child(div().font_weight(FontWeight::MEDIUM).child("Timeline"))
-            .child(div().text_color(if active.is_some() { p.text } else { p.muted }).child(moment))
-            .child(caption(snapshots, cx))
+            .child(
+                div()
+                    .text_color(if self.moment == Moment::Live { p.muted } else { p.text })
+                    .child(moment),
+            )
+            .children(context.map(|c| caption(c, cx)))
             .child(div().flex_1())
             .when(working, |d| d.child(caption("Comparing…", cx)))
-            .when(browse && active.is_some(), |d| {
+            .when(self.moment != Moment::Live, |d| {
                 d.child(
                     button("back-to-live", "Back to Live")
                         .small()
                         .kind(ButtonKind::Ghost)
-                        .build(cx, move |_, _, cx| compare.update(cx, |c, cx| c.choose(None, cx))),
+                        .build(cx, cx.listener(|this, _, _, cx| this.set_moment(Moment::Live, cx))),
                 )
             });
-        let lane = browse.then(|| {
-            let Some(&oldest) = dates.last() else {
-                return div()
-                    .h(px(48.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .child(empty_state("No Snapshots yet: the first is taken once every Location has synced.", cx).flex_1())
-                    .into_any_element();
-            };
-            let today = Local::now().date_naive().max(dates[0]);
-            let span = (today - oldest).num_days().max(1) as f32;
-            let ticks = dates.iter().enumerate().map(|(i, &date)| {
-                let at = ((date - oldest).num_days() as f32 / span).clamp(0., 1.);
-                let chosen = active == Some(date);
-                let compare = self.compare.clone();
-                div()
-                    .id(("snapshot-tick", i))
-                    .absolute()
-                    .top(px(0.))
-                    .left(relative(at))
-                    .ml(px(-6.))
-                    .w(px(12.))
-                    .h(px(28.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .tooltip(move |window, cx| Tooltip::new(date.to_string()).build(window, cx))
-                    .on_click(move |_, _, cx| compare.update(cx, |c, cx| c.choose(Some(date), cx)))
-                    .child(
-                        div()
-                            .w(px(2.))
-                            .h(px(if chosen { 24. } else { 18. }))
-                            .bg(if chosen { p.accent } else { p.text }),
-                    )
-            });
-            v_flex()
-                .h(px(48.))
-                .flex_none()
-                .px(px(6.))
-                .child(
-                    div()
-                        .relative()
-                        .h(px(28.))
-                        .child(div().absolute().top(px(14.)).left_0().right_0().h(px(1.)).bg(p.border))
-                        .children(ticks),
-                )
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .child(caption(oldest.to_string(), cx))
-                        .child(caption("Today", cx)),
-                )
-                .into_any_element()
-        });
+        let lane = match self.page {
+            Page::Browse => Some(self.snapshot_lane(active, &dates, cx)),
+            Page::Performance => {
+                let shell = cx.weak_entity();
+                let scrub: crate::performance::Scrub = Rc::new(move |time, cx| {
+                    let _ = shell.update(cx, |this, cx| this.set_moment(Moment::At(time), cx));
+                });
+                Some(crate::performance::lane(&self.engine.perf, self.moment, now, scrub, cx))
+            }
+            _ => None,
+        };
         v_flex()
             .flex_none()
             .px(px(PAD))
@@ -1917,6 +1924,65 @@ impl Shell {
             .border_color(p.border)
             .child(header)
             .children(lane)
+    }
+
+    /// Browse's lane: a tick per Snapshot over the days they span; a tick moves the Moment to
+    /// that day.
+    fn snapshot_lane(&self, active: Option<chrono::NaiveDate>, dates: &[chrono::NaiveDate], cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let Some(&oldest) = dates.last() else {
+            return div()
+                .h(px(48.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .child(empty_state("No Snapshots yet: the first is taken once every Location has synced.", cx).flex_1())
+                .into_any_element();
+        };
+        let today = Local::now().date_naive().max(dates[0]);
+        let span = (today - oldest).num_days().max(1) as f32;
+        let ticks = dates.iter().enumerate().map(|(i, &date)| {
+            let at = ((date - oldest).num_days() as f32 / span).clamp(0., 1.);
+            let chosen = active == Some(date);
+            div()
+                .id(("snapshot-tick", i))
+                .absolute()
+                .top(px(0.))
+                .left(relative(at))
+                .ml(px(-6.))
+                .w(px(12.))
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .tooltip(move |window, cx| Tooltip::new(date.to_string()).build(window, cx))
+                .on_click(cx.listener(move |this, _, _, cx| this.set_moment(moment_of(date), cx)))
+                .child(
+                    div()
+                        .w(px(2.))
+                        .h(px(if chosen { 24. } else { 18. }))
+                        .bg(if chosen { p.accent } else { p.text }),
+                )
+        });
+        v_flex()
+            .h(px(48.))
+            .flex_none()
+            .px(px(6.))
+            .child(
+                div()
+                    .relative()
+                    .h(px(28.))
+                    .child(div().absolute().top(px(14.)).left_0().right_0().h(px(1.)).bg(p.border))
+                    .children(ticks.collect::<Vec<_>>()),
+            )
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(caption(oldest.to_string(), cx))
+                    .child(caption("Today", cx)),
+            )
+            .into_any_element()
     }
 
     /// The Browse page: title and actions, Tree / Flat list, then the list with the Categories
@@ -2637,6 +2703,11 @@ impl Render for Shell {
         let _frame_index = shared.index.read();
         let now = chrono::Utc::now().timestamp();
         self.compare.update(cx, |c, _| c.refresh_dates());
+        if self.page == Page::Browse {
+            self.map_files_moment(cx);
+        }
+        // Live readings repaint each second only while the Performance page shows them.
+        self.engine.perf.set_watched(self.page == Page::Performance);
         // The Tasks page shows each running Task's elapsed time; nothing else repaints a Task that
         // reports no progress, so tick once a second while it is shown and Tasks run.
         if self.page == Page::Work && self.tick.is_none() && self.engine.shared.tasks.running_count() > 0 {
@@ -2663,6 +2734,10 @@ impl Render for Shell {
             Page::Browse => self.browse(cx).into_any_element(),
             Page::Cleaner => self.cleaner.clone().into_any_element(),
             Page::Duplicates => self.duplicates_page(cx).into_any_element(),
+            Page::Performance => {
+                let sample = self.engine.perf.at(self.moment);
+                crate::performance::page(sample.as_deref(), self.moment, now, cx)
+            }
             Page::Work => self.work_page(&rows, now, cx).into_any_element(),
             Page::Settings => self.settings_page.clone().into_any_element(),
         };
@@ -2723,7 +2798,7 @@ impl Render for Shell {
                                 .min_w_0()
                                 .h_full()
                                 .child(div().flex_1().min_h_0().when(gutter, |d| d.px(px(PAD)).pt(px(PAD))).child(page))
-                                .child(self.dock(cx))
+                                .child(self.dock(now, cx))
                                 .child(self.status_bar(cx)),
                         )
                         .children(inspector),
