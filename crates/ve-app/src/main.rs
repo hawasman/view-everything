@@ -114,13 +114,14 @@ fn main() {
 }
 
 /// The single-instance rule (ADR-0016): the first launch binds the engine socket and hosts the
-/// Engine; a later one asks it to show its window and exits here. A socket that cannot be bound
-/// is a problem to show, not a reason not to start.
+/// Engine; a later one asks it to show its window and exits here (a login start just exits).
+/// A socket that cannot be bound is a problem to show, not a reason not to start.
 fn single_instance(problems: &mut Vec<String>) -> Option<ve_engine::socket::Listener> {
     use ve_engine::socket::{self, Claim};
     let path = socket::path()?;
     match socket::claim(&path) {
         Ok(Claim::Host(listener)) => Some(listener),
+        Ok(Claim::Running(_)) if autostart::started_at_login() => std::process::exit(0),
         Ok(Claim::Running(mut app)) => match app.call("show", Default::default()) {
             Ok(_) => std::process::exit(0),
             Err(e) => {

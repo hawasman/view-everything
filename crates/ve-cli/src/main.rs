@@ -268,23 +268,18 @@ fn write_rows(out: &mut impl Write, args: &Args, rows: &[Row]) -> Result<(), Fai
         Format::Csv => {
             out.write_all(export::HEADER)?;
             for row in rows {
-                // Nanoseconds since the Unix epoch (to the whole second); 0 is unknown.
-                let modified = match row.modified_ns {
-                    0 => String::new(),
-                    ns => chrono::DateTime::from_timestamp_nanos(ns).format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-                };
-                export::write_row(
+                export::write_entry(
                     out,
-                    &[
-                        &row.path,
-                        &row.name,
-                        &row.logical_size.to_string(),
-                        &row.on_disk_size.to_string(),
-                        &modified,
-                        row.category.as_deref().unwrap_or(""),
-                        row.owner.as_deref().unwrap_or(""),
-                        row.owner_kind.as_deref().unwrap_or(""),
-                    ],
+                    &export::CsvEntry {
+                        path: &row.path,
+                        name: &row.name,
+                        logical: row.logical_size,
+                        on_disk: row.on_disk_size,
+                        modified_ns: row.modified_ns,
+                        category: row.category.as_deref().unwrap_or(""),
+                        owner: row.owner.as_deref().unwrap_or(""),
+                        owner_kind: row.owner_kind.as_deref().unwrap_or(""),
+                    },
                 )?;
             }
         }

@@ -20,13 +20,15 @@ pub enum Select {
     LargestFiles,
 }
 
+/// What a client asks the `search` method for.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Search {
     /// Query text; empty selects everything.
     pub query: String,
-    /// Only Entries under this path (not the path itself).
+    /// Only Entries under this absolute path (not the path itself).
     pub path: Option<String>,
+    /// Which Entries, in what order.
     pub select: Select,
     /// At most this many Rows; `None` for all.
     pub limit: Option<usize>,
@@ -35,16 +37,22 @@ pub struct Search {
 /// One Entry as a client prints it. Sizes are Filtered Sizes under the Search's Query.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
+    /// Full path, lossily made UTF-8.
     pub path: String,
     pub name: String,
+    /// A folder (or a Volume's root).
     pub is_dir: bool,
+    /// Logical Size in bytes.
     pub logical_size: u64,
+    /// On-disk Size in bytes.
     pub on_disk_size: u64,
-    /// Nanoseconds since the Unix epoch; 0 is unknown.
-    pub modified_ns: i64,
+    /// Nanoseconds since the Unix epoch; `None` when unknown.
+    pub modified_ns: Option<i64>,
     /// `None` for folders.
     pub category: Option<String>,
+    /// The Owner's name; `None` without one.
     pub owner: Option<String>,
+    /// System, Program, Game or Project; `None` without an Owner.
     pub owner_kind: Option<String>,
 }
 
@@ -61,6 +69,7 @@ pub enum LastSynced {
 }
 
 impl LastSynced {
+    /// The oldest Last Synced of `index`'s Locations.
     pub fn of(index: &Index) -> LastSynced {
         match index.oldest_synced() {
             None => LastSynced::NoLocations,
@@ -73,6 +82,7 @@ impl LastSynced {
 /// What a Search found, and how current the Index it read was.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
+    /// In the Search's order.
     pub rows: Vec<Row>,
     pub last_synced: LastSynced,
 }
@@ -110,7 +120,7 @@ fn row(index: &Index, filter: &Filter, categories: &CategoryMap, id: EntryId) ->
         is_dir: index.is_dir(id),
         logical_size: totals.logical,
         on_disk_size: totals.on_disk,
-        modified_ns: index.modified(id),
+        modified_ns: Some(index.modified(id)).filter(|&ns| ns != 0),
         category: (!index.is_dir(id)).then(|| categories.of_name(name).name().to_owned()),
         owner: owner.map(|o| o.name.clone()),
         owner_kind: owner.map(|o| o.kind.name().to_owned()),
@@ -141,9 +151,11 @@ fn scope(index: &Index, path: Option<&Path>) -> Result<Vec<EntryId>, String> {
 }
 
 impl Engine {
-    /// Runs `search` on the live Index. `dupe:`, `is:duplicate` and `is:cleanable` use the
-    /// Duplicates and Cleanables found so far; `is:offline` the Volumes mounted now.
-    pub fn search(&self, search: &Search) -> Result<Found, String> {
+    /// Runs `search` on the live Index (the `search` method). `dupe:`, `is:duplicate` and
+    /// `is:cleanable` use the Duplicates and Cleanables found so far; `is:offline` the Volumes
+    /// mounted now. `Err` is a reason for the client: a bad Query, a path not in the Index, or
+    /// the Index still loading.
+    pub fn find_rows(&self, search: &Search) -> Result<Found, String> {
         let shared = &self.shared;
         if matches!(shared.status.lock().phase, Phase::LoadingIndex) {
             return Err("the app is still loading its Index; try again in a moment".into());

@@ -36,10 +36,11 @@ fn handshake_echo_and_a_refused_version() {
     let mut client = Client::connect(&path).unwrap();
     let params = json!({ "text": "hello", "n": [1, 2] });
     assert_eq!(client.call("echo", params.clone()).unwrap(), params);
-    assert!(
-        matches!(socket::claim(&path).unwrap(), Claim::Running(_)),
-        "a second host finds the first"
-    );
+    match socket::claim(&path).unwrap() {
+        Claim::Running(_) => {}
+        Claim::Host(_) => panic!("a second host while the first runs"),
+        Claim::Incompatible(reason) => panic!("the first host refused: {reason}"),
+    }
 
     let stream = UnixStream::connect(&path).unwrap();
     let mut lines = BufReader::new(stream.try_clone().unwrap());

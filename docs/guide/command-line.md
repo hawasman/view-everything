@@ -46,7 +46,7 @@ Last Synced goes to stderr, so pipes stay clean. So does `ve: the app is not run
 
 ## The app's socket
 
-While it runs, the app listens on `$XDG_RUNTIME_DIR/view-everything/engine.sock` (a per-user folder in the temporary folder where there is no `XDG_RUNTIME_DIR`; the `VE_SOCKET` variable overrides it). The folder is readable by your account only, so other users on the machine cannot read your Index through it. Windows has no socket yet; there `ve` always reads the file.
+While it runs, the app listens on `$XDG_RUNTIME_DIR/view-everything/engine.sock` (a per-user folder in the temporary folder where there is no `XDG_RUNTIME_DIR`). The folder is open to your account only, so other users on the machine cannot read your Index through it; the app refuses a folder that is not. `VE_SOCKET` moves the socket, into a folder that is yours alone or does not exist yet. Windows has no socket yet; there `ve` always reads the file.
 
 Asking the app, `dupe:` and `is:duplicate` use the Duplicates it has found so far, `is:cleanable` what the Cleaner last found, and `is:offline` the Volumes mounted now. Reading the file, `dupe:`, `is:duplicate` and `is:cleanable` find nothing, and `is:offline` is a bad Query: the file does not know which Volumes are mounted.
 
@@ -60,7 +60,7 @@ Newline-delimited JSON, one message per line. The client opens with `{"version":
 | --- | --- | --- |
 | `echo` | anything | `result`: the params |
 | `show` | none | shows the window; `result`: `null` |
-| `search` | `query`, `path`, `select` (`matches`, `largest_folders`, `largest_files`), `limit` | one `item` per Entry (`path`, `name`, `is_dir`, `logical_size`, `on_disk_size`, `modified_ns`, `category`, `owner`, `owner_kind`); `end`: `count`, `last_synced` |
+| `search` | `query`, `path` (absolute), `select` (`matches`, `largest_folders`, `largest_files`), `limit` | one `item` per Entry (`path`, `name`, `is_dir`, `logical_size`, `on_disk_size`, `modified_ns` (`null` when unknown), `category`, `owner`, `owner_kind`); `end`: `count`, `last_synced` |
 | `tasks` | `follow` (bool) | one `item` per running Task (`task`, `kind`, `label`, `done`, `total`, `unit`); following, then one per change, and one with `outcome` when a Task finishes, until none runs; `end`: `{}` |
 
 ```sh

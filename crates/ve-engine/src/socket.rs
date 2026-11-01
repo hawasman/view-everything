@@ -19,7 +19,7 @@ pub mod search;
 use crate::Engine;
 use crate::tasks::{Outcome, TaskInfo};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -29,7 +29,8 @@ use std::time::Duration;
 /// The protocol version a client must open with.
 pub const VERSION: u64 = 1;
 
-/// Overrides where the socket is (a sandboxed copy of the app, tests).
+/// Overrides where the socket is (a sandboxed copy of the app, tests). Its folder must be the
+/// user's alone (0700) or not exist yet; the lock file `engine.lock` goes beside it.
 pub const PATH_ENV: &str = "VE_SOCKET";
 
 /// How often a followed `tasks` stream looks at the running Tasks.
@@ -60,6 +61,7 @@ pub fn path() -> Option<PathBuf> {
 /// Why a client could not talk to the engine.
 #[derive(Debug)]
 pub enum Error {
+    /// The socket could not be reached or broke off.
     Io(io::Error),
     /// The engine refused the request (or the handshake), with its reason.
     Refused(String),
@@ -101,6 +103,7 @@ pub struct Client<S: io::Read + Write = Stream> {
     next_id: u64,
 }
 
+/// The transport: a Unix socket.
 #[cfg(unix)]
 pub type Stream = std::os::unix::net::UnixStream;
 /// No socket transport here yet; connecting always fails.
@@ -158,11 +161,16 @@ impl<S: io::Read + Write> Client<S> {
         Ok(id)
     }
 
-    /// The next reply to request `id`, as (key, value): `result`, `item`, `end` or an error.
+    /// The next reply to request `id`, as (key, value): `result`, `item`, `end` or an error. An
+    /// error without an id (a line the engine could not read) is this request's too.
     fn reply(&mut self, id: u64) -> Result<(&'static str, Value), Error> {
         loop {
             let mut reply = self.read()?;
-            if reply.get("id").and_then(Value::as_u64) != Some(id) {
+            let ours = match reply.get("id") {
+                None | Some(Value::Null) => reply.get("error").is_some(),
+                Some(theirs) => theirs.as_u64() == Some(id),
+            };
+            if !ours {
                 continue;
             }
             if let Some(error) = reply.get("error") {
@@ -207,44 +215,63 @@ pub enum Claim {
     Incompatible(String),
 }
 
-/// A bound socket, private to this user, not yet served.
+/// A bound socket, private to this user, not yet served. It holds the host lock for as long as
+/// it lives.
 pub struct Listener {
     #[cfg(unix)]
     inner: std::os::unix::net::UnixListener,
+    #[cfg(unix)]
+    _lock: std::fs::File,
 }
 
-/// Binds the socket at `path`, so this process hosts the engine, unless an app already runs
-/// there. The folder holding it is made private to the user (0700) and the socket 0600; a
-/// socket file nobody listens on is replaced.
+/// How long a launch that lost the host lock waits for the winner's socket to answer.
+#[cfg(unix)]
+const CLAIM_WAIT: Duration = Duration::from_secs(5);
+
+/// Makes this process the engine's host, unless an app already runs here. Whoever holds an
+/// exclusive lock on `engine.lock` beside the socket hosts, so two launches at once never both
+/// do; the winner replaces a socket file left by a crash, binds, and makes it 0600 in a folder
+/// private to the user (0700). The loser connects to the winner, waiting for it to bind.
 #[cfg(unix)]
 pub fn claim(path: &Path) -> io::Result<Claim> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::os::unix::net::UnixListener;
     if let Some(dir) = path.parent() {
         private_dir(dir)?;
     }
-    for _ in 0..2 {
-        match UnixListener::bind(path) {
-            Ok(inner) => {
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-                return Ok(Claim::Host(Listener { inner }));
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path.with_extension("lock"))?;
+    // SAFETY: flock on a descriptor this function owns; the kernel drops the lock with it.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        let inner = UnixListener::bind(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        return Ok(Claim::Host(Listener { inner, _lock: lock }));
+    }
+    let locked = io::Error::last_os_error();
+    if locked.kind() != io::ErrorKind::WouldBlock {
+        return Err(locked);
+    }
+    let deadline = std::time::Instant::now() + CLAIM_WAIT;
+    loop {
+        match Client::connect(path) {
+            Ok(client) => return Ok(Claim::Running(client)),
+            Err(Error::Refused(reason)) => return Ok(Claim::Incompatible(reason)),
+            Err(e) if e.is_not_running() && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
             }
-            Err(e) if e.kind() == io::ErrorKind::AddrInUse => match Client::connect(path) {
-                Ok(client) => return Ok(Claim::Running(client)),
-                Err(Error::Refused(reason)) => return Ok(Claim::Incompatible(reason)),
-                Err(e) if e.is_not_running() => match std::fs::remove_file(path) {
-                    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-                    _ => {}
-                },
-                Err(Error::Io(e)) => return Err(e),
-            },
-            Err(e) => return Err(e),
+            Err(Error::Io(e)) => return Err(e),
         }
     }
-    Err(io::Error::new(
-        io::ErrorKind::AddrInUse,
-        format!("{} keeps being taken", path.display()),
-    ))
 }
 
 #[cfg(not(unix))]
@@ -280,6 +307,9 @@ pub fn serve(listener: Listener, engine: Arc<Engine>, show: Show) {
     std::thread::Builder::new()
         .name("engine socket".into())
         .spawn(move || {
+            // The whole Listener, lock included, lives as long as this thread (a closure would
+            // capture only the field it uses).
+            let listener = listener;
             for stream in listener.inner.incoming() {
                 let Ok(stream) = stream else { continue };
                 let (engine, show) = (engine.clone(), show.clone());
@@ -343,20 +373,20 @@ fn connection(read: impl io::Read, write: impl Write, engine: &Engine, show: &Sh
                 show();
                 send(&mut out, &json!({ "id": id, "result": null }))?;
             }
-            "search" => search(&mut out, &id, params, engine)?,
-            "tasks" => tasks(&mut out, &id, &params, engine)?,
+            "search" => answer_search(&mut out, &id, params, engine)?,
+            "tasks" => answer_tasks(&mut out, &id, &params, engine)?,
             other => send(&mut out, &json!({ "id": id, "error": format!("unknown method `{other}`") }))?,
         }
         out.flush()?;
     }
 }
 
-fn search(out: &mut impl Write, id: &Value, params: Value, engine: &Engine) -> io::Result<()> {
+fn answer_search(out: &mut impl Write, id: &Value, params: Value, engine: &Engine) -> io::Result<()> {
     let parsed = match params {
         Value::Null => Ok(search::Search::default()),
         params => serde_json::from_value::<search::Search>(params).map_err(|e| format!("bad search: {e}")),
     };
-    let found = parsed.and_then(|search| engine.search(&search));
+    let found = parsed.and_then(|search| engine.find_rows(&search));
     match found {
         Ok(found) => {
             for row in &found.rows {
@@ -382,11 +412,13 @@ fn task_item(task: &TaskInfo) -> Value {
     })
 }
 
-/// Streams each running Task's progress; following, then each change until no Task runs, with
-/// a last item (carrying `outcome`) for each Task that finishes meanwhile.
-fn tasks(out: &mut impl Write, id: &Value, params: &Value, engine: &Engine) -> io::Result<()> {
+/// Streams each running Task's progress. Following, it then streams each change, and a last
+/// item carrying `outcome` for each Task that finishes (short ones included), until none runs.
+fn answer_tasks(out: &mut impl Write, id: &Value, params: &Value, engine: &Engine) -> io::Result<()> {
     let follow = params.get("follow").and_then(Value::as_bool).unwrap_or(false);
     let tasks = &engine.shared.tasks;
+    // Tasks that finished before the stream began are not news.
+    let mut finished: HashSet<u64> = tasks.finished().iter().map(|t| t.id).collect();
     let mut sent: HashMap<u64, (u64, Option<u64>, String)> = HashMap::new();
     loop {
         let running = tasks.running();
@@ -397,22 +429,22 @@ fn tasks(out: &mut impl Write, id: &Value, params: &Value, engine: &Engine) -> i
                 sent.insert(task.id, now);
             }
         }
-        sent.retain(|&task, _| {
-            if running.iter().any(|t| t.id == task) {
-                return true;
-            }
-            if let Some(info) = tasks.find(task) {
+        if !follow {
+            return send(out, &json!({ "id": id, "end": {} }));
+        }
+        for info in tasks.finished() {
+            if finished.insert(info.id) {
                 let mut item = task_item(&info);
                 item["outcome"] = match info.outcome {
                     Some(Outcome::Done(summary)) => json!({ "done": summary }),
                     Some(Outcome::Failed(reason)) => json!({ "failed": reason }),
                     Some(Outcome::Cancelled) | None => json!("cancelled"),
                 };
-                let _ = send(out, &json!({ "id": id, "item": item }));
+                send(out, &json!({ "id": id, "item": item }))?;
             }
-            false
-        });
-        if !follow || sent.is_empty() {
+        }
+        sent.retain(|task, _| running.iter().any(|t| t.id == *task));
+        if running.is_empty() {
             return send(out, &json!({ "id": id, "end": {} }));
         }
         out.flush()?;
