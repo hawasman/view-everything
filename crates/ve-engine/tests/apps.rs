@@ -7,7 +7,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use ve_core::CategoryMap;
-use ve_engine::apps::{App, Scope, Sources, StartupKind};
+use ve_engine::apps::{App, Sources};
+#[cfg(unix)]
+use ve_engine::apps::{Scope, StartupKind};
 use ve_engine::{Config, Engine};
 use ve_scan::VolumeInfo;
 

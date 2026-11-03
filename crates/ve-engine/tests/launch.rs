@@ -6,8 +6,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use ve_core::CategoryMap;
+#[cfg(unix)]
 use ve_engine::apps::Sources;
-use ve_engine::launch::{Kind, Launch, Match, Start};
+use ve_engine::launch::{Kind, Match};
+#[cfg(unix)]
+use ve_engine::launch::{Launch, Start};
 use ve_engine::{Config, Engine, Phase};
 use ve_scan::VolumeInfo;
 
@@ -41,12 +44,14 @@ fn start(data: &Path, mounted: Vec<VolumeInfo>) -> Engine {
     engine
 }
 
+#[cfg(unix)]
 fn write(path: &Path, text: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, text).unwrap();
 }
 
 /// A pacman package installed at `when`, with these files.
+#[cfg(unix)]
 fn package(root: &Path, name: &str, when: i64, files: &[&str]) {
     let entry = root.join(format!("var/lib/pacman/local/{name}-1-1"));
     write(&entry.join("desc"), &format!("%NAME%\n{name}\n\n%INSTALLDATE%\n{when}\n"));
