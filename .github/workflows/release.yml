@@ -140,3 +140,5 @@ jobs:
         with:
           files: dist/*
           body_path: notes.md
+          # vX.Y.Z-rc.N and other hyphenated tags are pre-releases: self-updates skip them.
+          prerelease: ${{ contains(github.ref_name, '-') }}
