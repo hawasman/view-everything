@@ -1,10 +1,12 @@
-//! Background work: loading, syncing and saving the Index, and computing Views for the UI.
+//! The engine (ADR-0016): loading, syncing and saving the Index, Tasks, Locations, Live
+//! updates, Sync scheduling and Snapshots, and the Views computed for a Query. It knows nothing
+//! of a GUI; its clients hold an [`Engine`] and are told to redraw through [`Repaint`].
 
+pub mod format;
 mod live;
+pub mod tasks;
+pub mod view;
 
-use crate::settings;
-use crate::tasks::{Outcome, TaskKind, Tasks};
-use crate::view::{FileOrder, View};
 use chrono::{Local, Utc};
 use live::Live;
 use parking_lot::Mutex;
@@ -15,14 +17,17 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+use tasks::{Outcome, TaskKind, Tasks};
+use ve_core::owners::{self, LocalDisk, Platform};
 use ve_core::snapshot::{self, Snapshot};
 use ve_core::{BitSet, CategoryMap, EntryId, Filter, Index, Query, QueryContext, Remote, SyncState, Volume, VolumeId};
 use ve_scan::duplicates::{self, Group, HashCache, HashProgress};
 use ve_scan::{Progress, SharedIndex, VolumeInfo};
+use view::{FileOrder, View};
 
 /// How often a Volume kept current by the NTFS change journal is polled while the app runs.
 const JOURNAL_POLL: Duration = Duration::from_secs(5);
-/// How often the GUI is told to redraw the progress of a running sync.
+/// How often clients are told to redraw the progress of a running sync.
 const PROGRESS_NUDGE: Duration = Duration::from_millis(250);
 /// Minimum time between View recomputations while the Index is being filled.
 const VIEW_THROTTLE: Duration = Duration::from_millis(800);
@@ -38,11 +43,29 @@ const MIN_WAIT: Duration = Duration::from_secs(60);
 /// Per-Volume refresh interval by mount point.
 pub type Intervals = HashMap<PathBuf, Duration>;
 
-/// Tells whichever GUI is showing the Engine that it should draw again.
+/// Tells whichever client is showing the Engine that it should draw again.
 pub type Repaint = Arc<dyn Fn() + Send + Sync>;
 
-/// State shared between the UI and the background threads.
+/// What an Engine starts with.
+pub struct Config {
+    /// Where the Index is saved, with the Snapshots, the hash cache and the macOS event id
+    /// beside it; `None` keeps the Index in memory only.
+    pub index_path: Option<PathBuf>,
+    /// Every Volume mounted now.
+    pub mounted: Vec<VolumeInfo>,
+    /// The mounted Volumes to index.
+    pub volumes: Vec<VolumeInfo>,
+    pub remotes: Vec<Remote>,
+    pub intervals: Intervals,
+    pub categories: CategoryMap,
+    /// Whether the Linux `fanotify` helper follows Live updates.
+    pub live_helper: bool,
+}
+
+/// State shared between the clients and the background threads.
 pub struct Shared {
+    /// Where the Index is saved (see [`Config::index_path`]).
+    index_path: Option<PathBuf>,
     pub index: SharedIndex,
     pub progress: Progress,
     pub status: Mutex<Status>,
@@ -56,6 +79,8 @@ pub struct Shared {
     busy: AtomicBool,
     /// Duplicates found by hashing, and how far a running search has got.
     pub duplicates: Mutex<DuplicateState>,
+    /// Entries the Cleaner last found as Cleanables, for `is:cleanable`.
+    pub cleanables: Mutex<CleanableSet>,
     pub hash_progress: HashProgress,
     /// The Duplicate Exclusions Query text, as set in Settings.
     pub duplicate_exclusions: Mutex<String>,
@@ -75,16 +100,24 @@ pub struct Shared {
     live_lost: AtomicU32,
     live_held: AtomicU64,
     /// The Volumes a running Live updates source keeps current, as of the last time the
-    /// indexer looked (see `Live::covered`). The sidebar shows these as Live.
+    /// indexer looked (see `Live::covered`). Clients show these as Live.
     pub followed: Mutex<HashSet<VolumeId>>,
     /// A Sync now is queued for the indexer and not yet started.
     pub sync_queued: AtomicBool,
     /// The folders being Synced alone now, so the same one is not started twice.
     folders_syncing: Mutex<Vec<EntryId>>,
-    /// Background work the sidebar lists (Sync, Duplicate search, Cleaner, ...).
+    /// Background work clients list (Sync, Duplicate search, Cleaner, ...).
     pub tasks: Tasks,
-    /// Called from the background threads whenever something the GUI shows has changed.
-    pub(crate) repaint: Repaint,
+    /// Called from the background threads whenever something a client shows has changed.
+    pub repaint: Repaint,
+}
+
+/// The Entries of the Cleaner's latest Cleanables; replaced whole when a look finishes.
+#[derive(Clone, Default)]
+pub struct CleanableSet {
+    pub set: Arc<BitSet>,
+    /// Bumped each time it is replaced.
+    pub version: u64,
 }
 
 /// The Duplicates found so far; replaced whole when a search finishes.
@@ -149,6 +182,7 @@ enum Command {
     Shutdown,
 }
 
+/// The one in-process handle on the engine: every client reads and asks through it.
 pub struct Engine {
     pub shared: Arc<Shared>,
     commands: Sender<Command>,
@@ -159,22 +193,25 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Starts loading the saved Index, then Catch-up or a first scan of `volumes`.
-    pub fn start(
-        repaint: Repaint,
-        mounted: Vec<VolumeInfo>,
-        volumes: Vec<VolumeInfo>,
-        remotes: Vec<Remote>,
-        intervals: Intervals,
-        categories: CategoryMap,
-        live_helper: bool,
-    ) -> Engine {
+    /// Starts loading the saved Index, then Catch-up or a first scan of the Volumes to index.
+    /// `repaint` is called from the engine's threads whenever something a client shows changed.
+    pub fn start(config: Config, repaint: Repaint) -> Engine {
+        let Config {
+            index_path,
+            mounted,
+            volumes,
+            remotes,
+            intervals,
+            categories,
+            live_helper,
+        } = config;
         let tasks = Tasks::new();
         {
             let repaint = repaint.clone();
             tasks.set_repaint(move || repaint());
         }
         let shared = Arc::new(Shared {
+            index_path,
             index: SharedIndex::new(Index::new()),
             progress: Progress::default(),
             status: Mutex::new(Status {
@@ -186,6 +223,7 @@ impl Engine {
             query_error: Mutex::new(None),
             busy: AtomicBool::new(true),
             duplicates: Mutex::new(DuplicateState::default()),
+            cleanables: Mutex::new(CleanableSet::default()),
             hash_progress: HashProgress::default(),
             duplicate_exclusions: Mutex::new(String::new()),
             remote_names: Mutex::new(HashMap::new()),
@@ -241,7 +279,7 @@ impl Engine {
     /// Sets the names the user gave Remotes (by identity), shown wherever a Remote is named.
     pub fn set_remote_names(&self, names: &std::collections::BTreeMap<String, String>) {
         *self.shared.remote_names.lock() = names.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        // Off the UI thread: the Index's write lock can be held for a whole save or sync.
+        // Off the caller's thread: the Index's write lock can be held for a whole save or sync.
         let shared = self.shared.clone();
         let _ = thread::Builder::new().name("ve-remote-names".into()).spawn(move || {
             shared.apply_remote_names();
@@ -305,9 +343,9 @@ impl Engine {
     /// saved without waiting for it: the next launch's Catch-up completes it.
     pub fn shutdown(&self) {
         if self.is_busy() {
-            if let Some(path) = settings::index_path() {
+            if let Some(path) = &self.shared.index_path {
                 let _saving = self.shared.saving.lock();
-                if let Err(e) = self.shared.index.read().save(&path) {
+                if let Err(e) = self.shared.index.read().save(path) {
                     eprintln!("Could not save the Index to {}: {e}", path.display());
                 }
             }
@@ -400,10 +438,21 @@ fn run_indexer(
     commands: &Receiver<Command>,
     command_tx: Sender<Command>,
 ) {
-    let index_path = settings::index_path();
+    let index_path = shared.index_path.clone();
     if let Some(path) = &index_path {
         match Index::load(path) {
-            Ok(index) => *shared.index.write() = index,
+            Ok(index) => {
+                let stale = index.owners_stale();
+                *shared.index.write() = index;
+                // A format before 8 had no Owners: every Location is detected once, now,
+                // rather than at its next Sync, so the Treemap is not half grey until then.
+                if stale {
+                    let volumes: Vec<VolumeId> = shared.index.read().volumes().map(|(id, _)| id).collect();
+                    for id in volumes {
+                        detect_owners(shared, id);
+                    }
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             // The format changed (a new column, say): say so rather than show a bare error.
             Err(e) if e.kind() == std::io::ErrorKind::Unsupported && e.to_string().contains("needs rebuild") => shared.report(
@@ -605,7 +654,7 @@ fn run_indexer(
                 }
             }
         }
-        // The sidebar's Live state follows the helper and the Volumes at once.
+        // The Locations' Live state follows the helper and the Volumes at once.
         let _ = live.covered();
         if !pending.is_empty() && !quiet {
             shared.busy.store(true, Ordering::Relaxed);
@@ -815,12 +864,14 @@ fn spawn_folder_sync(shared: &Arc<Shared>, folder: EntryId) {
                 done.store(true, Ordering::Relaxed);
                 result
             });
+            // The nudges stop with the walk: the finished Task holds the final count.
+            task.set_progress(progress.entries(), None);
             let outcome = match result {
                 _ if progress.cancelled() || task.is_cancelled() => Outcome::Cancelled,
-                Ok(()) => Outcome::Done(format!("{} Entries read", crate::format::count(progress.entries()))),
+                Ok(()) => Outcome::Done(format!("{} Entries read", format::count(progress.entries()))),
                 Err(e) => {
                     let retry_shared = shared.clone();
-                    task.set_retry(Arc::new(move |_| spawn_folder_sync(&retry_shared, folder)));
+                    task.set_retry(Arc::new(move || spawn_folder_sync(&retry_shared, folder)));
                     Outcome::Failed(e.to_string())
                 }
             };
@@ -884,7 +935,7 @@ fn sync_volumes(
         shared.tasks.begin(kind, label, true)
     });
     thread::scope(|outer| {
-        // The entry count moves without a notice, so the GUI is nudged while a sync runs; the
+        // The entry count moves without a notice, so clients are nudged while a sync runs; the
         // same loop carries a cancel from the Task to the walk.
         if let Some(task) = &task {
             outer.spawn(|| {
@@ -921,6 +972,12 @@ fn sync_volumes(
                             } else {
                                 ve_scan::capacity(mount)
                             };
+                            // The last step of a Sync or Catch-up (ADR-0014); a journal poll
+                            // added a few Entries and is not worth a walk.
+                            if !quiet {
+                                detect_owners(shared, *id);
+                            }
+                            // Stamped once the whole Sync, detection included, has finished.
                             shared.index.write().mark_synced(*id, started, capacity);
                         }
                         // A cancel interrupts the read; that is not a failure.
@@ -944,25 +1001,51 @@ fn sync_volumes(
     });
     if let Some(task) = task {
         let entries = shared.progress.entries();
+        // The nudges stop with the walk: the finished Task holds the final count.
+        task.set_progress(entries, None);
         let failed = failed.into_inner();
         let outcome = if shared.progress.cancelled() {
             Outcome::Cancelled
         } else if !failed.is_empty() {
             let retry = retry.clone();
-            task.set_retry(Arc::new(move |_| {
+            task.set_retry(Arc::new(move || {
                 for identity in &failed {
                     let _ = retry.send(Command::SyncLocation(identity.clone()));
                 }
             }));
             Outcome::Failed("A Location could not be read".into())
         } else {
-            Outcome::Done(format!("{} Entries read", crate::format::count(entries)))
+            Outcome::Done(format!("{} Entries read", format::count(entries)))
         };
         task.finish(outcome);
     }
     let cancelled = shared.progress.cancelled();
     shared.progress.cancel.store(false, Ordering::Relaxed);
     cancelled
+}
+
+/// Finds the Owner roots of a Location and records them in the Index. A mounted local Volume
+/// gets the platform's conventions (Steam manifests, install folders, the package database);
+/// a Remote or an Offline Volume only what the Index alone shows, project markers. Files are
+/// read between the two locks, so frames never wait on the disk.
+fn detect_owners(shared: &Shared, id: VolumeId) {
+    let detection = {
+        let index = shared.index.read();
+        let Some(volume) = index.volume(id) else {
+            return;
+        };
+        let platform = (volume.online && !volume.is_remote()).then(Platform::current).flatten();
+        owners::plan(&index, id, platform)
+    };
+    let Some(detection) = detection else {
+        return;
+    };
+    let text = detection.read(&LocalDisk);
+    let mut index = shared.index.write();
+    let (root, roots) = detection.finish(&index, text);
+    index.set_owners(root, roots);
+    drop(index);
+    (shared.repaint)();
 }
 
 /// Gives the memory a sync freed back to the OS. A walk allocates and frees millions of
@@ -1008,13 +1091,20 @@ fn save_if_changed(shared: &Arc<Shared>, path: Option<&Path>, saved_generation: 
 
 const SNAPSHOTS: &str = "snapshots";
 
-/// The folder of Snapshots, beside the Index.
-pub fn snapshots_dir() -> Option<PathBuf> {
-    Some(settings::index_path()?.with_file_name(SNAPSHOTS))
+impl Shared {
+    /// The folder of Snapshots, beside the Index.
+    pub fn snapshots_dir(&self) -> Option<PathBuf> {
+        Some(self.index_path.as_ref()?.with_file_name(SNAPSHOTS))
+    }
+
+    /// The cache of file hashes, beside the Index.
+    fn hashes_path(&self) -> Option<PathBuf> {
+        Some(self.index_path.as_ref()?.with_file_name("hashes.bin"))
+    }
 }
 
 /// After the first Index save of a day (once every Location has synced), stores that day's Snapshot on a thread of its own, so
-/// neither the save nor the GUI waits for it, then drops the Snapshots retention no longer keeps.
+/// neither the save nor a client waits for it, then drops the Snapshots retention no longer keeps.
 fn snapshot_first_save_of_day(shared: &Arc<Shared>, index_path: &Path) {
     let dir = index_path.with_file_name(SNAPSHOTS);
     let today = Local::now().date_naive();
@@ -1038,11 +1128,6 @@ fn snapshot_first_save_of_day(shared: &Arc<Shared>, index_path: &Path) {
     if spawned.is_err() {
         shared.snapshotting.store(false, Ordering::Release);
     }
-}
-
-/// The cache of file hashes, beside the Index.
-fn hashes_path() -> Option<PathBuf> {
-    Some(settings::index_path()?.with_file_name("hashes.bin"))
 }
 
 /// Starts a search for Duplicates unless the last one is current for the Index, or the Index
@@ -1134,7 +1219,7 @@ pub fn start_hashing(shared: &Arc<Shared>) {
             let done = HashingDone(shared.clone());
             let exclusions = shared.duplicate_exclusions.lock().clone();
             let (excluded, exclusion_error) = excluded_files(&shared, &exclusions);
-            let path = hashes_path();
+            let path = shared.hashes_path();
             let mut cache = path.as_deref().map(HashCache::load).unwrap_or_default();
             let (groups, stats) = duplicates::find(
                 &shared.index,
@@ -1176,10 +1261,7 @@ pub fn start_hashing(shared: &Arc<Shared>) {
                 task.finish(if cancelled {
                     Outcome::Cancelled
                 } else if stats.excluded > 0 {
-                    Outcome::Done(format!(
-                        "{} files skipped by Duplicate Exclusions",
-                        crate::format::count(stats.excluded)
-                    ))
+                    Outcome::Done(format!("{} files skipped by Duplicate Exclusions", format::count(stats.excluded)))
                 } else {
                     Outcome::Done(String::new())
                 });
@@ -1196,10 +1278,11 @@ fn run_viewer(shared: &Arc<Shared>, queries: &Receiver<String>, newest: &AtomicU
     let mut seen_query = 0;
     let mut text = String::new();
     let mut query: Option<Query> = None;
-    let mut computed: Option<(String, u64, u64)> = None;
+    let mut computed: Option<(String, u64, (u64, u64))> = None;
     let mut last_compute = Instant::now() - VIEW_THROTTLE;
     let mut order = FileOrder::default();
     let mut seen_duplicates = 0;
+    let mut seen_cleanables = 0;
     loop {
         let received = match queries.recv_timeout(Duration::from_millis(200)) {
             Ok(latest) => {
@@ -1217,19 +1300,25 @@ fn run_viewer(shared: &Arc<Shared>, queries: &Receiver<String>, newest: &AtomicU
             }
             Err(RecvTimeoutError::Disconnected) => return,
         };
-        // `dupe:` needs the hashes.
-        if text.contains("dupe:") {
+        // `dupe:` and `is:duplicate` need the hashes.
+        let lower = text.to_lowercase();
+        if lower.contains("dupe:") || lower.contains("is:duplicate") {
             refresh_duplicates(shared);
         }
-        // A finished search changes what `dupe:` means: parse again with its result.
+        // A finished search or Cleaner look changes what `dupe:` and `is:` mean: parse again with
+        // its result.
         let duplicates = shared.duplicates.lock().clone();
-        if received || duplicates.version != seen_duplicates {
+        let cleanables = shared.cleanables.lock().clone();
+        if received || duplicates.version != seen_duplicates || cleanables.version != seen_cleanables {
             seen_duplicates = duplicates.version;
+            seen_cleanables = cleanables.version;
             {
                 let parsed = if text.trim().is_empty() {
                     Ok(None)
                 } else {
-                    let context = QueryContext::new(categories.clone(), Local::now()).with_duplicates(duplicates.set);
+                    let context = QueryContext::new(categories.clone(), Local::now())
+                        .with_duplicates(duplicates.set)
+                        .with_cleanables(cleanables.set);
                     Query::parse(&text, &context).map(Some)
                 };
                 match parsed {
@@ -1249,10 +1338,11 @@ fn run_viewer(shared: &Arc<Shared>, queries: &Receiver<String>, newest: &AtomicU
             continue;
         }
         let generation = shared.index.read().generation();
+        let sets = (seen_duplicates, seen_cleanables);
         let up_to_date = computed
             .as_ref()
-            .is_some_and(|(t, g, d)| *t == text && *g == generation && *d == seen_duplicates);
-        let only_index_moved = computed.as_ref().is_some_and(|(t, _, d)| *t == text && *d == seen_duplicates);
+            .is_some_and(|(t, g, d)| *t == text && *g == generation && *d == sets);
+        let only_index_moved = computed.as_ref().is_some_and(|(t, _, d)| *t == text && *d == sets);
         if up_to_date || (only_index_moved && last_compute.elapsed() < VIEW_THROTTLE) {
             continue;
         }
@@ -1268,7 +1358,7 @@ fn run_viewer(shared: &Arc<Shared>, queries: &Receiver<String>, newest: &AtomicU
         // Superseded mid-compute: the newer Query is in the channel; take it now.
         let Some(view) = view else { continue };
         *shared.view.lock() = Some(Arc::new(view));
-        computed = Some((text.clone(), generation, seen_duplicates));
+        computed = Some((text.clone(), generation, sets));
         last_compute = Instant::now();
         (shared.repaint)();
     }
@@ -1280,6 +1370,7 @@ mod tests {
 
     fn shared() -> Shared {
         Shared {
+            index_path: None,
             index: SharedIndex::new(Index::new()),
             progress: Progress::default(),
             status: Mutex::new(Status {
@@ -1291,6 +1382,7 @@ mod tests {
             query_error: Mutex::new(None),
             busy: AtomicBool::new(false),
             duplicates: Mutex::new(DuplicateState::default()),
+            cleanables: Mutex::new(CleanableSet::default()),
             hash_progress: HashProgress::default(),
             duplicate_exclusions: Mutex::new(String::new()),
             remote_names: Mutex::new(HashMap::new()),

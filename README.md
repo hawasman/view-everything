@@ -10,7 +10,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/explorer-dark.png">
-  <img alt="The Explorer: a folder tree beside a Treemap of the same folders, with the Selection panel below" src="docs/images/explorer-light.png">
+  <img alt="Browse: a folder tree beside a Treemap of the same folders, with the Inspector at the right" src="docs/images/explorer-light.png">
 </picture>
 
 It keeps one Index of every file on your Volumes, saved between runs, so searching and sizing never wait on a scan. It sends nothing anywhere: no telemetry and no account.
@@ -20,14 +20,15 @@ It keeps one Index of every file on your Volumes, saved between runs, so searchi
 ### Find
 - **One Index** of every local Volume. Removable disks stay searchable as Offline Volumes after you unplug them. Mounted network shares are opt-in.
 - **Remotes:** index SSH/SFTP, S3, FTP, WebDAV and Azure Blob storage, read-only. [More](docs/guide/remotes.md)
-- **Query:** results as you type, with modifiers such as `ext:`, `size:>1gb`, `dm:yesterday`, `regex:` and `dupe:`. [More](docs/guide/query-language.md)
+- **Query:** results as you type, with modifiers such as `ext:`, `size:>1gb`, `dm:yesterday`, `regex:`, `dupe:` and `owner:`. [More](docs/guide/query-language.md)
 - **Saved Queries** for the searches you repeat.
 - **Command line:** `ve find`, `ve top` and `ve export` read the same Index. [More](docs/guide/command-line.md)
 
 ### See
-- **Dashboard:** space per Category, a capacity bar per Location, the largest and most recently modified files, and when each Location last synced.
-- **Explorer:** a tree and a flat list beside a Treemap, all driven by one Query. Double-click any folder to zoom into it. Select several rows for the right-click menu: Open, Show in Explorer, Open terminal here, Copy path, Trash, Sync this folder and Export selection to CSV.
-- **Treemap:** folders labelled with their name and size down to an adjustable Depth. Hover shows every enclosing folder. The **Selection panel** shows the selected item's size, share and contents, with actions.
+- **Overview:** what is indexed, what can be cleaned up, the Trash, when the Index was last synced; then a used bar per Location, the Categories, and the largest and most recently modified files.
+- **Browse:** a tree and a flat list beside a Treemap, all driven by one Query box that works from every page. Double-click any folder to zoom into it. Select several rows for the right-click menu: Open, Show in file manager, Open terminal here, Copy path, Trash, Sync this folder and Export selection to CSV.
+- **Treemap and Inspector:** folders labelled with their name and size down to an adjustable Depth, coloured by Category or by Owner kind; hover shows every enclosing folder. The **Inspector** at the right shows the selected Entry's size, share and contents, with its actions; it shows a Location or a Task the same way.
+- **Owners:** the program, game, package or project a folder belongs to, found for Steam games, installed programs, system folders and code projects. [More](docs/guide/owners.md)
 - **Snapshots and Compare with:** a daily Snapshot of folder sizes, and a Change column showing what grew. [More](docs/guide/snapshots-and-export.md)
 - **Export** to CSV or the Treemap to PNG. [More](docs/guide/snapshots-and-export.md#export)
 
@@ -81,9 +82,9 @@ Download the latest build from the [Releases](https://github.com/hawasman/view-e
 
 ## First run
 
-1. **Open the app.** It builds the Index; the sidebar's Tasks row shows the progress. [More](docs/guide/live-updates-and-background.md)
-2. **Search.** Type in the Explorer's Query box, for example `size:>1gb` or `ext:iso`. [More](docs/guide/query-language.md)
-3. **Look at the Treemap.** Double-click a folder to zoom into it; click a tile to see it in the Selection panel.
+1. **Open the app.** It builds the Index; the rail's Tasks block shows the progress. [More](docs/guide/live-updates-and-background.md)
+2. **Search.** Type in the Query box at the top, for example `size:>1gb` or `ext:iso`. [More](docs/guide/query-language.md)
+3. **Look at the Treemap.** Double-click a folder to zoom into it; click a tile to see it in the Inspector.
 4. **Open the Cleaner** to see what can be reclaimed. Nothing is removed until you press Clean. [More](docs/guide/cleanup-rules.md)
 
 ## Build from source
@@ -100,7 +101,7 @@ cargo build --release
 ./target/release/view-everything
 ```
 
-The workspace has `ve-core` (Index, Query, Filter), `ve-scan` (scanning Volumes and Remotes, watching mounts), `ve-app` (the GPUI app), `ve-cli` (`ve`) and `ve-fanotify` (the Linux Live updates helper). Packaging scripts are in [packaging](packaging): the AppImage and `.dmg` builds, the WiX source for the MSI, and an AUR `PKGBUILD`.
+The workspace has `ve-core` (Index, Query, Filter), `ve-scan` (scanning Volumes and Remotes, watching mounts), `ve-engine` (the engine the app hosts: Index, Tasks, Locations, Live updates, Sync scheduling, Snapshots), `ve-app` (the GPUI app), `ve-cli` (`ve`) and `ve-fanotify` (the Linux Live updates helper). Packaging scripts are in [packaging](packaging): the AppImage and `.dmg` builds, the WiX source for the MSI, and an AUR `PKGBUILD`.
 
 To contribute, enable the pre-commit hook once per clone. It runs the same checks as CI (rustfmt, clippy with warnings denied, and the tests):
 

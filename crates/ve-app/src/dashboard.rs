@@ -1,51 +1,44 @@
-//! The Dashboard: a glance at the whole Index. It
+//! The Overview: the answer first (what can be cleaned up), then the Index at a glance. It
 //! ignores the Explorer's Query. What it shows comes from one pass over the Index, computed off
 //! the UI thread and cached per Index generation (see `dashboard_summary`).
 
 use crate::app::volume_name;
-use crate::dashboard_summary::{Lane, Summary, ago, every, group_by_filesystem, oldest, summarize};
-use crate::engine::{Phase, Shared};
+use crate::dashboard_summary::{Summary, ago, group_by_filesystem, oldest, summarize};
 use crate::format;
+use crate::inspector::Inspected;
 use crate::settings::Settings;
-use crate::theme::{SERIF_FAMILY, palette};
-use crate::trash::{self, Trash};
-use crate::ui::{Tone, caption, panel, pill, swatch, tag};
-use chrono::{Local, TimeZone, Timelike};
+use crate::theme::{FS_BODY, FS_SMALL, GAP, ROW_H, palette};
+use crate::trash::Trash;
+use crate::ui::{ButtonKind, Tone, button, caption, empty_state, kpi_strip, link, panel, section_title, swatch, tag};
+use chrono::{Local, TimeZone};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, Size, h_flex, v_flex};
+use gpui_kit::component::{Sizable as _, Size, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use parking_lot::Mutex;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
-use ve_core::{Capacity, Category, CategoryMap, EntryId, Query, QueryContext};
+use ve_core::{Capacity, Category, CategoryMap, Query, QueryContext};
+use ve_engine::{Phase, Repaint, Shared};
 use ve_scan::VolumeInfo;
 
 /// Never recompute the summary more often than this while the Index is being filled; a
 /// computation that took long waits proportionally longer.
 const MIN_GAP: Duration = Duration::from_secs(2);
-/// A Location bar's segments narrower than this share of the whole are left out.
-const SLIVER: f64 = 0.001;
-const COLUMN: f32 = 1100.;
+/// Rows of Largest files and Recently modified.
+const FILE_ROWS: usize = 5;
 
-/// What a click on the Dashboard asks the window to do.
+/// What a click on the Overview asks the window to do.
 pub enum Act {
     /// Open the Explorer, with this Query when given.
     Explore(Option<String>),
-    /// Forget the Offline Volume with this identity (and its last mount path).
-    Forget(String, PathBuf),
-    /// Sync the Location with these Volume identities (one filesystem's) now, in full.
-    Sync(Vec<String>),
-    /// Sync every online Volume now.
-    SyncAll,
-    MoveToTrash(EntryId),
     /// Open the Cleaner.
     OpenCleaner,
+    /// Show this Entry or Location in the Inspector.
+    Inspect(Inspected),
     /// Save the Recently modified Query; `None` restores the default.
     SaveQuery(Option<String>),
     /// Start the Live updates a login start held back.
@@ -61,50 +54,51 @@ enum Kind {
     Remote,
 }
 
-/// One Volume (or Remote) of a Location row.
-struct Member {
-    identity: String,
-    mount: PathBuf,
-    indexed: u64,
-}
-
 /// One row of the Locations panel: a Remote, or a filesystem with the Volumes mounted from it
-/// (btrfs subvolumes and bind mounts share one capacity, so they share one lane).
+/// (btrfs subvolumes and bind mounts share one capacity, so they share one row).
 struct Location {
     /// Identity of the first Volume, or the Remote.
     identity: String,
     name: String,
-    detail: String,
     kind: Kind,
     online: bool,
     /// Last Synced of the least recently synced member.
     last_synced: Option<i64>,
-    /// "Every 15 min", for a Location kept current by re-reads.
-    interval: Option<String>,
-    categories: [u64; 8],
-    lane: Lane,
     indexed: u64,
     capacity: Option<Capacity>,
-    /// Entries read so far, while it is being synced.
-    syncing: Option<u64>,
-    /// What the lane is made of when it is more than one Volume.
-    members: Vec<Member>,
-    /// A Remote's server could not say how big its disk is.
-    no_capacity_note: Option<&'static str>,
+    /// Being synced now.
+    syncing: bool,
+    /// Volumes (or Remotes) in this row.
+    members: usize,
 }
 
-/// "9 Locations" (a Location is a Volume or a Remote, as in the sidebar), with the filesystems
-/// the Volumes share lanes on when there are fewer of them: "9 Locations (Volumes on 3 filesystems)".
+/// "N Locations" (a Location is a Volume or a Remote, as in the sidebar).
 fn locations_phrase(locations: &[Location]) -> String {
-    let count: usize = locations.iter().map(|l| l.members.len()).sum();
-    let filesystems = locations.iter().filter(|l| l.kind != Kind::Remote).count();
-    let volumes: usize = locations.iter().filter(|l| l.kind != Kind::Remote).map(|l| l.members.len()).sum();
-    let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-    let mut phrase = plural(count, "Location", "Locations");
-    if filesystems < volumes {
-        phrase += &format!(" (Volumes on {})", plural(filesystems, "filesystem", "filesystems"));
+    let count: usize = locations.iter().map(|l| l.members).sum();
+    format!("{count} {}", if count == 1 { "Location" } else { "Locations" })
+}
+
+/// The Overview's finding line for `count` Cleanables of `reclaim` bytes, `admin` of them freed
+/// only with administrator rights. No administrator share, no mention of it.
+fn finding_sentence(reclaim: u64, count: usize, admin: u64) -> String {
+    let mut sentence = format!(
+        "{} can be cleaned up across {} Cleanable{}",
+        format::size(reclaim),
+        format::count(count as u64),
+        if count == 1 { "" } else { "s" }
+    );
+    if admin > 0 {
+        sentence.push_str(&format!("; {} of it needs administrator", format::size(admin)));
     }
-    phrase
+    sentence.push('.');
+    sentence
+}
+
+/// The machine's name, when the system says it.
+fn hostname() -> Option<String> {
+    let name = std::fs::read_to_string("/etc/hostname").ok()?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 pub struct DashboardPage {
@@ -116,11 +110,10 @@ pub struct DashboardPage {
     shown: Option<Arc<Summary>>,
     queries: Sender<String>,
     volumes: Vec<VolumeInfo>,
-    /// Sync interval in minutes by Volume identity.
-    minutes: HashMap<String, u64>,
     /// The Recently modified Query in force.
     recent_query: String,
     editing: Option<Entity<InputState>>,
+    host: Option<String>,
 }
 
 impl DashboardPage {
@@ -131,7 +124,7 @@ impl DashboardPage {
         trash: Trash,
         categories: CategoryMap,
         settings: &Settings,
-        repaint: crate::engine::Repaint,
+        repaint: Repaint,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -160,23 +153,18 @@ impl DashboardPage {
             shown: None,
             queries,
             volumes: Vec::new(),
-            minutes: HashMap::new(),
             recent_query,
             editing: None,
+            host: hostname(),
         };
-        // The Cleaner card shows what its background look found.
+        // The finding line shows what the Cleaner's background look found.
         cx.observe(&page.cleaner, |_, _, cx| cx.notify()).detach();
         page.set_context(settings, Vec::new(), cx);
         page
     }
 
-    /// Takes the settings and mounted Volumes the page reads names and intervals from.
+    /// Takes the settings and mounted Volumes the page reads names from.
     pub fn set_context(&mut self, settings: &Settings, volumes: Vec<VolumeInfo>, cx: &mut Context<Self>) {
-        self.minutes = volumes
-            .iter()
-            .map(|v| (v.identity.clone(), settings.refresh_minutes_for(v)))
-            .chain(settings.remotes.iter().map(|r| (r.identity(), settings.remote_refresh_minutes(r))))
-            .collect();
         self.volumes = volumes;
         let query = settings.recent_query_text();
         if query != self.recent_query {
@@ -213,39 +201,20 @@ impl DashboardPage {
             .map(|(_, v)| {
                 let mounted = self.volumes.iter().find(|m| m.identity == v.identity);
                 let network = mounted.is_some_and(|m| m.network);
-                let categories = self
+                let indexed: u64 = self
                     .shown
                     .as_ref()
                     .and_then(|s| s.volume(&v.identity))
-                    .map(|s| s.categories)
+                    .map(|s| s.categories.iter().sum())
                     .unwrap_or_default();
-                let indexed: u64 = categories.iter().sum();
                 let remote = v.remote();
                 let name = match (&remote, mounted) {
                     (Some(r), _) => r.display_name(v.name.as_deref()),
                     (None, Some(m)) => volume_name(m),
                     (None, None) => v.mount.display().to_string(),
                 };
-                let detail = match &remote {
-                    Some(r) if ve_scan::remote::is_sftp_only(r) => "SSH · SFTP · read-only".to_owned(),
-                    Some(r) => format!("{} · read-only", r.kind()),
-                    None if network => format!("Network share · {}", v.mount.display()),
-                    None => format!("{} · {}", v.fs_type, v.mount.display()),
-                };
-                let no_capacity_note = match &remote {
-                    // S3 has no capacity by nature: the indexed total is all there is.
-                    Some(r @ ve_core::Remote::Ssh(_)) if v.last_synced.is_some() && v.capacity.is_none() => {
-                        Some(if ve_scan::remote::is_sftp_only(r) {
-                            "SFTP only: no df, no capacity"
-                        } else {
-                            "df unavailable: no capacity"
-                        })
-                    }
-                    _ => None,
-                };
                 let location = Location {
                     identity: v.identity.clone(),
-                    detail,
                     name,
                     kind: if remote.is_some() {
                         Kind::Remote
@@ -256,18 +225,10 @@ impl DashboardPage {
                     },
                     online: v.online,
                     last_synced: v.last_synced,
-                    interval: self.minutes.get(&v.identity).map(|&m| every(m)),
-                    categories,
-                    lane: Lane::new(categories, v.capacity),
                     indexed,
                     capacity: v.capacity,
-                    syncing: (v.online && syncing.contains(&v.mount)).then(|| self.shared.progress.entries()),
-                    members: vec![Member {
-                        identity: v.identity.clone(),
-                        mount: v.mount.clone(),
-                        indexed,
-                    }],
-                    no_capacity_note,
+                    syncing: v.online && syncing.contains(&v.mount),
+                    members: 1,
                 };
                 (location, mounted.map_or_else(String::new, |m| m.label.clone()))
             })
@@ -275,6 +236,12 @@ impl DashboardPage {
         let identities: Vec<&str> = singles.iter().map(|(l, _)| l.identity.as_str()).collect();
         let groups = group_by_filesystem(&identities);
         let mut singles: Vec<Option<(Location, String)>> = singles.into_iter().map(Some).collect();
+        let mount_len = |identity: &str| {
+            index
+                .volume_with_identity(identity)
+                .and_then(|id| index.volume(id))
+                .map_or(0, |v| v.mount.as_os_str().len())
+        };
         groups
             .into_iter()
             .map(|group| {
@@ -283,33 +250,29 @@ impl DashboardPage {
                     return parts.remove(0).0;
                 }
                 // The shortest mount path (usually `/`) speaks for the filesystem.
-                parts.sort_by_key(|(l, _)| l.members[0].mount.as_os_str().len());
+                parts.sort_by_key(|(l, _)| mount_len(&l.identity));
                 let device = parts[0].1.trim_start_matches("/dev/").to_owned();
                 let mut whole = parts.remove(0).0;
                 for (part, _) in parts {
-                    for (c, add) in whole.categories.iter_mut().zip(part.categories) {
-                        *c += add;
-                    }
+                    whole.indexed += part.indexed;
                     whole.online |= part.online;
                     whole.last_synced = whole.last_synced.min(part.last_synced);
-                    whole.syncing = whole.syncing.or(part.syncing);
+                    whole.syncing |= part.syncing;
                     // Every Volume measures the same filesystem: any one's figures will do.
                     whole.capacity = whole.capacity.or(part.capacity);
-                    whole.members.extend(part.members);
+                    whole.members += part.members;
                 }
-                whole.indexed = whole.categories.iter().sum();
-                whole.lane = Lane::new(whole.categories, whole.capacity);
                 if !device.is_empty() {
                     whole.name = device;
                 }
-                let fs = index
-                    .volume_with_identity(&whole.identity)
-                    .and_then(|id| index.volume(id))
-                    .map(|v| v.fs_type.clone());
-                whole.detail = format!("{} · {} Volumes", fs.unwrap_or_default(), whole.members.len());
                 whole
             })
             .collect()
+    }
+
+    /// Files in the Index on the Volume or Remote with this identity, once the summary is in.
+    pub fn files_on(&self, identity: &str) -> Option<u64> {
+        self.shown.as_ref()?.volume(identity).map(|v| v.files)
     }
 
     fn explore(query: Option<String>, cx: &mut Context<Self>) {
@@ -336,37 +299,6 @@ impl DashboardPage {
         cx.emit(Act::SaveQuery(text.map(|t| t.trim().to_owned())));
         cx.notify();
     }
-
-    fn greeting(&self, now: i64) -> (String, String) {
-        let hour = Local.timestamp_opt(now, 0).single().map_or(12, |t| t.hour());
-        let part = match hour {
-            5..12 => "Morning",
-            12..17 => "Afternoon",
-            _ => "Evening",
-        };
-        let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default();
-        let name: String = user
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().chain(user.chars().skip(1)).collect())
-            .unwrap_or_default();
-        let hello = if name.is_empty() {
-            part.to_owned()
-        } else {
-            format!("{part}, {name}")
-        };
-        let Some(summary) = &self.shown else {
-            return (format!("{hello}."), "Reading the Index…".into());
-        };
-        let fact = match summary.by_size().first() {
-            Some(&(category, size, _)) => {
-                let whole = summary.indexed().max(1);
-                format!("{category} is {:.0}% of your Index.", size as f64 * 100.0 / whole as f64)
-            }
-            None => "Nothing is indexed yet.".to_owned(),
-        };
-        (format!("{hello}. {fact}"), String::new())
-    }
 }
 
 /// Recomputes the summary whenever the Index or the Recently modified Query changed.
@@ -375,7 +307,7 @@ fn run_summary(
     categories: &CategoryMap,
     requests: &Receiver<String>,
     latest: &Mutex<Option<Arc<Summary>>>,
-    repaint: &crate::engine::Repaint,
+    repaint: &Repaint,
 ) {
     let mut text = String::new();
     let mut computed: Option<(String, u64)> = None;
@@ -416,11 +348,6 @@ fn run_summary(
     }
 }
 
-/// The stroke of the Unindexed Space hatch (`--hatch` in ve.css).
-fn hatch(cx: &App) -> Rgba {
-    if cx.theme().is_dark() { rgb(0x666866) } else { rgb(0xa9acab) }
-}
-
 /// "Today 21:58", "Yesterday 22:05", or the date.
 fn day(nanos: i64) -> String {
     let Some(at) = Local.timestamp_nanos(nanos).into() else {
@@ -446,648 +373,490 @@ fn tilde(folder: &str) -> String {
     }
 }
 
+/// Where the Cleaner's look stands, as the Overview tells it.
+enum Finding {
+    /// Not looked yet, or looking.
+    Looking {
+        spinning: bool,
+    },
+    Found {
+        reclaim: u64,
+        count: usize,
+        /// The part of `reclaim` that needs administrator rights.
+        admin: u64,
+    },
+    Nothing,
+}
+
 impl Render for DashboardPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _span = crate::trace::span("DashboardPage::render");
         let p = palette(cx);
         let now = chrono::Utc::now().timestamp();
         let locations = self.locations();
-        let (title, sub) = self.greeting(now);
-        let oldest_ix = oldest(&locations.iter().map(|l| l.last_synced).collect::<Vec<_>>());
+        let oldest_loc = oldest(&locations.iter().map(|l| l.last_synced).collect::<Vec<_>>()).map(|i| &locations[i]);
 
-        let sub = match (&self.shown, oldest_ix.map(|i| &locations[i])) {
-            (Some(s), Some(old)) => {
-                let synced = match old.last_synced {
-                    Some(at) => format!("Index last synced {}, at {}.", ago(now, at), old.name),
-                    None => format!("{} has not finished its first sync.", old.name),
-                };
-                format!(
-                    "{} indexed across {} and {} Entries. {synced}",
-                    format::size(s.indexed()),
-                    locations_phrase(&locations),
-                    format::count(s.entries)
-                )
-            }
-            _ => sub,
+        // The Cleaner looks again only when the Index changed, so this follows every Clean.
+        let (reclaim, admin, count, looking) = self.cleaner.update(cx, |c, cx| {
+            c.refresh(cx);
+            let (reclaim, count) = c.reclaimable();
+            (reclaim, c.admin_reclaimable(), count, c.looking())
+        });
+        let finding = if looking {
+            Finding::Looking { spinning: true }
+        } else if self.shared.is_loading() || self.shown.is_none() {
+            Finding::Looking { spinning: false }
+        } else if count > 0 {
+            Finding::Found { reclaim, count, admin }
+        } else {
+            Finding::Nothing
         };
+
+        let synced_fact = match oldest_loc {
+            Some(l) => match l.last_synced {
+                Some(at) => Some(format!("Index last synced {}", ago(now, at))),
+                None => Some(format!("{} has not finished its first sync", l.name)),
+            },
+            None => None,
+        };
+        let os = match std::env::consts::OS {
+            "linux" => "Linux",
+            "macos" => "macOS",
+            "windows" => "Windows",
+            other => other,
+        };
+        let facts = self
+            .host
+            .iter()
+            .cloned()
+            .chain([os.to_owned()])
+            .chain(synced_fact)
+            .collect::<Vec<_>>()
+            .join(" · ");
 
         let head = h_flex()
             .items_start()
             .justify_between()
-            .gap(px(24.))
-            .mb(px(24.))
-            .child(
-                v_flex()
-                    .min_w_0()
-                    .child(div().font_family(SERIF_FAMILY).text_size(px(48.)).line_height(px(54.)).child(title))
-                    .child(div().mt(px(6.)).text_color(p.muted).child(sub)),
-            )
-            .child(
-                div().flex_none().pt(px(8.)).child(
-                    pill("explore", "Explore by size")
-                        .primary()
-                        .build(cx, cx.listener(|_, _, _, cx| Self::explore(None, cx))),
-                ),
-            );
-
-        let body = v_flex()
-            .child(head)
-            .when(cx.try_global::<crate::host::Host>().is_some_and(|h| h.live_paused()), |d| {
+            .gap(px(GAP))
+            .child(crate::ui::title_row("Overview", Some(facts), cx))
+            .when(matches!(finding, Finding::Found { .. }), |d| {
                 d.child(
-                    panel(cx)
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(16.))
-                        .mb(px(16.))
+                    div().flex_none().child(
+                        button("open-cleaner", "Open Cleaner")
+                            .kind(ButtonKind::Primary)
+                            .build(cx, cx.listener(|_, _, _, cx| cx.emit(Act::OpenCleaner))),
+                    ),
+                )
+            });
+
+        let sentence = match &finding {
+            Finding::Looking { .. } => "Looking for Cleanables…".to_owned(),
+            Finding::Found { reclaim, count, admin } => finding_sentence(*reclaim, *count, *admin),
+            Finding::Nothing => "Nothing to clean up.".to_owned(),
+        };
+        let finding_line = panel(cx)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(GAP))
+            .child(
+                h_flex()
+                    .gap(px(10.))
+                    .items_center()
+                    .text_size(px(FS_BODY))
+                    .text_color(p.text)
+                    .when(matches!(finding, Finding::Looking { spinning: true }), |d| {
+                        d.child(Spinner::new().with_size(Size::Small).color(p.muted))
+                    })
+                    .child(sentence),
+            )
+            .when(matches!(finding, Finding::Found { .. }), |d| {
+                d.child(
+                    link("review-plan", "Review Cleanup Plan", cx)
+                        .flex_none()
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(Act::OpenCleaner))),
+                )
+            });
+
+        let dash = || SharedString::from("—");
+        let indexed = match &self.shown {
+            Some(s) => (
+                format::size(s.indexed()).into(),
+                Some(format!("{} Entries · {}", format::count(s.entries), locations_phrase(&locations)).into()),
+            ),
+            None => (dash(), Some("not read yet".into())),
+        };
+        let cleanable = match &finding {
+            Finding::Looking { .. } => (dash(), Some("not looked yet".into())),
+            Finding::Found { reclaim, count, .. } => (
+                format::size(*reclaim).into(),
+                Some(format!("{} Cleanable{}", format::count(*count as u64), if *count == 1 { "" } else { "s" }).into()),
+            ),
+            Finding::Nothing => (format::size(0).into(), Some("nothing found".into())),
+        };
+        let trash = match self.trash.size() {
+            Some(size) => (
+                format::size(size).into(),
+                self.trash
+                    .items()
+                    .map(|n| format!("{} item{}", format::count(n), if n == 1 { "" } else { "s" }).into()),
+            ),
+            None => (dash(), None),
+        };
+        let last = match oldest_loc {
+            Some(l) => match l.last_synced {
+                Some(at) => (
+                    ago(now, at).into(),
+                    Some(if locations.iter().any(|l| l.syncing) {
+                        let name = locations.iter().find(|l| l.syncing).map_or("", |l| l.name.as_str());
+                        format!("{name} syncing").into()
+                    } else {
+                        l.name.clone().into()
+                    }),
+                ),
+                None => (dash(), Some(format!("{} has not finished its first sync", l.name).into())),
+            },
+            None => (dash(), Some("no Locations yet".into())),
+        };
+        let kpis = kpi_strip(
+            vec![
+                ("Indexed".into(), indexed.0, indexed.1),
+                ("Cleanable".into(), cleanable.0, cleanable.1),
+                ("Trash".into(), trash.0, trash.1),
+                ("Last synced".into(), last.0, last.1),
+            ],
+            cx,
+        );
+
+        v_flex().id("dashboard").size_full().overflow_y_scroll().child(
+            v_flex()
+                .gap(px(GAP))
+                .child(head)
+                .when(cx.try_global::<crate::host::Host>().is_some_and(|h| h.live_paused()), |d| {
+                    d.child(
+                        panel(cx)
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(GAP))
+                            .child(
+                                div()
+                                    .text_size(px(FS_BODY))
+                                    .child("Live updates are paused: not started at login, to spare you the password prompt. Changes are found when a Volume is synced."),
+                            )
+                            .child(
+                                button("start-live", "Start")
+                                    .build(cx, cx.listener(|_, _, _, cx| cx.emit(Act::StartLive))),
+                            ),
+                    )
+                })
+                .child(finding_line)
+                .child(kpis)
+                .child(
+                    h_flex()
+                        .items_start()
+                        .gap(px(GAP))
+                        // Largest Owners sits under Locations, in the height Categories takes.
                         .child(
                             v_flex()
-                                .child(div().font_weight(FontWeight::MEDIUM).child("Live updates paused"))
-                                .child(caption(
-                                    "Not started at login, to spare you the password prompt. Changes are found when a Volume is synced.",
-                                    cx,
-                                )),
+                                .flex_grow(9.)
+                                .flex_basis(relative(0.))
+                                .min_w_0()
+                                .gap(px(GAP))
+                                .child(self.locations_panel(&locations, now, cx))
+                                .children(self.owners_panel(cx)),
                         )
-                        .child(
-                            pill("start-live", "Start")
-                                .primary()
-                                .build(cx, cx.listener(|_, _, _, cx| cx.emit(Act::StartLive))),
-                        ),
+                        .child(self.categories_panel(cx)),
                 )
-            })
-            .child(self.categories_row(cx))
-            .child(
-                h_flex()
-                    .items_stretch()
-                    .gap(px(16.))
-                    .mt(px(16.))
-                    .child(self.locations_panel(&locations, now, cx))
-                    .child(self.side_column(&locations, oldest_ix, now, cx)),
-            )
-            .child(
-                h_flex()
-                    .items_start()
-                    .gap(px(16.))
-                    .mt(px(16.))
-                    .child(self.largest_panel(&locations, cx))
-                    .child(self.recent_panel(&locations, cx)),
-            );
-        div().id("dashboard").size_full().overflow_y_scroll().child(
-            div()
-                .w_full()
-                .max_w(px(COLUMN + 64.))
-                .mx_auto()
-                .pt(px(32.))
-                .px(px(32.))
-                .pb(px(48.))
-                .child(body),
+                .child(
+                    h_flex()
+                        .items_start()
+                        .gap(px(GAP))
+                        .child(self.largest_panel(&locations, cx))
+                        .child(self.recent_panel(&locations, cx)),
+                ),
         )
     }
 }
 
 impl DashboardPage {
-    /// The four largest Categories as cards, then a line naming the rest.
-    fn categories_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let Some(summary) = &self.shown else {
-            return div().into_any_element();
-        };
-        let rows = summary.by_size();
-        let whole = summary.indexed().max(1) as f64;
-        let share = |size: u64, digits: usize| format!("{:.digits$}%", size as f64 * 100.0 / whole);
-        let cards = rows.iter().take(4).enumerate().map(|(ix, &(category, size, files))| {
-            let color = p.category(category);
-            let name = category.name();
-            let query = format!("type:{}", name.to_lowercase());
-            let tip = format!("Open the Explorer with {query}");
-            panel(cx)
-                .id(("category-card", ix))
-                .flex_1()
-                .flex_basis(relative(0.))
-                .min_h(px(116.))
-                .pb(px(16.))
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .border_1()
-                .border_color(gpui_kit::transparent_black())
-                .cursor_pointer()
-                .hover(move |s| s.border_color(p.control))
-                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                .on_click(cx.listener(move |_, _, _, cx| Self::explore(Some(query.clone()), cx)))
-                .child(h_flex().gap(px(8.)).items_center().mb(px(4.)).child(swatch(color)).child(name))
-                .child(div().text_size(px(32.)).line_height(px(38.)).child(format::size(size)))
-                .child(div().text_size(px(13.)).text_color(p.muted).mb(px(14.)).child(format!(
-                    "{} files · {} of the Index",
-                    format::count(files),
-                    share(size, 1)
-                )))
-                .child(
-                    div()
-                        .mt_auto()
-                        .h(px(4.))
-                        .rounded(px(2.))
-                        .bg(p.free)
-                        .overflow_hidden()
-                        .child(div().h_full().w(relative((size as f64 / whole) as f32)).bg(color)),
-                )
-        });
-        let rest = rows.len().saturating_sub(4);
-        let more = rows.iter().skip(4).enumerate().map(|(ix, &(category, size, _))| {
-            let query = format!("type:{}", category.name().to_lowercase());
-            h_flex()
-                .id(("more-category", ix))
-                .gap(px(6.))
-                .items_center()
-                .cursor_pointer()
-                .whitespace_nowrap()
-                .hover(move |s| s.text_color(p.accent))
-                .on_click(cx.listener(move |_, _, _, cx| Self::explore(Some(query.clone()), cx)))
-                .child(swatch(p.category(category)))
-                .child(category.name())
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(p.text).child(format::size(size)))
-        });
-        v_flex()
-            .child(h_flex().gap(px(16.)).children(cards))
-            .when(rest > 0, |d| {
-                d.child(
-                    h_flex()
-                        .mt(px(12.))
-                        .gap(px(16.))
-                        .flex_wrap()
-                        .items_center()
-                        .text_size(px(13.))
-                        .text_color(p.muted)
-                        .child(format!("{rest} more Categor{}", if rest == 1 { "y" } else { "ies" }))
-                        .children(more),
-                )
-            })
-            .into_any_element()
-    }
-
+    /// One row per Location: name (and its kind when not a local Volume), used bar, figures,
+    /// Last Synced. A click shows it in the Inspector.
     fn locations_panel(&self, locations: &[Location], now: i64, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let capacity: u64 = locations.iter().filter_map(|l| l.capacity).map(|c| c.total).sum();
-        let free: u64 = locations.iter().filter_map(|l| l.capacity).map(|c| c.free).sum();
-        let hatch = hatch(cx);
-        let outlined = move |d: Div| d.border_1().border_color(p.control);
-        let mut legend = h_flex()
-            .flex_wrap()
-            .gap_x(px(14.))
-            .gap_y(px(4.))
-            .mb(px(14.))
-            .text_xs()
-            .text_color(p.muted);
-        for category in Category::ALL {
-            legend = legend.child(
-                h_flex()
-                    .gap(px(6.))
-                    .items_center()
-                    .child(swatch(p.category(category)))
-                    .child(category.name()),
-            );
-        }
-        legend = legend
-            .child(
-                h_flex()
-                    .gap(px(6.))
-                    .items_center()
-                    .child(outlined(
-                        swatch(p.surface)
-                            .overflow_hidden()
-                            .child(div().size_full().bg(pattern_slash(hatch, 1., 6.))),
-                    ))
-                    .child("Unindexed Space"),
-            )
-            .child(h_flex().gap(px(6.)).items_center().child(outlined(swatch(p.free))).child("Free"));
-
-        let mut lanes = v_flex().bg(p.raised).rounded(px(crate::theme::RADIUS_INNER)).px(px(20.)).py(px(4.));
+        let mut rows = v_flex().mt(px(GAP));
         for (ix, l) in locations.iter().enumerate() {
-            lanes = lanes.child(self.lane(ix, l, now, cx));
+            let identity = l.identity.clone();
+            let figures = match l.capacity {
+                Some(c) => h_flex()
+                    .justify_end()
+                    .child(div().text_color(p.text).child(format::size(c.total.saturating_sub(c.free))))
+                    .child(format!("\u{a0}/ {}", format::size(c.total))),
+                None => h_flex()
+                    .justify_end()
+                    .child(div().text_color(p.text).child(format::size(l.indexed)))
+                    .child("\u{a0}indexed"),
+            };
+            let bar = l.capacity.filter(|c| c.total > 0).map(|c| {
+                let used = c.total.saturating_sub(c.free) as f64 / c.total as f64;
+                div()
+                    .w(px(120.))
+                    .flex_none()
+                    .h(px(6.))
+                    .rounded(px(3.))
+                    .overflow_hidden()
+                    .bg(p.free)
+                    .child(div().h_full().w(relative(used.clamp(0., 1.) as f32)).bg(p.accent))
+            });
+            let synced = if l.syncing {
+                div().text_color(p.text).child("Syncing")
+            } else {
+                div().text_color(p.muted).child(match (l.last_synced, l.online) {
+                    (Some(at), true) => ago(now, at),
+                    (Some(at), false) => format!("Last seen {}", ago(now, at)),
+                    (None, _) => "—".to_owned(),
+                })
+            };
+            rows = rows.child(
+                h_flex()
+                    .id(("location", ix))
+                    .h(px(ROW_H))
+                    .gap(px(GAP))
+                    .items_center()
+                    .cursor_pointer()
+                    .when(ix > 0, |d| d.border_t_1().border_color(p.rule))
+                    .hover(move |s| s.bg(p.raised))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(Act::Inspect(Inspected::Location(identity.clone())));
+                    }))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(8.))
+                            .items_center()
+                            .child(div().truncate().text_color(p.text).child(l.name.clone()))
+                            .when(l.kind == Kind::Remote, |d| d.child(tag("Remote", Tone::Neutral, cx)))
+                            .when(l.kind == Kind::Network, |d| d.child(tag("Network", Tone::Neutral, cx)))
+                            .when(!l.online, |d| d.child(tag("Offline", Tone::Warning, cx))),
+                    )
+                    .children(bar)
+                    .child(
+                        div()
+                            .w(px(150.))
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .text_color(p.muted)
+                            .text_right()
+                            .child(figures),
+                    )
+                    .child(div().w(px(100.)).flex_none().whitespace_nowrap().text_right().child(synced)),
+            );
         }
         if locations.is_empty() {
-            lanes = lanes.child(
-                div()
-                    .py(px(16.))
-                    .text_color(p.muted)
-                    .child("No Locations are indexed yet. Add one in Settings."),
-            );
+            rows = rows.child(empty_state("No Locations are indexed yet. Add one in Settings.", cx));
         }
         panel(cx)
-            .flex_grow(9.)
-            .flex_basis(relative(0.))
+            .text_size(px(FS_BODY))
             .child(
                 h_flex()
                     .items_baseline()
                     .justify_between()
-                    .mb(px(14.))
-                    .child(div().font_weight(FontWeight::MEDIUM).child("Locations"))
-                    .child(caption(
-                        if capacity > 0 {
-                            format!("{} capacity · {} free", format::size(capacity), format::size(free))
-                        } else {
-                            String::new()
-                        },
-                        cx,
-                    )),
+                    .child(section_title("Locations", cx))
+                    .child(caption("Used · Last Synced", cx)),
             )
-            .child(legend)
-            .child(lanes)
+            .child(rows)
     }
 
-    /// One Location: who, a capacity bar split into Categories, Unindexed Space and Free, and
-    /// when it was last synced.
-    fn lane(&self, ix: usize, l: &Location, now: i64, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The eight Categories: swatch, name, bar, size, share of the Index.
+    fn categories_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let hatch = hatch(cx);
-        let total = l.lane.total().max(1) as f64;
-        let wide = |bytes: u64| bytes as f64 / total >= SLIVER;
-        let seg = |bytes: u64| div().h_full().min_w_0().flex_grow(bytes as f32).flex_basis(relative(0.));
-        let mut bar = h_flex()
-            .h(px(12.))
-            .gap(px(1.))
-            .rounded(px(3.))
-            .overflow_hidden()
-            .bg(p.free)
-            .when(!l.online, |d| d.opacity(0.6));
-        for category in Category::ALL.into_iter().filter(|&c| wide(l.lane.categories[c as usize])) {
-            let bytes = l.lane.categories[category as usize];
-            // Widths may be scaled to fit the used space; the tooltip says what the files hold.
-            let tip = format!("{} {}", category.name(), format::size(l.categories[category as usize]));
-            bar = bar.child(
-                seg(bytes)
-                    .id(("segment", ix * 8 + category as usize))
-                    .bg(p.category(category))
-                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx)),
-            );
-        }
-        if wide(l.lane.unindexed) {
-            let tip = format!("Unindexed Space {}", format::size(l.lane.unindexed));
-            bar = bar.child(
-                seg(l.lane.unindexed)
-                    .id(("unindexed", ix))
-                    .bg(p.surface)
-                    .child(div().size_full().bg(pattern_slash(hatch, 1., 6.)))
-                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx)),
-            );
-        }
-        if l.lane.free > 0 {
-            let tip = format!("Free {}", format::size(l.lane.free));
-            bar = bar.child(
-                seg(l.lane.free)
-                    .id(("free", ix))
-                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx)),
-            );
-        }
-        let strong = |text: String| div().text_color(p.text).child(text);
-        let figures = match l.capacity {
-            Some(c) => h_flex()
-                .child(strong(format::size(c.total.saturating_sub(c.free))))
-                .child(format!("\u{a0}used of {}", format::size(c.total)))
-                .into_any_element(),
-            // No capacity (a Remote whose server has no df): only what is indexed.
-            None => h_flex()
-                .child(strong(format::size(l.indexed)))
-                .child("\u{a0}indexed")
-                .into_any_element(),
-        };
-        let free = l
-            .capacity
-            .map(|c| format!("{} free", format::size(c.free)))
-            .or_else(|| l.no_capacity_note.map(str::to_owned));
-        // A lane of several Volumes says which, and how much of it each indexed.
-        let parts = (l.members.len() > 1).then(|| {
-            let mut members: Vec<_> = l.members.iter().collect();
-            members.sort_by_key(|m| m.mount.as_os_str().len());
-            let list = members
-                .iter()
-                .map(|m| format!("{} {}", m.mount.display(), format::size(m.indexed)))
-                .collect::<Vec<_>>()
-                .join(" · ");
-            div()
-                .id(("members", ix))
-                .mt(px(2.))
-                .text_size(px(12.))
-                .text_color(p.muted)
-                .truncate()
-                .child(list.clone())
-                .tooltip(move |window, cx| {
-                    Tooltip::new(format!("Volumes on this filesystem, with what each has indexed: {list}")).build(window, cx)
-                })
-        });
-
-        let who = v_flex()
-            .min_w_0()
-            .child(
+        let summary = self.shown.as_ref();
+        let whole = summary.map_or(0, |s| s.indexed());
+        let mut rows: Vec<(Category, Option<u64>)> = Category::ALL
+            .iter()
+            .map(|&c| (c, summary.map(|s| s.categories[c as usize].0)))
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1.unwrap_or(0)));
+        let mut list = v_flex().mt(px(GAP));
+        for (ix, (category, size)) in rows.into_iter().enumerate() {
+            let color = p.category(category);
+            let name = category.name();
+            let query = format!("type:{}", name.to_lowercase());
+            let share = size.filter(|_| whole > 0).map(|s| s as f64 / whole as f64);
+            list = list.child(
                 h_flex()
-                    .gap(px(8.))
+                    .id(("category", ix))
+                    .h(px(ROW_H))
+                    .gap(px(10.))
                     .items_center()
-                    .child(div().font_weight(FontWeight::MEDIUM).truncate().child(l.name.clone()))
-                    .when(l.kind == Kind::Remote, |d| d.child(tag("Remote", Tone::Neutral, cx)))
-                    .when(!l.online, |d| d.child(tag("Offline", Tone::Warning, cx)))
-                    .when(l.syncing.is_some(), |d| d.child(tag("Catch-up", Tone::Accent, cx))),
-            )
-            .child(div().text_size(px(13.)).text_color(p.muted).truncate().child(l.detail.clone()));
-
-        let (main, second) = match (l.last_synced, l.online) {
-            (Some(at), false) => (format!("Last seen {}", ago(now, at)), None),
-            (Some(at), true) => (ago(now, at), l.interval.clone()),
-            (None, _) => ("Never".to_owned(), Some("Waiting for the first sync".to_owned())),
-        };
-        let identities: Vec<String> = l.members.iter().map(|m| m.identity.clone()).collect();
-        let sync_pill = pill(("sync-now", ix), "Sync now")
-            .small()
-            .busy(l.syncing.is_some())
-            .disabled(self.shared.is_loading().then_some("Loading the saved Index"))
-            .build(cx, cx.listener(move |_, _, _, cx| cx.emit(Act::Sync(identities.clone()))));
-        let mut sync = v_flex().items_end().child(div().text_color(p.text).child(main));
-        sync = if let Some(read) = l.syncing {
-            sync.child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(p.accent)
-                    .child(format!("Syncing — {} Entries read", format::count(read))),
-            )
-            .child(div().mt(px(4.)).child(sync_pill))
-        } else if !l.online {
-            let forget: Vec<_> = l.members.iter().map(|m| (m.identity.clone(), m.mount.clone())).collect();
-            sync.child(
-                div()
-                    .id(("forget", ix))
-                    .text_size(px(13.))
-                    .text_color(p.accent)
                     .cursor_pointer()
-                    .hover(|s| s.underline())
-                    .tooltip(|window, cx| Tooltip::new("Remove this Offline Volume and its Entries from the Index").build(window, cx))
-                    .child("Forget")
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        for (identity, mount) in &forget {
-                            cx.emit(Act::Forget(identity.clone(), mount.clone()));
-                        }
-                    })),
-            )
-        } else {
-            sync.child(div().text_size(px(13.)).text_color(p.muted).child(second.unwrap_or_default()))
-                .child(div().mt(px(4.)).child(sync_pill))
-        };
-
-        h_flex()
-            .min_h(px(60.))
-            .py(px(8.))
-            .gap(px(24.))
-            .items_center()
-            .when(ix > 0, |d| d.border_t_1().border_color(p.rule))
-            .child(div().w(px(176.)).flex_none().child(who))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(bar)
+                    .when(ix > 0, |d| d.border_t_1().border_color(p.rule))
+                    .hover(move |s| s.bg(p.raised))
+                    .on_click(cx.listener(move |_, _, _, cx| Self::explore(Some(query.clone()), cx)))
+                    .child(swatch(color))
+                    .child(div().w(px(76.)).flex_none().truncate().text_color(p.text).child(name))
                     .child(
-                        h_flex()
-                            .mt(px(6.))
-                            .gap(px(8.))
-                            .justify_between()
-                            .text_size(px(13.))
-                            .text_color(p.muted)
-                            .whitespace_nowrap()
-                            .child(figures)
-                            .children(free),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(6.))
+                            .rounded(px(3.))
+                            .overflow_hidden()
+                            .bg(p.free)
+                            .child(div().h_full().w(relative(share.unwrap_or(0.) as f32)).bg(color)),
                     )
-                    .children(parts),
-            )
-            .child(div().w(px(216.)).flex_none().child(sync))
-    }
-
-    /// Trash, and the Index's Last Synced (the oldest Location's).
-    fn side_column(&self, locations: &[Location], oldest_ix: Option<usize>, now: i64, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let size = self.trash.size();
-        let nothing = size == Some(0);
-        let why = if !trash::CAN_EMPTY {
-            Some("The Trash cannot be emptied from here on this system")
-        } else if nothing {
-            Some("The Trash is empty")
-        } else {
-            None
-        };
-        let trash = panel(cx)
-            .child(div().font_weight(FontWeight::MEDIUM).child("Trash"))
-            .child(
-                div()
-                    .mt(px(12.))
-                    .text_size(px(32.))
-                    .line_height(px(38.))
-                    .child(size.map_or("…".to_owned(), format::size)),
-            )
-            .child(div().text_xs().text_color(p.muted).mb(px(16.)).child(match self.trash.items() {
-                Some(n) => format!(
-                    "{} item{}. Trashed bytes still occupy their Volume.",
-                    format::count(n),
-                    if n == 1 { "" } else { "s" }
-                ),
-                None => "Trashed bytes still occupy their Volume.".to_owned(),
-            }))
-            .child(
-                div().child(
-                    pill("empty-trash", "Empty Trash")
-                        .busy(self.trash.emptying())
-                        .disabled(if self.trash.emptying() { None } else { why })
-                        .build(cx, cx.listener(|this, _, window, cx| this.trash.ask_empty(window, cx))),
-                ),
-            );
-
-        // The Cleaner looks again only when the Index changed, so this follows every Clean.
-        let (reclaim, found, looking) = self.cleaner.update(cx, |c, cx| {
-            c.refresh(cx);
-            let (reclaim, found) = c.reclaimable();
-            (reclaim, found, c.looking())
-        });
-        let cleaner = panel(cx)
-            .child(div().font_weight(FontWeight::MEDIUM).child("Cleaner"))
-            .child(div().mt(px(12.)).text_size(px(32.)).line_height(px(38.)).child(if looking {
-                h_flex()
-                    .h(px(38.))
-                    .items_center()
-                    .child(Spinner::new().with_size(Size::Large).color(p.muted))
-                    .into_any_element()
-            } else {
-                format::size(reclaim).into_any_element()
-            }))
-            .child(div().text_xs().text_color(p.muted).mb(px(16.)).child(if looking {
-                "Looking for Cleanables…".to_owned()
-            } else {
-                format!(
-                    "Could be reclaimed from {} Cleanable{}.",
-                    format::count(found as u64),
-                    if found == 1 { "" } else { "s" }
-                )
-            }))
-            .child(div().child(pill("open-cleaner", "Open Cleaner").build(cx, cx.listener(|_, _, _, cx| cx.emit(Act::OpenCleaner)))));
-
-        let old = oldest_ix.map(|i| &locations[i]);
-        let (big, note) = match old {
-            Some(l) => match l.last_synced {
-                Some(at) => (
-                    ago(now, at),
-                    format!(
-                        "{}, {}: the oldest of {}.",
-                        l.name,
-                        Local
-                            .timestamp_opt(at, 0)
-                            .single()
-                            .map_or_else(String::new, |t| t.format("%Y-%m-%d %H:%M").to_string()),
-                        locations_phrase(locations)
+                    .child(
+                        div()
+                            .w(px(72.))
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .text_right()
+                            .text_color(p.text)
+                            .child(size.map_or("—".to_owned(), format::size)),
+                    )
+                    .child(
+                        div()
+                            .w(px(44.))
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .text_right()
+                            .text_color(p.muted)
+                            .child(share.map_or("—".to_owned(), |s| format!("{:.0}%", s * 100.))),
                     ),
-                ),
-                None => ("Not yet".to_owned(), format!("{} has not finished its first sync.", l.name)),
-            },
-            None => ("—".to_owned(), "No Locations yet.".to_owned()),
-        };
-        // Sync now of every online Volume (the Remotes have their own buttons on their rows).
-        let syncing = self.shared.is_syncing();
-        let loading = self.shared.is_loading();
-        let any_online = locations.iter().any(|l| l.online && l.kind != Kind::Remote);
-        let synced = panel(cx)
-            .flex_1()
-            .child(div().font_weight(FontWeight::MEDIUM).child("Index last synced"))
-            .child(div().mt(px(12.)).text_size(px(32.)).line_height(px(38.)).child(big))
-            .child(div().text_xs().text_color(p.muted).mb(px(16.)).child(note))
-            .child(
-                div().child(
-                    pill("sync-now", "Sync now")
-                        .busy(syncing)
-                        .disabled(if loading {
-                            Some("Loading the saved Index")
-                        } else {
-                            (!any_online).then_some("There is no Volume to sync")
-                        })
-                        .build(cx, cx.listener(|_, _, _, cx| cx.emit(Act::SyncAll))),
-                ),
             );
-        v_flex()
-            .flex_grow(3.)
-            .flex_basis(relative(0.))
-            // A long label must not widen the column (and squeeze the Locations beside it).
-            .min_w_0()
-            .overflow_hidden()
-            .gap(px(16.))
-            .child(trash)
-            .child(cleaner)
-            .child(synced)
-    }
-
-    /// The right-hand cell of a Largest files row: Move to Trash, or why it cannot be.
-    fn row_action(&self, ix: usize, id: EntryId, volume: &str, locations: &[Location], cx: &mut Context<Self>) -> AnyElement {
-        let p = palette(cx);
-        let location = locations.iter().find(|l| l.identity == volume);
-        let blocked = self.trash.blocker_of(&[id], &self.volumes);
-        match (location, blocked) {
-            (_, None) => pill(("move-to-trash", ix), "Move to Trash")
-                .small()
-                .build(cx, cx.listener(move |_, _, _, cx| cx.emit(Act::MoveToTrash(id))))
-                .into_any_element(),
-            (location, Some(reason)) => {
-                let label = match location {
-                    Some(l) if !l.online => "Offline",
-                    _ => "Read-only",
-                };
-                div()
-                    .id(("blocked", ix))
-                    .text_xs()
-                    .text_color(p.muted)
-                    .child(label)
-                    .tooltip(move |window, cx| Tooltip::new(reason.clone()).build(window, cx))
-                    .into_any_element()
-            }
         }
+        panel(cx)
+            .flex_grow(4.)
+            .flex_basis(relative(0.))
+            .text_size(px(FS_BODY))
+            .child(section_title("Categories", cx))
+            .child(list)
     }
 
-    /// A table of files: a Category dot, name over folder and Location, size, and a last cell.
-    fn file_table(
+    /// Up to `FILE_ROWS` files: Category swatch, name over folder and Location, then the size
+    /// (and when modified). A click shows the Entry in the Inspector.
+    fn file_rows(
         &self,
+        prefix: &'static str,
         rows: &[crate::dashboard_summary::FileRow],
         locations: &[Location],
-        third: &'static str,
-        last: impl Fn(usize, &crate::dashboard_summary::FileRow, &mut Context<Self>) -> AnyElement,
+        modified: bool,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Div {
         let p = palette(cx);
-        let cell = |w: f32| div().w(px(w)).flex_none().text_right().whitespace_nowrap();
-        let mut table = v_flex().child(
-            h_flex()
-                .pb(px(8.))
-                .text_xs()
-                .text_color(p.muted)
-                .child(div().flex_1().child("Name"))
-                .child(cell(76.).child("Size"))
-                .child(cell(132.).pl(px(12.)).child(third)),
-        );
-        for (ix, r) in rows.iter().enumerate() {
+        let mut list = v_flex().mt(px(GAP));
+        if rows.is_empty() {
+            return list.child(empty_state("Nothing yet.", cx));
+        }
+        for (ix, r) in rows.iter().take(FILE_ROWS).enumerate() {
+            let id = r.id;
             let place = locations
                 .iter()
                 .find(|l| l.identity == r.volume)
                 .map_or(String::new(), |l| l.name.clone());
             let folder = tilde(&r.folder);
-            table = table.child(
+            list = list.child(
                 h_flex()
-                    .h(px(54.))
+                    .id((prefix, ix))
+                    .h(px(ROW_H))
+                    .gap(px(10.))
                     .items_center()
-                    .border_t_1()
-                    .border_color(p.rule)
+                    .cursor_pointer()
+                    .when(ix > 0, |d| d.border_t_1().border_color(p.rule))
+                    .hover(move |s| s.bg(p.raised))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(Act::Inspect(Inspected::Entry(id)))))
+                    .child(swatch(p.category(r.category)))
                     .child(
-                        h_flex()
+                        v_flex()
                             .flex_1()
                             .min_w_0()
-                            .pr(px(16.))
-                            .gap(px(10.))
-                            .items_start()
-                            .child(swatch(p.category(r.category)).mt(px(6.)))
+                            .child(div().truncate().text_color(p.text).child(r.name.clone()))
                             .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(div().truncate().child(r.name.clone()))
-                                    .child(div().text_xs().text_color(p.muted).truncate().child(format!("{folder} · {place}"))),
+                                div()
+                                    .text_size(px(FS_SMALL))
+                                    .text_color(p.muted)
+                                    .truncate()
+                                    .child(format!("{folder} · {place}")),
                             ),
                     )
-                    .child(cell(76.).child(format::size(r.size)))
-                    .child(cell(132.).pl(px(12.)).flex().justify_end().child(last(ix, r, cx))),
+                    .child(
+                        v_flex()
+                            .flex_none()
+                            .items_end()
+                            .whitespace_nowrap()
+                            .child(div().text_color(p.text).child(format::size(r.size)))
+                            .when(modified, |d| {
+                                d.child(div().text_size(px(FS_SMALL)).text_color(p.muted).child(day(r.modified)))
+                            }),
+                    ),
             );
         }
-        table.into_any_element()
+        list
     }
 
     fn largest_panel(&self, locations: &[Location], cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
         let rows = self.shown.as_ref().map(|s| s.largest.clone()).unwrap_or_default();
-        let table = self.file_table(
-            &rows,
-            locations,
-            "",
-            |ix, r, cx| self.row_action(ix, r.id, &r.volume, locations, cx),
-            cx,
-        );
+        let list = self.file_rows("largest", &rows, locations, false, cx);
         panel(cx)
             .flex_grow(1.)
             .flex_basis(relative(0.))
+            .text_size(px(FS_BODY))
             .child(
                 h_flex()
                     .items_baseline()
                     .justify_between()
-                    .mb(px(14.))
-                    .child(div().font_weight(FontWeight::MEDIUM).child("Largest files"))
+                    .child(section_title("Largest files", cx))
                     .child(
-                        div()
-                            .id("over-1gb")
-                            .text_color(p.accent)
-                            .cursor_pointer()
-                            .hover(|s| s.underline())
-                            .child("All files over 1 GB")
-                            .on_click(cx.listener(|_, _, _, cx| Self::explore(Some("size:>1gb".into()), cx))),
+                        link("over-1gb", "View all", cx).on_click(cx.listener(|_, _, _, cx| Self::explore(Some("size:>1gb".into()), cx))),
                     ),
             )
-            .child(table)
+            .child(list)
+    }
+
+    /// The Largest Owners panel: the Owners with the largest Folder Size, kind swatch, name over
+    /// kind, size. A click shows the Owner's (largest) root in the Inspector. Nothing when the
+    /// Index has no Owner roots.
+    fn owners_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = palette(cx);
+        let rows = self.shown.as_ref().map(|s| s.owners.clone()).filter(|r| !r.is_empty())?;
+        let mut list = v_flex().mt(px(GAP));
+        for (ix, r) in rows.into_iter().take(FILE_ROWS).enumerate() {
+            let root = r.root;
+            list = list.child(
+                h_flex()
+                    .id(("owner", ix))
+                    .h(px(ROW_H))
+                    .gap(px(10.))
+                    .items_center()
+                    .cursor_pointer()
+                    .when(ix > 0, |d| d.border_t_1().border_color(p.rule))
+                    .hover(move |s| s.bg(p.raised))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(Act::Inspect(Inspected::Entry(root)))))
+                    .child(swatch(p.owner_kind(Some(r.kind))))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().truncate().text_color(p.text).child(r.name))
+                            .child(div().text_size(px(FS_SMALL)).text_color(p.muted).child(r.kind.name())),
+                    )
+                    .child(div().flex_none().whitespace_nowrap().text_color(p.text).child(format::size(r.size))),
+            );
+        }
+        Some(
+            panel(cx)
+                .text_size(px(FS_BODY))
+                .child(
+                    h_flex()
+                        .items_baseline()
+                        .justify_between()
+                        .child(section_title("Largest Owners", cx))
+                        .child(caption("Folder Size", cx)),
+                )
+                .child(list)
+                .into_any_element(),
+        )
     }
 
     fn recent_panel(&self, locations: &[Location], cx: &mut Context<Self>) -> impl IntoElement {
@@ -1100,18 +869,11 @@ impl DashboardPage {
         } else {
             self.recent_query.clone()
         };
-        let link = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .text_color(p.accent)
-                .cursor_pointer()
-                .hover(|s| s.underline())
-                .child(label)
-        };
+        let link = |id: &'static str, label: &'static str| crate::ui::link(id, label, &*cx);
         let meta = h_flex()
             .gap(px(6.))
             .min_w_0()
-            .text_xs()
+            .text_size(px(FS_SMALL))
             .text_color(p.muted)
             .child(div().truncate().child(described))
             .child("·")
@@ -1121,13 +883,13 @@ impl DashboardPage {
             let field = input.clone();
             v_flex()
                 .gap(px(8.))
-                .mb(px(14.))
+                .mt(px(GAP))
                 .child(
                     h_flex()
-                        .h(px(32.))
+                        .h(px(crate::theme::CONTROL_H_SMALL))
                         .px(px(14.))
                         .items_center()
-                        .rounded_full()
+                        .rounded(px(crate::theme::RADIUS_CONTROL))
                         .border_1()
                         .border_color(p.control)
                         .bg(p.ground)
@@ -1136,7 +898,7 @@ impl DashboardPage {
                 .child(
                     h_flex()
                         .gap(px(16.))
-                        .text_xs()
+                        .text_size(px(FS_SMALL))
                         .child(link("save-query", "Save").on_click(cx.listener(move |this, _, _, cx| {
                             let text = input.read(cx).value().to_string();
                             this.save_query(Some(text), cx);
@@ -1148,36 +910,30 @@ impl DashboardPage {
                         }))),
                 )
         });
-        let table = self.file_table(
-            &rows,
-            locations,
-            "Modified",
-            |_, r, _| div().text_color(p.muted).child(day(r.modified)).into_any_element(),
-            cx,
-        );
+        let list = self.file_rows("recent", &rows, locations, true, cx);
         panel(cx)
             .flex_grow(1.)
             .flex_basis(relative(0.))
+            .text_size(px(FS_BODY))
             .child(
                 h_flex()
                     .items_baseline()
                     .justify_between()
-                    .gap(px(12.))
-                    .mb(px(14.))
-                    .child(div().flex_none().font_weight(FontWeight::MEDIUM).child("Recently modified"))
+                    .gap(px(GAP))
+                    .child(section_title("Recently modified", cx).flex_none())
                     .child(meta),
             )
             .children(editor)
             .when_some(error, |d, e| {
                 d.child(
                     div()
-                        .mb(px(10.))
-                        .text_xs()
+                        .mt(px(GAP))
+                        .text_size(px(FS_SMALL))
                         .text_color(p.warning)
                         .child(format!("This Query cannot be used: {e}")),
                 )
             })
-            .child(table)
+            .child(list)
     }
 }
 
@@ -1228,5 +984,19 @@ mod bench {
             }
         })
         .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::finding_sentence;
+
+    #[::core::prelude::v1::test]
+    fn the_finding_line_states_the_administrator_share_only_when_there_is_one() {
+        assert_eq!(finding_sentence(2048, 3, 0), "2.00 KB can be cleaned up across 3 Cleanables.");
+        assert_eq!(
+            finding_sentence(4096, 1, 1024),
+            "4.00 KB can be cleaned up across 1 Cleanable; 1.00 KB of it needs administrator."
+        );
     }
 }

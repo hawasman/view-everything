@@ -3,9 +3,9 @@
 //! the saved Query. It ignores the Explorer's Query.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::{Duration, Instant};
-use ve_core::{Candidate, Capacity, Category, CategoryMap, EntryId, Index, Query};
+use ve_core::{Candidate, Category, CategoryMap, EntryId, Index, OwnerId, OwnerKind, Query};
 
 /// Rows in each of the Largest files and Recently modified tables.
 pub const LIST_LEN: usize = 6;
@@ -50,6 +50,8 @@ pub struct Summary {
     pub entries: u64,
     pub volumes: Vec<VolumeSummary>,
     pub largest: Vec<FileRow>,
+    /// The Owners with the largest Folder Size, largest first; empty without Owner roots.
+    pub owners: Vec<OwnerRow>,
     pub recent: Vec<FileRow>,
     pub took: Duration,
 }
@@ -58,17 +60,6 @@ impl Summary {
     /// On-disk Size of every file in the Index.
     pub fn indexed(&self) -> u64 {
         self.categories.iter().map(|c| c.0).sum()
-    }
-
-    /// Categories with their (On-disk Size, files), largest first, empty ones left out.
-    pub fn by_size(&self) -> Vec<(Category, u64, u64)> {
-        let mut rows: Vec<_> = Category::ALL
-            .iter()
-            .map(|&c| (c, self.categories[c as usize].0, self.categories[c as usize].1))
-            .filter(|r| r.2 > 0)
-            .collect();
-        rows.sort_by_key(|r| Reverse(r.1));
-        rows
     }
 
     pub fn volume(&self, identity: &str) -> Option<&VolumeSummary> {
@@ -221,10 +212,76 @@ fn summarize_with(
         categories: totals,
         entries: index.live_count() as u64,
         volumes,
+        owners: largest_owners(index, OWNER_LEN),
         largest: largest.into_sorted().into_iter().map(row).collect(),
         recent: recent_ids.into_iter().map(row).collect(),
         took: started.elapsed(),
     }
+}
+
+/// Owners kept for the Largest Owners panel, as many as the other lists.
+pub const OWNER_LEN: usize = LIST_LEN;
+
+/// One Owner in the Largest Owners panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnerRow {
+    pub name: String,
+    pub kind: OwnerKind,
+    /// Folder Size summed over the Owner's roots.
+    pub size: u64,
+    /// Its largest Owner root, which a click inspects.
+    pub root: EntryId,
+}
+
+/// The `n` Owners with the largest Folder Size, largest first. An Owner with several roots sums
+/// them. A root nested in another Owner's root counts toward both: each Owner's size is simply
+/// the Folder Size of its roots, so an enclosing Owner includes what the nested one holds.
+/// Hard links count once per root.
+fn largest_owners(index: &Index, n: usize) -> Vec<OwnerRow> {
+    /// What one Owner adds up to so far.
+    struct Tally {
+        size: u64,
+        largest_root: EntryId,
+        largest_root_size: u64,
+    }
+    let mut tallies: HashMap<OwnerId, Tally> = HashMap::new();
+    for (root, owner) in index.owner_roots() {
+        let mut seen_links = HashSet::new();
+        let mut total = 0u64;
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if index.is_dir(id) {
+                stack.extend(index.children(id));
+            } else if !index.is_hardlinked(id) || seen_links.insert(index.key(id)) {
+                total += index.on_disk(id);
+            }
+        }
+        let tally = tallies.entry(owner).or_insert(Tally {
+            size: 0,
+            largest_root: root,
+            largest_root_size: 0,
+        });
+        tally.size += total;
+        if total > tally.largest_root_size {
+            tally.largest_root = root;
+            tally.largest_root_size = total;
+        }
+    }
+    let mut rows: Vec<OwnerRow> = tallies
+        .into_iter()
+        .map(|(o, tally)| {
+            let owner = index.owner(o);
+            OwnerRow {
+                name: owner.name.clone(),
+                kind: owner.kind,
+                size: tally.size,
+                root: tally.largest_root,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.name.cmp(&b.name)));
+    rows.truncate(n);
+    rows
 }
 
 /// Whether the file `id` matches `query`; `scratch` is reused between calls.
@@ -240,53 +297,13 @@ fn matches(index: &Index, query: &Query, id: EntryId, scratch: &mut (String, Vec
         logical: index.logical(id),
         modified: index.modified(id),
         depth: if query.needs_depth() { index.depth(id) } else { 0 },
+        owner: if query.needs_owner() {
+            index.entry_owner(id).map(|o| (o.kind, o.name.as_str()))
+        } else {
+            None
+        },
         ..Candidate::default()
     })
-}
-
-/// A Location's bar: its Categories, the used space no Entry accounts for, and what is free.
-/// The parts add up to the capacity.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Lane {
-    pub categories: [u64; 8],
-    pub unindexed: u64,
-    pub free: u64,
-}
-
-impl Lane {
-    /// Splits a Volume of `capacity` given the On-disk Size of its files per Category. Without a
-    /// capacity (never synced) the bar is only the Categories. Free is always what the filesystem
-    /// reports.
-    pub fn new(mut categories: [u64; 8], capacity: Option<Capacity>) -> Lane {
-        let Some(capacity) = capacity else {
-            return Lane {
-                categories,
-                unindexed: 0,
-                free: 0,
-            };
-        };
-        let free = capacity.free.min(capacity.total);
-        let used = capacity.total - free;
-        let indexed: u64 = categories.iter().sum();
-        // More indexed than the filesystem uses (btrfs compression and shared extents count
-        // per file, a stale Index): scale the Categories into the used space.
-        if indexed > used {
-            for c in &mut categories {
-                *c = (*c as u128 * used as u128 / indexed as u128) as u64;
-            }
-        }
-        let indexed: u64 = categories.iter().sum();
-        // Whatever used space the Entries do not explain is Unindexed Space.
-        Lane {
-            categories,
-            unindexed: used - indexed,
-            free,
-        }
-    }
-
-    pub fn total(&self) -> u64 {
-        self.categories.iter().sum::<u64>() + self.unindexed + self.free
-    }
 }
 
 /// The filesystem a Volume identity belongs to. A btrfs subvolume or bind mount is the
@@ -321,15 +338,6 @@ pub fn ago(now: i64, at: i64) -> String {
         3600..86400 => format!("{} h ago", secs / 3600),
         86400..172800 => "1 day ago".to_owned(),
         _ => format!("{} days ago", secs / 86400),
-    }
-}
-
-/// "Every 15 min", "Every 2 h", or "Manual" for 0.
-pub fn every(minutes: u64) -> String {
-    match minutes {
-        0 => "Manual".to_owned(),
-        m if m % 60 == 0 => format!("Every {} h", m / 60),
-        m => format!("Every {m} min"),
     }
 }
 
@@ -397,7 +405,6 @@ mod tests {
         // one.txt and two.txt are one file: 50 bytes, once ("txt" is Document or Other).
         assert_eq!(s.indexed(), 1000 + 300 + 300 + 50);
         assert_eq!(s.entries, index().live_count() as u64);
-        assert_eq!(s.by_size()[0].0, Category::Video);
     }
 
     #[test]
@@ -446,28 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bar_adds_up_to_the_volume_capacity() {
-        let mut cats = [0u64; 8];
-        cats[0] = 300;
-        cats[1] = 100;
-        let lane = Lane::new(cats, Some(Capacity { total: 1000, free: 500 }));
-        assert_eq!((lane.unindexed, lane.free), (100, 500));
-        assert_eq!(lane.total(), 1000);
-        // Indexed more than used: no Unindexed Space, Categories scaled, free as reported.
-        let lane = Lane::new(cats, Some(Capacity { total: 1000, free: 700 }));
-        assert_eq!((lane.unindexed, lane.free), (0, 700));
-        assert_eq!(lane.categories.iter().sum::<u64>(), 300);
-        assert_eq!(lane.total(), 1000);
-        // Indexed more than the capacity: scaled to fit.
-        let lane = Lane::new(cats, Some(Capacity { total: 200, free: 0 }));
-        assert_eq!(lane.total(), 200);
-        assert_eq!(lane.free, 0);
-        // Never synced: just the Categories.
-        assert_eq!(Lane::new(cats, None).total(), 400);
-    }
-
-    #[test]
-    fn subvolumes_of_one_filesystem_group_and_count_its_capacity_once() {
+    fn subvolumes_of_one_filesystem_group_together() {
         let uuid = "d1894d9b-4d46-4135-b42b-f4e2f9062839";
         let ids = [
             format!("uuid:{uuid}"),
@@ -481,15 +467,6 @@ mod tests {
         assert_eq!(filesystem_of(ids[2]), format!("uuid:{uuid}"));
         assert_eq!(filesystem_of("dev:/dev/sda1@/mnt/x"), "dev:/dev/sda1@/mnt/x");
         assert_eq!(group_by_filesystem(&ids), vec![vec![0, 2, 3], vec![1], vec![4], vec![5]]);
-
-        // Three subvolumes of one 1000-byte filesystem, 700 used: 100 + 200 + 50 indexed.
-        let capacity = Capacity { total: 1000, free: 300 };
-        let mut sum = [0u64; 8];
-        for indexed in [100u64, 200, 50] {
-            sum[Category::Video as usize] += indexed;
-        }
-        let lane = Lane::new(sum, Some(capacity));
-        assert_eq!((lane.unindexed, lane.free, lane.total()), (350, 300, 1000));
     }
 
     /// A Remote reached through a stand-in ssh that runs the command locally appears in the
@@ -538,9 +515,42 @@ mod tests {
         assert_eq!(ago(1000 + 3 * 3600, 1000), "3 h ago");
         assert_eq!(ago(1000 + 86400, 1000), "1 day ago");
         assert_eq!(ago(1000 + 6 * 86400, 1000), "6 days ago");
-        assert_eq!(
-            (every(15), every(120), every(0)),
-            ("Every 15 min".into(), "Every 2 h".into(), "Manual".into())
-        );
+    }
+
+    #[test]
+    fn largest_owners_sum_roots_count_nested_twice_and_cut_at_n() {
+        use ve_core::Owner;
+        let mut index = Index::new();
+        let v = index.add_volume(std::path::Path::new("/v"), "ext4", "v", folder(), SyncState::Walk);
+        let root = index.volume(v).unwrap().root;
+        let game = Owner::new(OwnerKind::Game, "Game", "Steam");
+        let mut roots = Vec::new();
+        // One Owner in two folders: 100 + 200.
+        let (l1, l2) = (index.insert(root, "lib1", folder()), index.insert(root, "lib2", folder()));
+        index.insert(l1, "a.bin", file(100, 1));
+        index.insert(l2, "b.bin", file(200, 1));
+        roots.push((l1, game.clone()));
+        roots.push((l2, game));
+        // A Project holding 50 with a nested Program of 30: the Project counts both.
+        let p = index.insert(root, "proj", folder());
+        index.insert(p, "x.rs", file(50, 1));
+        let inner = index.insert(p, "inner", folder());
+        index.insert(inner, "y.rs", file(30, 1));
+        roots.push((p, Owner::new(OwnerKind::Project, "Proj", "Cargo.toml")));
+        roots.push((inner, Owner::new(OwnerKind::Program, "Inner", "pacman")));
+        for i in 0..12 {
+            let f = index.insert(root, &format!("o{i}"), folder());
+            index.insert(f, "f", file(i, 1));
+            roots.push((f, Owner::new(OwnerKind::Program, format!("O{i}"), "")));
+        }
+        index.set_owners(root, roots);
+        let rows = largest_owners(&index, 10);
+        assert_eq!(rows.len(), 10);
+        assert_eq!((rows[0].name.as_str(), rows[0].size, rows[0].kind), ("Game", 300, OwnerKind::Game));
+        // A click inspects the larger of its two roots.
+        assert_eq!(rows[0].root, l2);
+        assert_eq!((rows[1].name.as_str(), rows[1].size), ("Proj", 80));
+        assert_eq!((rows[2].name.as_str(), rows[2].size), ("Inner", 30));
+        assert!(rows.windows(2).all(|w| w[0].size >= w[1].size));
     }
 }

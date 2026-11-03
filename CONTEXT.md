@@ -67,7 +67,7 @@ Measurements recorded over time (performance, network), browsable by moment; a m
 _Avoid_: history, recording, log
 
 **Compare with**:
-The Explorer choice of a Snapshot date. The tree then gains a **Change** column: each folder's On-disk Size now minus its Size in the Snapshot, `new` for a folder the Snapshot lacked, and a muted `(removed)` row under the parent of a folder it had that is gone.
+The choice of a Snapshot date on the Timeline dock while on Browse. The tree then gains a **Change** column: each folder's On-disk Size now minus its Size in the Snapshot, `new` for a folder the Snapshot lacked, and a muted `(removed)` row under the parent of a folder it had that is gone. Back to Live ends it.
 
 ### Size
 
@@ -104,18 +104,48 @@ A Query naming Entries that the search for Duplicates treats as absent, because 
 _Avoid_: ignore list, duplicate filter
 
 **Owner**:
-The program, game, package or project that a folder belongs to, such as a Steam game, the operating system or a code project.
+The program, game, package or project that a folder belongs to, such as a Steam game, the operating system or a code project. An Owner is found at one folder, its Owner root, and every Entry below it has that Owner unless a nearer Owner root sits in between; an Entry has at most one Owner.
 _Avoid_: app, vendor, source
+
+**Owner kind**:
+Which sort of thing an Owner is: System (the operating system and what its package manager installed), Program (an application the user installed), Game (installed by a game launcher) or Project (a code project, recognised by its marker files). Entries under no Owner root have no Owner.
+_Avoid_: owner type, owner category
+
+**Owner root**:
+The folder where an Owner was found: the game's install folder, the application's folder or the folder holding a project's marker files.
+_Avoid_: owner folder, install dir
 
 ### Views
 
-**Dashboard**:
-The home view: a glance at the state of the Index, its Locations and their Last Synced.
-_Avoid_: home, overview, summary
+**Overview**:
+The home view: what is indexed, what can be cleaned up, what is in the Trash and when the Index was last synced, then the Locations, the Categories, the largest and the most recently modified files.
+_Avoid_: dashboard, home, summary
 
-**Explorer**:
-The view for digging into Entries: the tree and flat lists, the Treemap and the Category breakdown, all following the Query.
+**Browse**:
+The Files page for digging into Entries: the tree and flat lists, the Treemap and the Category breakdown, all following the Query. "Explorer" names the same page in older text.
 _Avoid_: browser, main view, file view
+
+**Rail**:
+The column of Modules and their pages at the left of the window, with the Work block (Tasks, Locations) and Settings at its foot.
+_Avoid_: sidebar, menu
+
+**Inspector**:
+The pane at the right that shows whatever is selected (an Entry, a Location, a Task, a group of Duplicates) with its facts and the actions it allows. It follows the selection; Esc clears it.
+_Avoid_: details pane, properties, selection panel
+
+**Timeline dock**:
+The strip at the foot of the window that holds the Moment and lets the user scrub each Module's Timeline or Snapshots.
+
+**Moment**:
+The one point in time the whole window shows: Live, or a chosen time. Each Module reads it its own way — Files shows the nearest Snapshot, Performance and Network the sample taken then.
+_Avoid_: date, time cursor, position
+
+**Launcher**:
+The window the global hotkey opens anywhere on the desktop: a single line that finds Entries, installed apps and app actions by name, keyboard only. Not the Query box, which is the Files Module's search.
+_Avoid_: search (for this), spotlight, palette
+
+**Work block**:
+The foot of the rail, one button: running Tasks with the first one's progress, and the Locations' state. It opens the Work page: every Task and every Location, each opening in the Inspector.
 
 **Query**:
 The search expression that selects which Entries count. Every panel in the Explorer (tree, flat list, Treemap, Category breakdown) shows only matching Entries; an empty Query matches everything.
@@ -167,5 +197,6 @@ _Avoid_: delete, purge, wipe
 **Admin only**:
 A Cleanable the user does not own, or that holds something they do not own. Clean never touches it; it is listed apart with the exact command that removes it, and removed only by a separate admin step that shows that command first and runs it elevated.
 
-**Show in Explorer**:
-The Cleaner's action on a Cleanable: opens the Explorer with a Query scoped to its folder.
+**Show in Browse**:
+Opens Browse with the Query scoped to a folder. From the Cleaner, the Cleanable's folder; from the Inspector, the folder holding the Entry (or a group's kept copy), which is then selected among its siblings.
+_Avoid_: Show in Explorer

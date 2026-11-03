@@ -1,11 +1,9 @@
-//! The Duplicates panel: Duplicates grouped by content, largest wasted space first, with the
-//! copy to keep chosen per group and the rest sent to the Trash through its confirmation.
+//! The Duplicates list: Duplicates grouped by content, largest wasted space first, one row per
+//! group. A click on a group opens its copies in the Inspector, where the copy to keep is chosen
+//! and the rest go to the Trash through its confirmation.
 
-use crate::engine::{Shared, refresh_duplicates};
 use crate::format;
-use crate::theme::palette;
-use crate::trash::Trash;
-use crate::ui::{caption, pill, task_progress};
+use crate::theme::{FS_SMALL, palette};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Sizable as _, Size};
 use gpui_kit::component::{h_flex, v_flex};
@@ -16,58 +14,81 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use ve_core::EntryId;
-use ve_scan::VolumeInfo;
+use ve_engine::{Shared, refresh_duplicates, start_hashing};
 
-/// Height of every row of the list, a group's heading or one copy: the list is virtualised, so
-/// only the rows in view are built however many groups and copies there are.
-const ROW_HEIGHT: f32 = 34.;
+/// Height of every group row: the list is virtualised, so only the rows in view are built
+/// however many groups there are.
+const ROW_HEIGHT: f32 = 52.;
+
+/// A click on a group: inspect it, by its first copy.
+pub struct InspectGroup(pub EntryId);
+
+impl EventEmitter<InspectGroup> for DuplicatesPanel {}
+
+/// One group as the Inspector draws it.
+pub struct GroupView {
+    /// Size of each copy.
+    pub size: u64,
+    pub copies: Vec<EntryId>,
+    pub kept: EntryId,
+}
+
+/// Space taken by every copy but one.
+fn wasted(size: u64, copies: usize) -> u64 {
+    size * (copies as u64).saturating_sub(1)
+}
+
+impl GroupView {
+    pub fn wasted(&self) -> u64 {
+        wasted(self.size, self.copies.len())
+    }
+
+    /// Every copy but the one kept.
+    pub fn others(&self) -> Vec<EntryId> {
+        self.copies.iter().copied().filter(|&id| id != self.kept).collect()
+    }
+}
 
 pub struct DuplicatesPanel {
     shared: Arc<Shared>,
-    trash: Trash,
-    volumes: Vec<VolumeInfo>,
     /// The copy to keep per group, by the group's first copy; unset means that first copy.
     keep: HashMap<EntryId, EntryId>,
-    /// The groups and rows drawn, rebuilt when a search finishes or the Index changes.
+    /// The groups drawn, rebuilt when a search finishes or the Index changes.
     shown: Vec<Shown>,
-    rows: Vec<Row>,
-    /// (search version, Index generation) `shown` was built from.
+    /// (search version, Index generation, View) `shown` was built from.
     built_from: Option<(u64, u64, Option<u64>)>,
+    /// The group the Inspector shows, by its first copy; its row is highlighted.
+    pub selected: Option<EntryId>,
+    scroll: UniformListScrollHandle,
 }
 
 impl DuplicatesPanel {
-    pub fn new(shared: Arc<Shared>, trash: Trash, volumes: Vec<VolumeInfo>) -> Self {
+    pub fn new(shared: Arc<Shared>) -> Self {
         Self {
             shared,
-            trash,
-            volumes,
             keep: HashMap::new(),
             shown: Vec::new(),
-            rows: Vec::new(),
             built_from: None,
+            selected: None,
+            scroll: UniformListScrollHandle::new(),
         }
     }
 
-    pub fn set_volumes(&mut self, volumes: Vec<VolumeInfo>, cx: &mut Context<Self>) {
-        self.volumes = volumes;
-        cx.notify();
-    }
-
-    /// Copies trashed since the search are already gone from the Index: drop them.
+    /// Copies trashed since the search are already gone from the Index: drop them. The groups
+    /// are copied out only when the search, the Index or the View moved on.
     fn rebuild(&mut self) {
-        let (groups, version) = {
-            let state = self.shared.duplicates.lock();
-            (state.groups.clone(), state.version)
-        };
+        let version = self.shared.duplicates.lock().version;
         let view = self.shared.view.lock().clone();
-        let index = self.shared.index.read();
-        let built = (version, index.generation(), view.as_ref().map(|v| v.id));
+        let generation = self.shared.index.read().generation();
+        let built = (version, generation, view.as_ref().map(|v| v.id));
         if self.built_from == Some(built) {
             return;
         }
         self.built_from = Some(built);
-        // The panel follows the Query: a group is shown when any copy counts under it, and then
-        // lists every copy.
+        let groups = self.shared.duplicates.lock().groups.clone();
+        let index = self.shared.index.read();
+        // The list follows the Query: a group is shown when any copy counts under it, and then
+        // holds every copy.
         let follows = |ids: &[EntryId]| view.as_ref().is_none_or(|v| ids.iter().any(|&id| v.filter.is_counted(id)));
         self.shown = groups
             .iter()
@@ -78,69 +99,63 @@ impl DuplicatesPanel {
             .filter(|g| g.copies.len() > 1 && follows(&g.copies))
             .collect();
         self.shown.sort_by_key(|g| std::cmp::Reverse(g.wasted()));
-        self.rows.clear();
-        for (gi, group) in self.shown.iter().enumerate() {
-            self.rows.push(Row::Heading(gi));
-            self.rows.extend((0..group.copies.len()).map(|ri| Row::Copy(gi, ri)));
-        }
+    }
+
+    /// The group whose first copy is `first`, if it is still shown.
+    pub fn group(&mut self, first: EntryId) -> Option<GroupView> {
+        self.rebuild();
+        let group = self.shown.iter().find(|g| g.copies[0] == first)?;
+        Some(GroupView {
+            size: group.size,
+            copies: group.copies.clone(),
+            kept: self.kept(group),
+        })
+    }
+
+    /// Keeps `id` of the group whose first copy is `first`.
+    pub fn set_keep(&mut self, first: EntryId, id: EntryId) {
+        self.keep.insert(first, id);
     }
 
     fn row(&self, row: usize, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
-        let (muted, rule, accent) = (p.muted, p.rule, p.accent);
-        match self.rows[row] {
-            Row::Heading(gi) => {
-                let group = &self.shown[gi];
-                let kept = self.kept(group);
-                let others: Vec<EntryId> = group.copies.iter().copied().filter(|&id| id != kept).collect();
-                h_flex()
-                    .h(px(ROW_HEIGHT))
+        let group = &self.shown[row];
+        let first = group.copies[0];
+        let name = self.shared.index.read().display_name(first).to_owned();
+        let selected = self.selected == Some(first);
+        h_flex()
+            .w_full()
+            .id(("group", row))
+            .h(px(ROW_HEIGHT))
+            .flex_none()
+            .px(px(8.))
+            .gap(px(12.))
+            .items_center()
+            .border_b_1()
+            .border_color(p.rule)
+            .cursor_pointer()
+            .when(selected, |d| d.bg(p.active))
+            .when(!selected, |d| d.hover(move |s| s.bg(p.raised)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.selected = Some(first);
+                cx.emit(InspectGroup(first));
+                cx.notify();
+            }))
+            .child(v_flex().flex_1().min_w_0().child(div().truncate().child(name)).child(
+                div().text_size(px(FS_SMALL)).text_color(p.muted).truncate().child(format!(
+                    "{} copies × {}",
+                    group.copies.len(),
+                    format::size(group.size)
+                )),
+            ))
+            .child(
+                v_flex()
                     .flex_none()
-                    .gap(px(12.))
-                    .items_center()
-                    .border_t_1()
-                    .border_color(rule)
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(format!("{} × {}", group.copies.len(), format::size(group.size)))
-                            .font_weight(FontWeight::MEDIUM),
-                    )
-                    .child(caption(format!("{} wasted", format::size(group.wasted())), cx))
-                    .child(pill(("trash-others", gi), "Trash others").small().build(
-                        cx,
-                        cx.listener(move |this, _, window, cx| this.trash.ask_trash(&others, &this.volumes, window, cx)),
-                    ))
-                    .into_any_element()
-            }
-            Row::Copy(gi, ri) => {
-                let group = &self.shown[gi];
-                let first = group.copies[0];
-                let kept = self.kept(group);
-                let id = group.copies[ri];
-                let path = self.shared.index.read().path(id).display().to_string();
-                h_flex()
-                    .id(("copy", gi << 32 | ri))
-                    .h(px(ROW_HEIGHT))
-                    .flex_none()
-                    .gap(px(8.))
-                    .items_center()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.keep.insert(first, id);
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(if id == kept { accent } else { muted })
-                            .child(if id == kept { "●" } else { "○" }),
-                    )
-                    .child(div().flex_1().min_w_0().truncate().child(path))
-                    .when(id == kept, |d| d.child(caption("keep", cx)))
-                    .into_any_element()
-            }
-        }
+                    .items_end()
+                    .child(format::size(group.wasted()))
+                    .child(div().text_size(px(FS_SMALL)).text_color(p.muted).child("wasted")),
+            )
+            .into_any_element()
     }
 
     /// The copy to keep in `group`.
@@ -158,15 +173,44 @@ struct Shown {
 
 impl Shown {
     fn wasted(&self) -> u64 {
-        self.size * (self.copies.len() as u64 - 1)
+        wasted(self.size, self.copies.len())
     }
 }
 
-/// A row of the list: a group's heading, or one of its copies.
-#[derive(Clone, Copy)]
-enum Row {
-    Heading(usize),
-    Copy(usize, usize),
+impl DuplicatesPanel {
+    /// The page's facts line ("12 groups · 3 GB wasted"), and whether hashing runs. Brings the
+    /// groups up to date first.
+    pub fn facts(&mut self) -> (String, bool) {
+        refresh_duplicates(&self.shared);
+        self.rebuild();
+        if self.shared.hashing_now() {
+            return ("Looking for Duplicates…".to_owned(), true);
+        }
+        let skipped = self.shared.duplicates.lock().skipped;
+        let wasted: u64 = self.shown.iter().map(Shown::wasted).sum();
+        let copies: usize = self.shown.iter().map(|g| g.copies.len()).sum();
+        let groups = self.shown.len();
+        let mut line = format!(
+            "{} group{} · {} copies · {} wasted",
+            format::count(groups as u64),
+            if groups == 1 { "" } else { "s" },
+            format::count(copies as u64),
+            format::size(wasted)
+        );
+        if skipped > 0 {
+            line += &format!(
+                " · {} file{} skipped by Duplicate Exclusions",
+                format::count(skipped),
+                if skipped == 1 { "" } else { "s" }
+            );
+        }
+        (line, false)
+    }
+
+    /// Starts the search again.
+    pub fn rescan(&self) {
+        start_hashing(&self.shared);
+    }
 }
 
 impl Render for DuplicatesPanel {
@@ -176,10 +220,8 @@ impl Render for DuplicatesPanel {
         self.rebuild();
         let muted = palette(cx).muted;
         let hashing = self.shared.hashing_now();
-        let skipped = self.shared.duplicates.lock().skipped;
-        let wasted: u64 = self.shown.iter().map(Shown::wasted).sum();
         let progress = &self.shared.hash_progress;
-        let status = if hashing {
+        let status = hashing.then(|| {
             let (done, total) = (progress.done.load(Ordering::Relaxed), progress.total.load(Ordering::Relaxed));
             if total == 0 {
                 h_flex()
@@ -194,61 +236,31 @@ impl Render for DuplicatesPanel {
                 } else {
                     "file starts and ends compared"
                 };
-                task_progress("dupes-progress", done, Some(total), what, cx).into_any_element()
+                crate::ui::task_progress("dupes-progress", done, Some(total), what, cx).into_any_element()
             }
-        } else {
-            let mut line = format!(
-                "{} groups · {} wasted",
-                format::count(self.shown.len() as u64),
-                format::size(wasted)
-            );
-            if skipped > 0 {
-                line += &format!(
-                    " · {} file{} skipped by Duplicate Exclusions",
-                    format::count(skipped),
-                    if skipped == 1 { "" } else { "s" }
-                );
-            }
-            line.into_any_element()
-        };
+        });
         v_flex()
             .id("duplicates")
             .size_full()
-            .px(px(8.))
-            .child(
-                h_flex()
-                    .flex_none()
-                    .gap(px(12.))
-                    .items_center()
-                    .pb(px(8.))
-                    .child(div().flex_1().text_color(muted).child(status))
-                    .child(
-                        pill("dupes-rescan", "Rescan")
-                            .small()
-                            .busy(hashing)
-                            .disabled(hashing.then_some("Hashing is running"))
-                            .build(
-                                cx,
-                                cx.listener(|this, _, _, cx| {
-                                    crate::engine::start_hashing(&this.shared);
-                                    cx.notify();
-                                }),
-                            ),
-                    ),
-            )
-            .child(if self.shown.is_empty() && !hashing {
+            .children(status.map(|s| div().flex_none().pb(px(8.)).text_color(muted).child(s)))
+            .child(if self.shown.is_empty() {
                 div()
                     .text_color(muted)
-                    .child("No Duplicates among local files of 1 MB or more.")
+                    .child(if hashing {
+                        "No Duplicates found yet."
+                    } else {
+                        "No Duplicates among local files of 1 MB or more."
+                    })
                     .into_any_element()
             } else {
-                uniform_list(
-                    "duplicates-list",
-                    self.rows.len(),
-                    cx.processor(|this, range: Range<usize>, _, cx| range.map(|row| this.row(row, cx)).collect::<Vec<_>>()),
+                crate::ui::scrolling_list(
+                    uniform_list(
+                        "duplicates-list",
+                        self.shown.len(),
+                        cx.processor(|this, range: Range<usize>, _, cx| range.map(|row| this.row(row, cx)).collect::<Vec<_>>()),
+                    ),
+                    &self.scroll,
                 )
-                .flex_1()
-                .min_h_0()
                 .into_any_element()
             })
     }

@@ -10,6 +10,8 @@ mod column;
 pub mod export;
 mod filter;
 mod index;
+pub mod owner;
+pub mod owners;
 pub mod paths;
 pub mod query;
 pub mod snapshot;
@@ -21,4 +23,5 @@ pub use index::{
     AzureRemote, Capacity, Children, EntryId, EntryMeta, FtpRemote, FtpTls, Index, MANUAL_REFRESH, Remote, S3Remote, SshRemote, SyncState,
     Volume, VolumeId, WebdavRemote,
 };
+pub use owner::{Owner, OwnerId, OwnerKind};
 pub use query::{Candidate, Query, QueryContext, QueryError};

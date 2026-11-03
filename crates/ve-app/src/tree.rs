@@ -1,11 +1,9 @@
 //! The Explorer's tree: folders that expand on demand, each level sorted by Filtered Size.
 
-use crate::engine::Shared;
 use crate::format;
 use crate::selection::Selection;
-use crate::theme::palette;
+use crate::theme::{FS_BODY, FS_SMALL, palette};
 use crate::ui::swatch;
-use crate::view::{self, Focus, View};
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::{Icon, IconName, h_flex};
@@ -15,6 +13,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use ve_core::snapshot::{Change, Comparison, Removed};
 use ve_core::{Category, CategoryMap, EntryId, Index};
+use ve_engine::Shared;
+use ve_engine::view::{self, Focus, View};
 
 /// Rows kept in `TreeList::cells` before it starts over.
 const CACHED_ROWS: usize = 512;
@@ -403,7 +403,7 @@ impl TableDelegate for TreeList {
         let text = crate::theme::palette(cx).text;
         div()
             .size_full()
-            .text_size(px(12.))
+            .text_size(px(FS_SMALL))
             .when(
                 col_ix
                     == if self.sort.change {
@@ -528,7 +528,7 @@ impl TableDelegate for TreeList {
             .size_full()
             .overflow_hidden()
             .whitespace_nowrap()
-            .text_size(px(13.))
+            .text_size(px(FS_BODY))
             .when(root, |d| d.font_weight(FontWeight::MEDIUM));
         if col == 3 {
             return cell

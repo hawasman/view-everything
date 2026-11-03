@@ -15,12 +15,16 @@ Usage:
   ve export [OPTIONS] [--] [QUERY]... CSV of a Query's results (everything without one; --json for JSON)
 
 Options:
-  --csv           CSV output (path, name, Logical Size, On-disk Size, modified, Category)
+  --csv           CSV output (path, name, Logical Size, On-disk Size, modified, Category, Owner, Owner kind)
   --json          JSON array output
   --path <PATH>   Only Entries under PATH
   --index <FILE>  Read this saved Index instead of the app's
   -n <N>          top/du: how many rows (default 20, 0 for all)
   --files         top/du: largest files instead of folders
+
+Queries use the app's Query language: text, ext:, type:, size:, dm:, since:7d, kind:folder,
+at:/path, parent:, owner:, ... (see docs/guide/query-language.md). is:offline is refused, and
+dupe:, is:duplicate and is:cleanable find nothing here: the CLI reads only the Index.
 
 Exit codes: 0 success, 1 no match, 2 error. Last Synced is reported on stderr.";
 
@@ -173,8 +177,19 @@ fn run(args: &Args, out: &mut impl Write, err: &mut impl Write) -> Result<usize,
         "" => None,
         text => Some(Query::parse(text, &context).map_err(|e| Failure::Message(format!("bad Query: {e}")))?),
     };
+    if query.as_ref().is_some_and(Query::needs_offline) {
+        return Err(Failure::Message(
+            "bad Query: is:offline needs the app; the CLI does not know which Volumes are mounted".into(),
+        ));
+    }
     if query.as_ref().is_some_and(Query::needs_duplicates) {
-        writeln!(err, "ve: dupe: finds nothing here; the CLI does not read the app's hashes")?;
+        writeln!(
+            err,
+            "ve: dupe: and is:duplicate find nothing here; the CLI does not read the app's hashes"
+        )?;
+    }
+    if query.as_ref().is_some_and(Query::needs_cleanables) {
+        writeln!(err, "ve: is:cleanable finds nothing here; the CLI does not run the Cleaner")?;
     }
     let filter = Filter::compute(&index, query.as_ref());
     let scope = scope(&index, args.path.as_deref())?;
@@ -216,6 +231,7 @@ fn write_entries(
                 .map(|&id| {
                     let totals = filter.totals(index, id);
                     let name = index.name(id);
+                    let owner = index.entry_owner(id);
                     serde_json::json!({
                         "path": index.path(id).to_string_lossy(),
                         "name": name,
@@ -224,6 +240,8 @@ fn write_entries(
                         "on_disk_size": totals.on_disk,
                         "modified_ns": index.modified(id),
                         "category": (!index.is_dir(id)).then(|| categories.of_name(name).name()),
+                        "owner": owner.map(|o| o.name.as_str()),
+                        "owner_kind": owner.map(|o| o.kind.name()),
                     })
                 })
                 .collect();
@@ -376,7 +394,7 @@ mod tests {
         let index = fixture(dir.path());
         let (_, csv, _) = run_line("find --csv =evil*", &index);
         assert!(
-            csv.starts_with("path,name,Logical Size,On-disk Size,modified,Category\r\n"),
+            csv.starts_with("path,name,Logical Size,On-disk Size,modified,Category,Owner,Owner kind\r\n"),
             "{csv}"
         );
         assert!(

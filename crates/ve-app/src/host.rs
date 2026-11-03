@@ -2,7 +2,6 @@
 //! another: the window can close while indexing, Live updates and Tasks go on, and a window
 //! opened later binds to the same Engine. The Engine itself knows nothing of GPUI.
 
-use crate::engine::{Engine, Repaint};
 use crate::settings::Settings;
 use crate::tray::{Tray, TrayAction, TrayState};
 use async_channel::{Receiver, Sender};
@@ -11,6 +10,7 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
 use ve_core::CategoryMap;
+use ve_engine::{Config, Engine, Repaint};
 use ve_scan::VolumeInfo;
 
 /// How often the tray menu catches up with the running Tasks.
@@ -71,15 +71,16 @@ impl Host {
         };
         let indexed: Vec<VolumeInfo> = volumes.iter().filter(|v| settings.is_indexed(v)).cloned().collect();
         let paused = login && cfg!(target_os = "linux") && settings.live_helper;
-        let engine = Engine::start(
-            repaint.clone(),
-            volumes.clone(),
-            indexed.clone(),
-            settings.remotes.clone(),
-            settings.intervals(&indexed),
-            categories.clone(),
-            settings.live_helper && !paused,
-        );
+        let config = Config {
+            index_path: ve_core::paths::index_path(),
+            mounted: volumes.clone(),
+            volumes: indexed.clone(),
+            remotes: settings.remotes.clone(),
+            intervals: settings.intervals(&indexed),
+            categories: categories.clone(),
+            live_helper: settings.live_helper && !paused,
+        };
+        let engine = Engine::start(config, repaint.clone());
         engine.set_duplicate_exclusions(settings.duplicate_exclusions.clone());
         engine.set_remote_names(&settings.remote_names);
         let engine = Arc::new(engine);

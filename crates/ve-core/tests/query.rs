@@ -519,6 +519,148 @@ fn dupe_matches_files_the_context_lists_as_having_a_duplicate() {
 }
 
 #[test]
+fn owner_and_ownerkind_follow_the_nearest_owner_root_for_files_and_folders() {
+    use std::path::Path;
+    use ve_core::{EntryMeta, Filter, Index, Owner, OwnerKind, SyncState};
+    let dir = EntryMeta {
+        is_dir: true,
+        ..EntryMeta::default()
+    };
+    let mut index = Index::new();
+    let vol = index.add_volume(Path::new("/m/loc"), "ext4", "loc", dir, SyncState::Walk);
+    let root = index.volume(vol).unwrap().root;
+    let game = index.insert(root, "System Shock", dir);
+    let save = index.insert(game, "save.dat", EntryMeta::default());
+    let mods = index.insert(game, "mods", dir);
+    let mod_src = index.insert(mods, "main.rs", EntryMeta::default());
+    let loose = index.insert(root, "loose.txt", EntryMeta::default());
+    index.set_owners(
+        root,
+        vec![
+            (game, Owner::new(OwnerKind::Game, "System Shock", "Steam")),
+            (mods, Owner::new(OwnerKind::Project, "mods", "Cargo.toml")),
+        ],
+    );
+    let all = [root, game, save, mods, mod_src, loose];
+    let matched = |q: &str| {
+        let query = Query::parse(q, &context()).unwrap();
+        let filter = Filter::compute(&index, Some(&query));
+        all.map(|id| filter.is_matched(id))
+    };
+    // Name substring, ignoring case; folders match too; the nearer root wins.
+    assert_eq!(matched("owner:shock"), [false, true, true, false, false, false]);
+    assert_eq!(matched("owner:\"system shock\""), [false, true, true, false, false, false]);
+    assert_eq!(matched("owner:mods"), [false, false, false, true, true, false]);
+    // The kind is a separate key, so a game called "System" is not the System kind.
+    assert_eq!(matched("ownerkind:system"), [false, false, false, false, false, false]);
+    assert_eq!(matched("ownerkind:game"), [false, true, true, false, false, false]);
+    assert_eq!(matched("ownerkind:Project"), [false, false, false, true, true, false]);
+    assert_eq!(matched("ownerkind:none"), [true, false, false, false, false, true]);
+    assert_eq!(matched("!ownerkind:none"), [false, true, true, true, true, false]);
+    assert!(Query::parse("owner:", &context()).is_err());
+    assert!(Query::parse("ownerkind:package", &context()).is_err());
+}
+
+#[test]
+fn owner_facets_compose_with_text_other_facets_or_and_not() {
+    use std::path::Path;
+    use ve_core::{EntryMeta, Filter, Index, Owner, OwnerKind, SyncState};
+    let dir = EntryMeta {
+        is_dir: true,
+        ..EntryMeta::default()
+    };
+    let sized = |bytes| EntryMeta {
+        logical: bytes,
+        on_disk: bytes,
+        ..EntryMeta::default()
+    };
+    let mut index = Index::new();
+    let vol = index.add_volume(Path::new("/m/loc"), "ext4", "loc", dir, SyncState::Walk);
+    let root = index.volume(vol).unwrap().root;
+    let game = index.insert(root, "Shock", dir);
+    let save = index.insert(game, "save.dat", sized(5_000_000));
+    let cfg = index.insert(game, "config.ini", sized(10));
+    let proj = index.insert(root, "proj", dir);
+    let src = index.insert(proj, "main.rs", sized(10));
+    let loose = index.insert(root, "save.dat", sized(5_000_000));
+    index.set_owners(
+        root,
+        vec![
+            (game, Owner::new(OwnerKind::Game, "Shock", "Steam")),
+            (proj, Owner::new(OwnerKind::Project, "proj", "Cargo.toml")),
+        ],
+    );
+    let files = [save, cfg, src, loose];
+    let matched = |q: &str| {
+        let query = Query::parse(q, &context()).unwrap();
+        let filter = Filter::compute(&index, Some(&query));
+        files.map(|id| filter.is_matched(id))
+    };
+    // With free text, ext: and size:, every term must hold.
+    assert_eq!(matched("ownerkind:game save"), [true, false, false, false]);
+    assert_eq!(matched("owner:shock ext:ini"), [false, true, false, false]);
+    assert_eq!(matched("size:>1mb ownerkind:none"), [false, false, false, true]);
+    // Either side of `|`, and negated with `!`.
+    assert_eq!(matched("ownerkind:project | ext:ini"), [false, true, true, false]);
+    assert_eq!(matched("save.dat !owner:shock"), [false, false, false, true]);
+}
+
+#[test]
+fn owner_facets_compose_with_kind_at_and_since() {
+    use std::path::Path;
+    use ve_core::{EntryMeta, Filter, Index, Owner, OwnerKind, SyncState};
+    let dir = EntryMeta {
+        is_dir: true,
+        ..EntryMeta::default()
+    };
+    // Now is 2025-03-14 12:00.
+    let modified = |d| EntryMeta {
+        modified: Local.with_ymd_and_hms(2025, 3, d, 0, 0, 0).unwrap().timestamp_nanos_opt().unwrap(),
+        ..EntryMeta::default()
+    };
+    let mut index = Index::new();
+    let vol = index.add_volume(Path::new("/m/loc"), "ext4", "loc", dir, SyncState::Walk);
+    let root = index.volume(vol).unwrap().root;
+    let game = index.insert(root, "Shock", dir);
+    let saves = index.insert(game, "saves", dir);
+    let fresh = index.insert(saves, "new.sav", modified(13));
+    let old = index.insert(game, "old.sav", modified(1));
+    let proj = index.insert(root, "proj", dir);
+    let src = index.insert(proj, "main.rs", modified(13));
+    let loose = index.insert(root, "loose.txt", modified(13));
+    index.set_owners(
+        root,
+        vec![
+            (game, Owner::new(OwnerKind::Game, "Shock", "Steam")),
+            (proj, Owner::new(OwnerKind::Project, "proj", "Cargo.toml")),
+        ],
+    );
+    let all = [game, saves, fresh, old, proj, src, loose];
+    let matched = |q: &str| {
+        let query = Query::parse(q, &context()).unwrap();
+        let filter = Filter::compute(&index, Some(&query));
+        all.map(|id| filter.is_matched(id))
+    };
+    assert_eq!(matched("owner:shock kind:folder"), [true, true, false, false, false, false, false]);
+    assert_eq!(matched("ownerkind:game kind:file"), [false, false, true, true, false, false, false]);
+    assert_eq!(matched("ownerkind:game since:7d"), [false, false, true, false, false, false, false]);
+    assert_eq!(matched("since:7d !ownerkind:game"), [false, false, false, false, false, true, true]);
+    assert_eq!(
+        matched("at:/m/loc/Shock/saves owner:shock"),
+        [false, true, true, false, false, false, false]
+    );
+    assert_eq!(
+        matched("at:/m/loc ownerkind:none kind:file"),
+        [false, false, false, false, false, false, true]
+    );
+    // `|` binds tighter than space: either Owner, and a folder.
+    assert_eq!(
+        matched("owner:proj | ownerkind:game kind:folder"),
+        [true, true, false, false, true, false, false]
+    );
+}
+
+#[test]
 fn dc_matches_like_dm_and_never_an_unknown_creation_time() {
     let created = |y, mo, d, h| {
         let created = Local.with_ymd_and_hms(y, mo, d, h, 0, 0).unwrap().timestamp_nanos_opt().unwrap();
@@ -539,4 +681,126 @@ fn dc_matches_like_dm_and_never_an_unknown_creation_time() {
         }
     ));
     assert!(!matches("dc:2025", &folder("dir")));
+}
+
+#[test]
+fn kind_selects_files_or_folders_and_composes_with_text() {
+    assert!(matches("kind:file", &file("a.txt")));
+    assert!(!matches("kind:file", &folder("a")));
+    assert!(matches("kind:FOLDER", &folder("src")));
+    assert!(!matches("kind:folder", &file("src.rs")));
+    assert!(matches("src kind:folder", &folder("src")));
+    assert!(!matches("src kind:folder", &folder("lib")));
+    assert!(matches("!kind:folder", &file("a.txt")));
+    assert!(matches("kind:file|kind:folder", &folder("x")));
+    let error = |q: &str| Query::parse(q, &context()).unwrap_err().to_string();
+    assert!(error("kind:dir").starts_with("kind:"), "{}", error("kind:dir"));
+    assert!(error("kind:").contains("kind:"));
+}
+
+#[test]
+fn since_takes_a_duration_back_from_now_or_a_date() {
+    // Now is 2025-03-14 12:00.
+    assert!(matches("since:7d", &modified_at(2025, 3, 8, 0)));
+    assert!(!matches("since:7d", &modified_at(2025, 3, 7, 11)));
+    assert!(matches("since:12h", &modified_at(2025, 3, 14, 0)));
+    assert!(!matches("since:12h", &modified_at(2025, 3, 13, 23)));
+    assert!(matches("since:90m", &modified_at(2025, 3, 14, 11)));
+    assert!(matches("since:2w", &modified_at(2025, 3, 1, 0)));
+    assert!(!matches("since:2w", &modified_at(2025, 2, 27, 0)));
+    // A date means from its start, local time.
+    assert!(matches("since:2025-03-01", &modified_at(2025, 3, 1, 0)));
+    assert!(!matches("since:2025-03-01", &modified_at(2025, 2, 28, 23)));
+    assert!(matches("since:2025-03", &modified_at(2025, 3, 1, 0)));
+    assert!(matches("since:yesterday", &modified_at(2025, 3, 13, 0)));
+    // Like dm:, it is about files; it composes with other terms.
+    let mut dir = modified_at(2025, 3, 14, 0);
+    dir.is_dir = true;
+    assert!(!matches("since:7d", &dir));
+    assert!(matches(
+        "report since:7d",
+        &Candidate {
+            name: "report.pdf",
+            ..modified_at(2025, 3, 10, 0)
+        }
+    ));
+    assert!(!matches(
+        "report !since:7d",
+        &Candidate {
+            name: "report.pdf",
+            ..modified_at(2025, 3, 10, 0)
+        }
+    ));
+    for bad in ["since:", "since:7x", "since:soon", "since:d", "since:2025-13-01"] {
+        let error = Query::parse(bad, &context()).unwrap_err().to_string();
+        assert!(error.contains("since:"), "{bad}: {error}");
+    }
+}
+
+#[test]
+fn at_matches_a_folder_and_everything_below_it_ignoring_case() {
+    let query = Query::parse("at:/home/Me", &context()).unwrap();
+    assert!(query.needs_path());
+    assert!(query.matches(&at("/home/me")));
+    assert!(query.matches(&at("/home/ME/docs/a.txt")));
+    assert!(!query.matches(&at("/home/meme/a.txt")));
+    assert!(!query.matches(&at("/home")));
+    assert!(matches("at:/home/me/", &at("/home/me/a.txt")));
+    assert!(matches("at:C:\\Users", &at("C:/Users/me/a.txt")));
+    assert!(matches("at:/", &at("/")));
+    assert!(matches("at:/", &at("/etc/hosts")));
+    assert!(matches("at:/home/Ünï", &at("/home/üNÏ/a.txt")));
+    assert!(matches("at:\"/home/my docs\" *.pdf", &at("/home/my docs/a.pdf")));
+    assert!(!matches("at:/home !at:/home/me", &at("/home/me/a.txt")));
+    for bad in ["at:", "at:docs", "at:docs:old"] {
+        let error = Query::parse(bad, &context()).unwrap_err().to_string();
+        assert!(error.contains("at:"), "{bad}: {error}");
+    }
+}
+
+#[test]
+fn is_selects_cleanables_duplicates_and_entries_on_offline_volumes() {
+    use std::path::Path;
+    use std::sync::Arc;
+    use ve_core::{BitSet, EntryMeta, Filter, Index, SyncState};
+    let dir = EntryMeta {
+        is_dir: true,
+        ..EntryMeta::default()
+    };
+    let mut index = Index::new();
+    let here = index.add_volume(Path::new("/m/here"), "ext4", "here", dir, SyncState::Walk);
+    let gone = index.add_volume(Path::new("/m/gone"), "ext4", "gone", dir, SyncState::Walk);
+    let (here_root, gone_root) = (index.volume(here).unwrap().root, index.volume(gone).unwrap().root);
+    let target = index.insert(here_root, "target", dir);
+    let built = index.insert(target, "app.bin", EntryMeta::default());
+    let copy = index.insert(here_root, "copy.txt", EntryMeta::default());
+    let away = index.insert(gone_root, "away.txt", EntryMeta::default());
+    index.set_mount(gone, None);
+    let mut cleanables = BitSet::new(index.capacity());
+    cleanables.insert(target.index());
+    let mut duplicates = BitSet::new(index.capacity());
+    duplicates.insert(copy.index());
+    let context = context()
+        .with_cleanables(Arc::new(cleanables))
+        .with_duplicates(Arc::new(duplicates));
+    let all = [here_root, target, built, copy, gone_root, away];
+    let matched = |q: &str| {
+        let query = Query::parse(q, &context).unwrap();
+        let filter = Filter::compute(&index, Some(&query));
+        all.map(|id| filter.is_matched(id))
+    };
+    assert!(Query::parse("is:cleanable", &context).unwrap().needs_cleanables());
+    assert!(Query::parse("is:offline", &context).unwrap().needs_offline());
+    assert_eq!(matched("is:cleanable"), [false, true, false, false, false, false]);
+    // What is inside a Cleanable counts toward Filtered Size with it.
+    let filter = Filter::compute(&index, Some(&Query::parse("is:cleanable", &context).unwrap()));
+    assert!(filter.is_counted(built) && !filter.is_counted(copy));
+    assert_eq!(matched("is:duplicate"), [false, false, false, true, false, false]);
+    assert_eq!(matched("is:Offline"), [false, false, false, false, true, true]);
+    assert_eq!(matched("!is:offline kind:file"), [false, false, true, true, false, false]);
+    assert_eq!(matched("is:cleanable|is:duplicate"), [false, true, false, true, false, false]);
+    assert_eq!(matched("at:/m/here is:duplicate"), [false, false, false, true, false, false]);
+    let error = |q: &str| Query::parse(q, &context).unwrap_err().to_string();
+    assert!(error("is:big").starts_with("is:"), "{}", error("is:big"));
+    assert!(error("is:").contains("is:"));
 }

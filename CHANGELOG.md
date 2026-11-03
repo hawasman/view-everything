@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.3.0 — unreleased
+
+### One shell for every Module
+- The window has a new frame, built to hold the Modules to come (Search, Performance, Apps, Network) without filling up ([ADR-0015](docs/adr/0015-module-rail-inspector-and-timeline-dock.md)): a rail of Modules on the left (Overview; Files with Browse, Cleaner and Duplicates; Settings), one Query box in the top bar that works from every page (`/` focuses it; typing opens Browse), an **Inspector** on the right that shows whatever is selected (an Entry, a Location, a Task) with its facts and actions, a **Timeline** dock at the bottom, and a status strip on every page.
+- The Dashboard is now the **Overview**: what is indexed, what can be cleaned up, what is in the Trash and when the Index was last synced, then Locations, Categories, Largest files and Recently modified. Clicking a Location opens it in the Inspector, where Sync now, Open in Browse and Forget live.
+- **Duplicates** is its own page under Files, not a tab of the Explorer. **Work** is a page of every Task and every Location, opened from the rail's Work block, which shows the first running Task's progress and the Locations' health; the Tasks and Locations popovers are gone.
+- **Compare with** is the Timeline dock: on Browse it shows one tick per Snapshot; click one to compare, Back to Live to stop.
+- The Selection panel's facts and actions moved into the Inspector; the Treemap takes the whole right column.
+- One set of controls: buttons are flat and square-cornered (one dark primary per screen), tabs are underlined, choices are segmented; cards have a 1px edge and 8px corners; five type sizes; no serif. The chrome carries no colour; teal marks data only (used bars, progress, the Snapshot tick).
+- The Index box and the user block left the sidebar; Done Tasks are grey, not green.
+- The **Cleaner** shows every Cleanable of a group in one scrolling list; the pager and the per-page choice are gone. Only the rows in view are drawn, so hundreds of thousands of Cleanables scroll smoothly.
+- **Duplicates** lists one row per group under its title and facts (groups, copies, wasted space). Clicking a group opens it in the Inspector: its copies (click one to keep it), Open, Show in Browse and Trash others….
+- On Browse, **Filters** opens as a column beside the Treemap instead of replacing it, so the Treemap redraws as you narrow the Query.
+
+### Query modifiers
+- New Query modifiers: `kind:file` and `kind:folder`; `is:cleanable` (what the Cleaner found), `is:duplicate` (same as `dupe:`) and `is:offline` (Entries on an Offline Volume); `at:/path` (a folder and everything below it); `since:7d`, `since:12h`, `since:2026-10-01` (files modified since then). They combine with text, `|`, `!` and every other modifier.
+- A Query that does not parse says why inside the Query box, naming the modifier.
+- Cleanup Rules accept `kind:` and `at:` (which names a location, like `parent:`), and refuse `is:` and `dupe:` with the reason.
+- `ve` refuses `is:offline` and warns that `is:cleanable` finds nothing.
+- `Ctrl+1`, `Ctrl+2` and `Ctrl+3` (`Cmd` on macOS) switch to Overview, Browse and Work from any page, the Query box included.
+- The Entry Inspector has **Show in Browse**: it zooms the Query to the folder the Entry is in and selects the Entry there, among its siblings. The rest of the Query stays, unless it would hide the Entry. A Duplicate group's Show in Browse does the same for its kept copy, and the Cleaner's Show in Explorer is now called Show in Browse.
+- The Overview's finding line says how much of the Cleanable total needs administrator ("…; 1.2 GB of it needs administrator"); with none, it says nothing about it.
+- A Location in its first Sync shows Last Synced as "—" everywhere (Overview, Locations, Inspector) until that Sync finishes.
+
+### Owners
+- Every folder can now say which program, game, package or project it belongs to. That is its **Owner**, found at an **Owner root** (the game's install folder, the application's folder, the folder holding a project's marker files) and inherited by everything beneath it unless a nearer Owner root sits in between. An Owner has a **kind**: System, Program, Game or Project. Folders under no Owner root have no Owner.
+- **Projects** are recognised by their marker files, on every Location, Remotes and Offline Volumes included: `.git`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `CMakeLists.txt`, `build.gradle` and `build.gradle.kts`, `Package.swift`, `*.sln` and `*.csproj`. Markers inside dependency folders (`node_modules`, `vendor`, `site-packages`, `.venv` and similar) do not make a Project.
+- **Steam games** are read from `steamapps/appmanifest_*.acf`, on every platform.
+- **Windows:** `C:\Windows` is System; `Program Files` and `Program Files (x86)` folders (`\<App>` and `\<Vendor>\<App>`) and `AppData\Local\Programs\<App>` are Programs.
+- **Linux:** `/usr`, `/etc`, `/boot`, `/var/lib` and `/var/cache` are System, named after your distribution; `/opt/<app>` is a Program; so are Flatpak apps (`/var/lib/flatpak/app`, `~/.local/share/flatpak/app`, `~/.var/app`). A folder wholly owned by one pacman package is System, named after the package.
+- **macOS:** `/System` and `/usr` are System; `.app` bundles in `/Applications` and `~/Applications` are Programs.
+- Where a platform convention and a project marker find the same folder, the platform's Owner is kept.
+- Detection runs at the end of every Sync and Catch-up of a Location, inside the same Task. Steam, Windows, Linux and macOS detection read only mounted local Volumes; project markers are read from the Index alone. Live updates do not trigger it. The detectors are built in; you can't add your own Owner rules yet ([ADR-0014](docs/adr/0014-owners-live-in-the-index.md)).
+
+### Owners in the shell
+- The Entry Inspector has an **Owner** row, `<name> · <kind>`, or "—" when the Entry has no Owner.
+- The Treemap tooltip adds `Owner: <name> · <kind>`, and Browse's flat list has an **Owner** column.
+- **Colour by: Category | Owner kind**, under the Treemap's title, is remembered between runs. Under Owner kind, the legend shows the four kinds and "No Owner" (grey).
+- Two new Query modifiers: `owner:<text>` matches an Owner's name (a substring, ignoring case; quote a name with spaces: `owner:"Program Files"`), and `ownerkind:system|program|game|project|none`. Both match folders as well as files, combine with the rest of a Query, and work in `ve find` and `ve top`.
+- CSV export gains `Owner` and `Owner kind` columns, in the app, in `ve export` and in `ve find --csv`.
+- The Overview has a **Largest Owners** panel: the 5 Owners with the largest Folder Size. Clicking one shows its Owner root in the Inspector. The panel is hidden while the Index has no Owners.
+
+### Index format
+- The Index is now format 8. A format 7 file is converted when loaded, and every Location is detected once at launch, so Owners appear without waiting for a Sync.
+- A file saved by v0.3 can't be read by v0.2.
+
+### Engine
+- The engine (the Index, Tasks, Locations, Live updates, Sync scheduling and Snapshots) is its own crate, `ve-engine`, with no GUI in it ([ADR-0016](docs/adr/0016-engine-library-in-the-tray-process-with-a-local-socket.md)). The app hosts it and behaves as before.
+- A finished Sync's Task shows the Entries it read, as its result says; a quick Sync used to show 0.
+
 ## v0.2.1
 
 ### Half the memory

@@ -1,15 +1,9 @@
-//! The sidebar's Locations row and panel: every Location's state, one health dot for all of
-//! them, and a Sync now per Location.
+//! Every Location's state, as the rail's Locations block and the Inspector word it: one health
+//! for all of them.
 
 use crate::dashboard_summary::ago;
-use crate::engine::{Engine, Phase, Shared};
 use crate::settings::Settings;
-use crate::theme::{RADIUS_CARD, palette};
-use crate::ui::{caption, dot, pill};
-use gpui_kit::component::{Icon, h_flex, v_flex};
-use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
-use std::sync::Arc;
+use ve_engine::{Phase, Shared};
 use ve_scan::VolumeInfo;
 
 /// What is known about one Location, enough to say how it is doing.
@@ -170,93 +164,11 @@ pub fn summary(rows: &[Row], now: i64) -> (Health, String) {
     (health(bad.len()), text)
 }
 
-/// The sidebar's Locations row: a network icon, and a dot coloured by overall health where the
-/// Tasks row beside it shows its count.
-pub fn indicator_row(health: Health, tip: String, open: bool, cx: &App) -> Stateful<Div> {
-    let p = palette(cx);
-    let (muted, text, active) = (p.muted, p.text, p.active);
-    let colour = match health {
-        Health::Green => p.positive,
-        Health::Yellow => p.warning,
-        Health::Red => p.negative,
-    };
-    h_flex()
-        .id("nav-locations")
-        .h(px(32.))
-        .my(px(1.))
-        .px(px(12.))
-        .gap(px(10.))
-        .items_center()
-        .rounded(px(10.))
-        .cursor_pointer()
-        .text_color(if open { text } else { muted })
-        .when(open, |d| d.bg(active))
-        .hover(move |s| s.text_color(text))
-        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
-        .child(Icon::empty().path("icons/network.svg").size(px(16.)))
-        .child(div().flex_1().child("Locations"))
-        .child(dot(colour).size(px(8.)))
-}
-
-/// Every Location with its state and a Sync now. Rebuilt on every render.
-pub fn panel<T: 'static>(rows: Vec<Row>, now: i64, engine: &Arc<Engine>, cx: &mut Context<T>) -> Stateful<Div> {
-    let p = palette(cx);
-    let loading = engine.shared.is_loading();
-    let mut body = v_flex().gap(px(10.));
-    if rows.is_empty() {
-        body = body.child(caption("No Locations are indexed yet.", cx));
-    }
-    for (ix, row) in rows.into_iter().enumerate() {
-        let tone = match &row.state {
-            State::Live | State::Synced(_) => p.positive,
-            State::Syncing => p.accent,
-            State::Offline => p.muted,
-            State::Stale | State::Failed(_) => p.warning,
-        };
-        let busy = row.syncing;
-        let reason = if loading {
-            Some("Loading the saved Index")
-        } else if !row.online {
-            Some("Offline")
-        } else {
-            None
-        };
-        let (engine, identity) = (engine.clone(), row.identity);
-        body = body.child(
-            h_flex()
-                .gap(px(10.))
-                .items_center()
-                .child(dot(tone))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .child(div().truncate().child(row.name))
-                        .child(div().text_xs().text_color(p.muted).child(row.state.text(now))),
-                )
-                .child(
-                    pill(("location-sync", ix), "Sync now")
-                        .small()
-                        .busy(busy)
-                        .disabled(reason)
-                        .build(cx, cx.listener(move |_, _, _, _| engine.sync_location(identity.clone()))),
-                ),
-        );
-    }
-    v_flex()
-        .id("locations-panel")
-        .w(px(380.))
-        .max_h(px(480.))
-        .gap(px(12.))
-        .p(px(16.))
-        .rounded(px(RADIUS_CARD))
-        .border_1()
-        .border_color(p.border)
-        .bg(p.surface)
-        .shadow_lg()
-        .occlude()
-        .child(div().font_weight(FontWeight::SEMIBOLD).child("Locations"))
-        .child(v_flex().id("locations-scroll").flex_1().min_h_0().overflow_y_scroll().child(body))
+/// The rail's second line of the Locations block: "1 offline · syncing", "0 offline · up to date".
+pub fn rail_status(rows: &[Row]) -> String {
+    let offline = rows.iter().filter(|r| !r.online).count();
+    let tail = if rows.iter().any(|r| r.syncing) { "syncing" } else { "up to date" };
+    format!("{offline} offline · {tail}")
 }
 
 #[cfg(test)]

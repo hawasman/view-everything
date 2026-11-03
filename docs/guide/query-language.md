@@ -25,7 +25,10 @@ Text ignores case unless you use `case:`.
 | `ext:mp4;mkv` | files with one of the extensions |
 | `type:video` | files of a Category |
 | `size:>1gb`, `size:1mb..5mb` | files by Logical Size |
-| `dupe:` | files with a Duplicate (see [Duplicates](duplicates.md)) |
+| `kind:file`, `kind:folder` | files only, or folders only |
+| `dupe:`, `is:duplicate` | files with a Duplicate (see [Duplicates](duplicates.md)) |
+| `is:cleanable` | the Cleanables the [Cleaner](cleanup-rules.md) found in its latest look (the Overview and the Cleaner look); the files inside them count toward Filtered Size |
+| `is:offline` | Entries on an Offline Volume (one not mounted now); Remotes are never offline |
 
 ### When it changed
 
@@ -33,6 +36,7 @@ Text ignores case unless you use `case:`.
 | --- | --- |
 | `dm:2025-01`, `dm:>=yesterday` | files by modification date |
 | `dc:2025-01`, `dc:<2020` | files by creation date, written like `dm:` |
+| `since:7d`, `since:12h`, `since:2026-10-01` | files modified within the last minutes (`30m`), hours (`12h`), days (`7d`) or weeks (`2w`), or since the start of a date written like `dm:` |
 
 `dc:` never matches a file whose creation time is unknown. That covers S3 Remotes, SFTP, FTP servers without the MLSD `create` fact, and filesystems without a birth time.
 
@@ -53,9 +57,18 @@ For `wholeword:`, only letters and digits join a word, so `_`, `-`, `.` and spac
 | Modifier | Matches |
 | --- | --- |
 | `parent:/home/me/Docs` | Entries directly inside that folder, not deeper; ignores case |
+| `at:/home/me/Docs`, `at:C:\Users` | that folder and everything below it; ignores case. The path starts at a root (`/`, a drive, or a Remote's address) |
 | `depth:2`, `depth:>1`, `depth:1..3` | Entries by levels below the Location root (the root is 0) |
 | `child:.git`, `child:*.toml` | folders with a direct child whose name matches |
 | `empty:` | folders with no children |
+| `owner:steam`, `owner:"Program Files"` | Entries under an Owner whose name contains the text, folders as well as files; ignores case |
+| `ownerkind:game`, `ownerkind:none` | Entries under an Owner of that kind (`system`, `program`, `game`, `project`), or under none (see [Owners](owners.md)) |
+
+Facets combine with text and each other like any term: `report kind:file since:7d !at:/home/me/old`, `is:cleanable|is:duplicate`.
+
+## When a Query is wrong
+
+A Query that does not parse says why in the Query box, naming the modifier, such as ``since: `soon` is not a duration or date`` or ``kind: unknown value `dir`; expected file or folder``. The panels keep showing the last Query that worked until it is fixed.
 
 ## In the app
 

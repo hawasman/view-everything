@@ -1,9 +1,8 @@
 //! The Category breakdown panel: Filtered Size per Category, expandable to its extensions.
 
 use crate::format;
-use crate::theme::{RADIUS_CARD, palette};
+use crate::theme::{FS_BODY, RADIUS_CARD, palette};
 use crate::ui::swatch;
-use crate::view::{CategoryRow, View};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, IconName, h_flex, v_flex};
@@ -12,9 +11,12 @@ use gpui_kit::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 use ve_core::Category;
+use ve_engine::view::{CategoryRow, View};
 
-/// Column widths after the name, as in the design: bar, Size, Files, Share.
-const BAR: f32 = 140.;
+/// Column widths: the name is fixed and the bar takes what is left, so a narrow panel shortens
+/// the bar rather than running the name under it; Size, Files and Share are fixed.
+const NAME: f32 = 128.;
+const BAR_MIN: f32 = 40.;
 const SIZE: f32 = 80.;
 const FILES: f32 = 80.;
 const SHARE: f32 = 64.;
@@ -42,7 +44,7 @@ impl CategoryPanel {
     }
 
     pub fn set_view(&mut self, view: Option<Arc<View>>, cx: &mut Context<Self>) {
-        if !crate::view::same(&self.view, &view) {
+        if !ve_engine::view::same(&self.view, &view) {
             self.rows = view.as_ref().map(|v| (v.categories.clone(), v.total.on_disk));
             self.view = view;
             cx.notify();
@@ -88,6 +90,8 @@ impl Render for CategoryPanel {
             .size_full()
             .bg(p.surface)
             .rounded(px(RADIUS_CARD))
+            .border_1()
+            .border_color(p.border)
             .pt(px(16.))
             .px(px(12.))
             .pb(px(8.));
@@ -96,7 +100,7 @@ impl Render for CategoryPanel {
             .mb(px(4.))
             .justify_between()
             .items_baseline()
-            .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child("Categories"))
+            .child(crate::ui::section_title("Categories", cx))
             .child(div().text_xs().text_color(muted).child(self.subtitle.clone()));
         let Some((rows, whole)) = self.rows.clone() else {
             return panel.child(heading);
@@ -111,8 +115,8 @@ impl Render for CategoryPanel {
             .items_center()
             .text_xs()
             .text_color(muted)
-            .child(div().flex_1().child("Category"))
-            .child(div().w(px(BAR)).flex_none())
+            .child(div().w(px(NAME)).flex_none().child("Category"))
+            .child(div().flex_1().min_w(px(BAR_MIN)))
             .child(cell(SIZE).child("Size"))
             .child(cell(FILES).child("Files"))
             .child(cell(SHARE).child("Share"));
@@ -149,7 +153,7 @@ impl Render for CategoryPanel {
                     .items_center()
                     .border_t_1()
                     .border_color(rule)
-                    .text_size(px(13.))
+                    .text_size(px(FS_BODY))
                     .when(clickable, |d| {
                         d.cursor_pointer()
                             .hover(move |s| s.bg(hover).rounded(px(8.)))
@@ -163,16 +167,17 @@ impl Render for CategoryPanel {
                     })
                     .child(
                         h_flex()
-                            .flex_1()
-                            .min_w_0()
+                            .w(px(NAME))
+                            .flex_none()
+                            .overflow_hidden()
                             .gap(px(6.))
                             .items_center()
                             .child(chevron)
                             .child(swatch(color).mx(px(2.)))
-                            .child(category.name()),
+                            .child(div().whitespace_nowrap().child(category.name())),
                     )
                     .child(
-                        div().w(px(BAR)).flex_none().px(px(12.)).child(
+                        div().flex_1().min_w(px(BAR_MIN)).px(px(12.)).child(
                             div()
                                 .h(px(4.))
                                 .rounded(px(2.))
@@ -197,7 +202,7 @@ impl Render for CategoryPanel {
                         .items_center()
                         .border_t_1()
                         .border_color(rule)
-                        .text_size(px(13.))
+                        .text_size(px(FS_BODY))
                         .child(div().flex_1().child(label))
                         .child(cell(SIZE).text_color(muted).child(format::size(totals.on_disk)))
                         .child(cell(FILES).text_color(muted).child(format::count(totals.files)))

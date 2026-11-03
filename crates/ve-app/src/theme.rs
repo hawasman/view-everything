@@ -6,7 +6,7 @@ use gpui_kit::component::{ActiveTheme as _, Theme, ThemeConfig, ThemeConfigColor
 use gpui_kit::*;
 use std::borrow::Cow;
 use std::rc::Rc;
-use ve_core::Category;
+use ve_core::{Category, OwnerKind};
 
 /// Static instances of the OFL variable Instrument Sans (wght 400, 500, 600): GPUI picks a
 /// weight by face, so each one is its own file.
@@ -15,12 +15,26 @@ const SANS: [&[u8]; 3] = [
     include_bytes!("../assets/fonts/InstrumentSans-Medium.ttf"),
     include_bytes!("../assets/fonts/InstrumentSans-SemiBold.ttf"),
 ];
-const SERIF: &[u8] = include_bytes!("../assets/fonts/InstrumentSerif-Regular.ttf");
 pub const SANS_FAMILY: &str = "Instrument Sans";
-pub const SERIF_FAMILY: &str = "Instrument Serif";
 
-pub const RADIUS_CARD: f32 = 22.;
-pub const RADIUS_INNER: f32 = 14.;
+pub const RADIUS_CARD: f32 = 8.;
+pub const RADIUS_CONTROL: f32 = 6.;
+pub const RADIUS_CHIP: f32 = 4.;
+
+/// Type: exactly five sizes in the crate.
+pub const FS_TITLE: f32 = 24.;
+pub const FS_SECTION: f32 = 16.;
+pub const FS_KPI: f32 = 30.;
+pub const FS_BODY: f32 = 14.;
+pub const FS_SMALL: f32 = 12.;
+
+pub const GAP: f32 = 12.;
+pub const PAD: f32 = 24.;
+pub const CARD_PAD: f32 = 20.;
+pub const CONTROL_H: f32 = 36.;
+pub const CONTROL_H_SMALL: f32 = 28.;
+pub const NAV_ROW: f32 = 32.;
+pub const ROW_H: f32 = 44.;
 
 fn hx(v: u32) -> Hsla {
     rgb(v).into()
@@ -54,6 +68,8 @@ pub struct Palette {
     pub pill_accent: (Hsla, Hsla),
     /// `--cat-*`, in `Category` declaration order.
     pub cat: [Hsla; 8],
+    /// The Treemap's Owner kind colours: System, Program, Game, Project, then "No Owner".
+    pub owner: [Hsla; 5],
     pub tileink: Hsla,
     pub free: Hsla,
     pub avatar: (Hsla, Hsla),
@@ -62,26 +78,26 @@ pub struct Palette {
 impl Palette {
     fn light() -> Self {
         Self {
-            ground: hx(0xffffff),
-            surface: hx(0xf4f6f6),
-            raised: hx(0xffffff),
-            active: hx(0xececec),
-            border: hx(0xeaeaea),
-            rule: hx(0xe6e9e9),
-            control: hx(0xd0d3d2),
-            skeleton: hx(0xe3e6e6),
-            text: hx(0x1f201d),
-            muted: hx(0x636361),
+            ground: hx(0xf8f8f8),
+            surface: hx(0xffffff),
+            raised: hx(0xeeeeee),
+            active: hx(0xe9e9e9),
+            border: hx(0xe6e6e6),
+            rule: hx(0xf0f0f0),
+            control: hx(0xd4d4d4),
+            skeleton: hx(0xececec),
+            text: hx(0x0a0a0a),
+            muted: hx(0x6b6b6b),
             accent: hx(0x1b6e66),
             positive: hx(0x2e7d32),
-            negative: hx(0xb42318),
+            negative: hx(0xc4242a),
             warning: hx(0x92400e),
-            primary: hx(0x1f201d),
+            primary: hx(0x141414),
             on_primary: hx(0xffffff),
             pill_positive: (hx(0xdcfae5), hx(0x04250e)),
-            pill_negative: (hx(0xfdecea), hx(0x7a1d14)),
+            pill_negative: (hx(0xffedea), hx(0x831c1e)),
             pill_warning: (hx(0xfffbeb), hx(0x92400e)),
-            pill_neutral: (hx(0xe9ecec), hx(0x3d3d3a)),
+            pill_neutral: (hx(0xeeeeee), hx(0x3d3d3d)),
             pill_accent: (hx(0xdbeeeb), hx(0x0f4a44)),
             cat: [
                 hx(0x35609a),
@@ -93,8 +109,9 @@ impl Palette {
                 hx(0x9a5530),
                 hx(0x6f6f6b),
             ],
+            owner: [hx(0xa8661a), hx(0x35609a), hx(0x5f7d2a), hx(0xa0456f), hx(0xa0a09b)],
             tileink: hx(0xffffff),
-            free: hx(0xe7eaea),
+            free: hx(0xe6e6e6),
             avatar: (hx(0xdbe7f3), hx(0x1d3a57)),
         }
     }
@@ -102,25 +119,25 @@ impl Palette {
     fn dark() -> Self {
         Self {
             ground: hx(0x111111),
-            surface: hx(0x1b1c1c),
-            raised: hx(0x242525),
-            active: hx(0x2a2b2b),
-            border: hx(0x2a2b2b),
-            rule: hx(0x2e2f2f),
-            control: hx(0x4a4b4a),
-            skeleton: hx(0x2c2d2d),
-            text: hx(0xf2f2ef),
-            muted: hx(0xa7a7a3),
+            surface: hx(0x181818),
+            raised: hx(0x222222),
+            active: hx(0x262626),
+            border: hx(0x2e2e2e),
+            rule: hx(0x202020),
+            control: hx(0x444444),
+            skeleton: hx(0x2a2a2a),
+            text: hx(0xffffff),
+            muted: hx(0xb4b4b4),
             accent: hx(0x5fc4b8),
-            positive: hx(0x4cc27a),
-            negative: hx(0xef7a6f),
+            positive: hx(0x3fc07a),
+            negative: hx(0xe5566f),
             warning: hx(0xe3a864),
-            primary: hx(0xf2f2ef),
+            primary: hx(0xffffff),
             on_primary: hx(0x111111),
-            pill_positive: (hx(0x172a1d), hx(0x4cc27a)),
-            pill_negative: (hx(0x2c1a18), hx(0xef7a6f)),
+            pill_positive: (hx(0x172a1d), hx(0x3fc07a)),
+            pill_negative: (hx(0x2c1a20), hx(0xe5566f)),
             pill_warning: (hx(0x2d2415), hx(0xe3a864)),
-            pill_neutral: (hx(0x2a2b2b), hx(0xcfcfcb)),
+            pill_neutral: (hx(0x262626), hx(0xcfcfcf)),
             pill_accent: (hx(0x16302d), hx(0x5fc4b8)),
             cat: [
                 hx(0x4a7fbf),
@@ -132,14 +149,20 @@ impl Palette {
                 hx(0xbf7448),
                 hx(0x8a8a85),
             ],
+            owner: [hx(0xc98a3d), hx(0x4a7fbf), hx(0x86a44a), hx(0xc0638f), hx(0x6f6f6b)],
             tileink: hx(0x0d0d0d),
-            free: hx(0x2a2b2b),
+            free: hx(0x2e2e2e),
             avatar: (hx(0x25384a), hx(0xbcd6ee)),
         }
     }
 
     pub fn category(&self, category: Category) -> Hsla {
         self.cat[category as usize]
+    }
+
+    /// The Treemap's Owner kind colour; None is "No Owner".
+    pub fn owner_kind(&self, kind: Option<OwnerKind>) -> Hsla {
+        self.owner[kind.map_or(4, |k| k as usize)]
     }
 
     /// The tokens as the kit's theme file expresses them.
@@ -154,12 +177,12 @@ impl Palette {
         colors.muted_foreground = s(self.muted);
         colors.accent = s(self.active);
         colors.accent_foreground = s(self.text);
-        colors.ring = s(self.accent);
+        colors.ring = s(self.text);
         colors.caret = s(self.text);
         colors.selection = s(self.pill_accent.0);
-        colors.link = s(self.accent);
-        colors.link_hover = s(self.accent);
-        colors.link_active = s(self.accent);
+        colors.link = s(self.text);
+        colors.link_hover = s(self.text);
+        colors.link_active = s(self.text);
         colors.primary = s(self.primary);
         colors.primary_hover = s(self.primary);
         colors.primary_active = s(self.primary);
@@ -180,23 +203,23 @@ impl Palette {
         colors.success_foreground = s(self.on_primary);
         colors.info = s(self.accent);
         colors.info_foreground = s(self.on_primary);
-        // Buttons: pill outlines on the ground, as `.btn` in ve.css.
-        colors.button = s(self.ground);
-        colors.button_hover = s(self.surface);
+        // Buttons: raised fill, no border; hover goes to `active`.
+        colors.button = s(self.raised);
+        colors.button_hover = s(self.active);
         colors.button_active = s(self.active);
         colors.button_foreground = s(self.text);
         colors.button_primary = s(self.primary);
         colors.button_primary_hover = s(self.primary);
         colors.button_primary_active = s(self.primary);
         colors.button_primary_foreground = s(self.on_primary);
-        colors.button_secondary = s(self.ground);
-        colors.button_secondary_hover = s(self.surface);
+        colors.button_secondary = s(self.raised);
+        colors.button_secondary_hover = s(self.active);
         colors.button_secondary_active = s(self.active);
         colors.button_secondary_foreground = s(self.text);
-        colors.button_danger = s(self.ground);
-        colors.button_danger_hover = s(self.surface);
+        colors.button_danger = s(self.raised);
+        colors.button_danger_hover = s(self.active);
         colors.button_danger_active = s(self.active);
-        colors.button_danger_foreground = s(self.text);
+        colors.button_danger_foreground = s(self.negative);
         colors.switch = s(self.control);
         colors.switch_thumb = s(self.ground);
         colors.skeleton = s(self.skeleton);
@@ -248,8 +271,8 @@ impl Palette {
             font_size: Some(14.),
             font_family: Some(SANS_FAMILY.into()),
             mono_font_family: Some(SANS_FAMILY.into()),
-            mono_font_size: Some(13.),
-            radius: Some(RADIUS_INNER as usize),
+            mono_font_size: Some(14.),
+            radius: Some(RADIUS_CONTROL as usize),
             radius_lg: Some(RADIUS_CARD as usize),
             shadow: Some(false),
             colors,
@@ -314,7 +337,7 @@ impl AssetSource for Assets {
 /// before opening the window.
 pub fn init(choice: ThemeChoice, cx: &mut App) {
     cx.text_system()
-        .add_fonts(SANS.iter().chain([&SERIF]).map(|f| Cow::Borrowed(*f)).collect())
+        .add_fonts(SANS.iter().map(|f| Cow::Borrowed(*f)).collect())
         .expect("embedded fonts are valid");
     let (light, dark) = (Palette::light(), Palette::dark());
     let configs = (
