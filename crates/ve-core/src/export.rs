@@ -1,4 +1,4 @@
-//! CSV export of a list of Entries, shared by the app and (later) the CLI.
+//! CSV export of a list of Entries, shared by the app and the CLI.
 
 use crate::{CategoryMap, EntryId, Filter, Index};
 use std::io::{self, Write};
@@ -8,33 +8,65 @@ use std::io::{self, Write};
 /// (both empty when the Entry has no Owner). Sizes are Filtered Sizes under `filter`, as the
 /// Explorer shows them.
 pub fn write_csv(out: &mut impl Write, index: &Index, filter: &Filter, categories: &CategoryMap, ids: &[EntryId]) -> io::Result<()> {
-    out.write_all(b"path,name,Logical Size,On-disk Size,modified,Category,Owner,Owner kind\r\n")?;
+    out.write_all(HEADER)?;
     for &id in ids.iter().filter(|&&id| index.is_live(id)) {
         let totals = filter.totals(index, id);
         let name = index.name(id);
-        // The Index keeps nanoseconds since the Unix epoch (to the whole second); 0 is unknown.
-        let modified = match index.modified(id) {
-            0 => String::new(),
-            ns => chrono::DateTime::from_timestamp_nanos(ns).format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-        };
-        let category = if index.is_dir(id) { "" } else { categories.of_name(name).name() };
         let owner = index.entry_owner(id);
-        let path = index.path(id);
-        write_row(
+        write_entry(
             out,
-            &[
-                &path.to_string_lossy(),
+            &CsvEntry {
+                path: &index.path(id).to_string_lossy(),
                 name,
-                &totals.logical.to_string(),
-                &totals.on_disk.to_string(),
-                &modified,
-                category,
-                owner.map_or("", |o| o.name.as_str()),
-                owner.map_or("", |o| o.kind.name()),
-            ],
+                logical: totals.logical,
+                on_disk: totals.on_disk,
+                // The Index keeps nanoseconds since the Unix epoch (to the whole second); 0 is unknown.
+                modified_ns: Some(index.modified(id)).filter(|&ns| ns != 0),
+                category: if index.is_dir(id) { "" } else { categories.of_name(name).name() },
+                owner: owner.map_or("", |o| o.name.as_str()),
+                owner_kind: owner.map_or("", |o| o.kind.name()),
+            },
         )?;
     }
     Ok(())
+}
+
+/// The header row [`write_csv`] starts with.
+pub const HEADER: &[u8] = b"path,name,Logical Size,On-disk Size,modified,Category,Owner,Owner kind\r\n";
+
+/// One Entry's fields, for a client that has them without the Index (the CLI asking the app).
+pub struct CsvEntry<'a> {
+    pub path: &'a str,
+    pub name: &'a str,
+    pub logical: u64,
+    pub on_disk: u64,
+    /// Nanoseconds since the Unix epoch; `None` when unknown.
+    pub modified_ns: Option<i64>,
+    /// Empty for folders.
+    pub category: &'a str,
+    /// Empty without an Owner, like `owner_kind`.
+    pub owner: &'a str,
+    pub owner_kind: &'a str,
+}
+
+/// Writes one Entry's row, in [`HEADER`]'s columns.
+pub fn write_entry(out: &mut impl Write, entry: &CsvEntry) -> io::Result<()> {
+    let modified = entry.modified_ns.map_or(String::new(), |ns| {
+        chrono::DateTime::from_timestamp_nanos(ns).format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    });
+    write_row(
+        out,
+        &[
+            entry.path,
+            entry.name,
+            &entry.logical.to_string(),
+            &entry.on_disk.to_string(),
+            &modified,
+            entry.category,
+            entry.owner,
+            entry.owner_kind,
+        ],
+    )
 }
 
 /// One RFC 4180 record: fields containing a comma, quote, CR or LF are quoted, quotes doubled.

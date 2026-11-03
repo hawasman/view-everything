@@ -14,11 +14,16 @@
 - **Duplicates** lists one row per group under its title and facts (groups, copies, wasted space). Clicking a group opens it in the Inspector: its copies (click one to keep it), Open, Show in Browse and Trash others….
 - On Browse, **Filters** opens as a column beside the Treemap instead of replacing it, so the Treemap redraws as you narrow the Query.
 
+### Performance
+- A new Module, **Performance → System** (Linux), appears in the rail with its first sample: the whole machine's and each logical CPU's busy share, with performance and efficiency cores told apart where the kernel reports them; memory used, cache and buffers, free, available and swap; read and write throughput per disk. GPU, temperature and power read "unsupported" rather than zero; a reading the app could not take shows "—". [More](docs/guide/performance.md)
+- The app keeps one sample a second for the last hour, in memory only, while the window is open or keep in tray is on. The Timeline dock shows that hour as CPU bars on Performance; press or drag on it to see any second, **Back to Live** to return. Seconds with no sample are drawn as gaps, never as idle.
+- The **Moment** on the dock is shared by every page: Browse compares with the Snapshot nearest it, Performance shows the sample of that second. Back to Live shows on every page while the Moment is not Live.
+
 ### Query modifiers
 - New Query modifiers: `kind:file` and `kind:folder`; `is:cleanable` (what the Cleaner found), `is:duplicate` (same as `dupe:`) and `is:offline` (Entries on an Offline Volume); `at:/path` (a folder and everything below it); `since:7d`, `since:12h`, `since:2026-10-01` (files modified since then). They combine with text, `|`, `!` and every other modifier.
 - A Query that does not parse says why inside the Query box, naming the modifier.
 - Cleanup Rules accept `kind:` and `at:` (which names a location, like `parent:`), and refuse `is:` and `dupe:` with the reason.
-- `ve` refuses `is:offline` and warns that `is:cleanable` finds nothing.
+- Reading the saved Index, `ve` refuses `is:offline` and warns that `is:cleanable` finds nothing.
 - `Ctrl+1`, `Ctrl+2` and `Ctrl+3` (`Cmd` on macOS) switch to Overview, Browse and Work from any page, the Query box included.
 - The Entry Inspector has **Show in Browse**: it zooms the Query to the folder the Entry is in and selects the Entry there, among its siblings. The rest of the Query stays, unless it would hide the Entry. A Duplicate group's Show in Browse does the same for its kept copy, and the Cleaner's Show in Explorer is now called Show in Browse.
 - The Overview's finding line says how much of the Cleanable total needs administrator ("…; 1.2 GB of it needs administrator"); with none, it says nothing about it.
@@ -29,7 +34,7 @@
 - **Projects** are recognised by their marker files, on every Location, Remotes and Offline Volumes included: `.git`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `CMakeLists.txt`, `build.gradle` and `build.gradle.kts`, `Package.swift`, `*.sln` and `*.csproj`. Markers inside dependency folders (`node_modules`, `vendor`, `site-packages`, `.venv` and similar) do not make a Project.
 - **Steam games** are read from `steamapps/appmanifest_*.acf`, on every platform.
 - **Windows:** `C:\Windows` is System; `Program Files` and `Program Files (x86)` folders (`\<App>` and `\<Vendor>\<App>`) and `AppData\Local\Programs\<App>` are Programs.
-- **Linux:** `/usr`, `/etc`, `/boot`, `/var/lib` and `/var/cache` are System, named after your distribution; `/opt/<app>` is a Program; so are Flatpak apps (`/var/lib/flatpak/app`, `~/.local/share/flatpak/app`, `~/.var/app`). A folder wholly owned by one pacman package is System, named after the package.
+- **Linux:** `/usr`, `/etc`, `/boot`, `/var/lib` and `/var/cache` are System, named after your distribution; `/opt/<app>` is a Program; so are Flatpak apps (`/var/lib/flatpak/app`, `~/.local/share/flatpak/app`, `~/.var/app`). A folder wholly owned by one pacman or dpkg package is System, named after the package.
 - **macOS:** `/System` and `/usr` are System; `.app` bundles in `/Applications` and `~/Applications` are Programs.
 - Where a platform convention and a project marker find the same folder, the platform's Owner is kept.
 - Detection runs at the end of every Sync and Catch-up of a Location, inside the same Task. Steam, Windows, Linux and macOS detection read only mounted local Volumes; project markers are read from the Index alone. Live updates do not trigger it. The detectors are built in; you can't add your own Owner rules yet ([ADR-0014](docs/adr/0014-owners-live-in-the-index.md)).
@@ -42,6 +47,12 @@
 - CSV export gains `Owner` and `Owner kind` columns, in the app, in `ve export` and in `ve find --csv`.
 - The Overview has a **Largest Owners** panel: the 5 Owners with the largest Folder Size. Clicking one shows its Owner root in the Inspector. The panel is hidden while the Index has no Owners.
 
+### Apps
+- A new **Apps** page, under Files in the rail once installed programs are known (Linux for now): every pacman, dpkg and rpm package, Flatpak app, Steam game and folder under `/opt`, with its kind, version, install date and **On disk** size. Click a column title to sort by name, kind, install date or size.
+- A program's size is the Folder Size of its Owner roots in the Index, so it matches what Browse shows. A program none of whose folders is indexed shows "—", as do most packages (only folders a package owns wholly are its Owner roots) and every rpm package (rpm file lists are not read yet).
+- Clicking a program opens it in the Inspector: version, install date, size, each Owner root with its size, and **Show in Browse** for the largest root.
+- The list is read again after each Sync's Owner detection, so a newly installed game appears with its size.
+
 ### Index format
 - The Index is now format 8. A format 7 file is converted when loaded, and every Location is detected once at launch, so Owners appear without waiting for a Sync.
 - A file saved by v0.3 can't be read by v0.2.
@@ -49,6 +60,14 @@
 ### Engine
 - The engine (the Index, Tasks, Locations, Live updates, Sync scheduling and Snapshots) is its own crate, `ve-engine`, with no GUI in it ([ADR-0016](docs/adr/0016-engine-library-in-the-tray-process-with-a-local-socket.md)). The app hosts it and behaves as before.
 - A finished Sync's Task shows the Entries it read, as its result says; a quick Sync used to show 0.
+- The app listens on a local socket only your account can open (`$XDG_RUNTIME_DIR/view-everything/engine.sock`; `VE_SOCKET` overrides it), speaking newline-delimited JSON with a version handshake. On Windows it is a named pipe only your account can open (`\\.\pipe\view-everything-<your SID>-engine`). A second launch shows the running window and exits on both platforms, and `ve` gives up on an app that does not answer within 5 seconds.
+- Launching the app while it runs brings up the running window (from the tray too) instead of starting a second engine.
+- `ve find`, `ve top` and `ve export` ask the running app, so they see changes from seconds ago, and `dupe:`, `is:duplicate`, `is:cleanable` and `is:offline` work there. With the app closed, `ve` reads the saved Index and says so on stderr.
+
+### Permissions
+- **Settings → Permissions** lists every Permission you granted (the Live updates helper, start at login) with when you granted it. Switching one off revokes it fully: the helper stops and is not started again, the login entry is removed. The Live updates and Start at login switches read and change the same list.
+- Settings files are now version 1. A helper or start at login you had switched on is kept, as a Permission "granted before this version".
+- Dismissing or failing the helper's password prompt drops its Permission and turns the Live updates switch back off, so a prompt you said no to is not asked again at the next start.
 
 ## v0.2.1
 

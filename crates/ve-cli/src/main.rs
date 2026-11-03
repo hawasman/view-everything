@@ -1,9 +1,11 @@
-//! `ve`: reads the saved Index (never writes it) and prints Entries, largest folders or CSV.
+//! `ve`: asks the running app's engine over its socket and prints Entries, largest folders or
+//! CSV. With the app closed it reads the saved Index file instead (never writing it).
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use ve_core::{CategoryMap, EntryId, Filter, Index, Query, QueryContext, export::write_csv};
+use ve_core::{Index, Query, QueryContext, export};
+use ve_engine::socket::search::{self, Found, LastSynced, Row, Search, Select};
 
 const DEFAULT_LIMIT: usize = 20;
 
@@ -18,17 +20,21 @@ Options:
   --csv           CSV output (path, name, Logical Size, On-disk Size, modified, Category, Owner, Owner kind)
   --json          JSON array output
   --path <PATH>   Only Entries under PATH
-  --index <FILE>  Read this saved Index instead of the app's
+  --index <FILE>  Read this saved Index file instead of asking the running app
   -n <N>          top/du: how many rows (default 20, 0 for all)
   --files         top/du: largest files instead of folders
 
 Queries use the app's Query language: text, ext:, type:, size:, dm:, since:7d, kind:folder,
-at:/path, parent:, owner:, ... (see docs/guide/query-language.md). is:offline is refused, and
-dupe:, is:duplicate and is:cleanable find nothing here: the CLI reads only the Index.
+at:/path, parent:, owner:, ... (see docs/guide/query-language.md).
+
+While the app runs, `ve` asks it, so results include the last seconds of changes and dupe:,
+is:duplicate, is:cleanable and is:offline use what the app knows. With the app closed it reads
+the saved Index file and says so on stderr. Reading a file (that one, or --index), is:offline
+is refused and dupe:, is:duplicate and is:cleanable find nothing.
 
 Exit codes: 0 success, 1 no match, 2 error. Last Synced is reported on stderr.";
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
     Find,
     Top,
@@ -160,135 +166,144 @@ impl From<io::Error> for Failure {
 
 /// Runs a command, returning how many Entries it printed.
 fn run(args: &Args, out: &mut impl Write, err: &mut impl Write) -> Result<usize, Failure> {
-    let path = match &args.index {
-        Some(path) => path.clone(),
-        None => ve_core::paths::index_path().ok_or_else(|| Failure::Message("no data folder on this system".into()))?,
+    let path = match &args.path {
+        // The app resolves paths from its own working folder.
+        Some(path) => Some(std::path::absolute(path)?.to_string_lossy().into_owned()),
+        None => None,
     };
-    let index = Index::load(&path).map_err(|e| {
+    let search = Search {
+        query: args.query.clone(),
+        path,
+        select: match args.command {
+            Command::Find | Command::Export => Select::Matches,
+            Command::Top if args.files => Select::LargestFiles,
+            Command::Top => Select::LargestFolders,
+        },
+        limit: match (args.command, args.limit.unwrap_or(DEFAULT_LIMIT)) {
+            (Command::Top, 0) | (Command::Find | Command::Export, _) => None,
+            (Command::Top, n) => Some(n),
+        },
+    };
+    let found = match &args.index {
+        Some(file) => from_file(file, &search, err)?,
+        None => match from_app(&search, err)? {
+            Some(found) => found,
+            None => {
+                let file = ve_core::paths::index_path().ok_or_else(|| Failure::Message("no data folder on this system".into()))?;
+                from_file(&file, &search, err)?
+            }
+        },
+    };
+    write_rows(out, args, &found.rows)?;
+    out.flush()?;
+    Ok(found.rows.len())
+}
+
+/// Asks the running app. `None` when it cannot be reached, having said so on `err`.
+fn from_app(search: &Search, err: &mut impl Write) -> Result<Option<Found>, Failure> {
+    let Some(socket) = ve_engine::socket::path() else {
+        writeln!(err, "ve: reading the saved Index file (cannot work out where the app socket is)")?;
+        return Ok(None);
+    };
+    let mut client = match ve_engine::socket::Client::connect(&socket) {
+        Ok(client) => client,
+        Err(e) if e.is_not_running() => {
+            writeln!(err, "ve: the app is not running; reading the saved Index file")?;
+            return Ok(None);
+        }
+        Err(e) => {
+            writeln!(err, "ve: cannot ask the app ({e}); reading the saved Index file")?;
+            return Ok(None);
+        }
+    };
+    let params = serde_json::to_value(search).map_err(io::Error::from)?;
+    let mut rows = Vec::new();
+    let end = client
+        .stream("search", params, |item| {
+            rows.push(serde_json::from_value::<Row>(item).map_err(io::Error::from)?);
+            Ok(())
+        })
+        .map_err(|e| match e {
+            ve_engine::socket::Error::Io(e) => Failure::Io(e),
+            ve_engine::socket::Error::Refused(reason) => Failure::Message(reason),
+        })?;
+    let last_synced = serde_json::from_value::<LastSynced>(end["last_synced"].clone()).map_err(io::Error::from)?;
+    writeln!(err, "Last Synced: {}", last_synced_label(last_synced))?;
+    Ok(Some(Found { rows, last_synced }))
+}
+
+/// Reads the saved Index at `file`.
+fn from_file(file: &Path, search: &Search, err: &mut impl Write) -> Result<Found, Failure> {
+    let index = Index::load(file).map_err(|e| {
         Failure::Message(format!(
             "cannot read the Index at {}: {e} (open the app once to build it)",
-            path.display()
+            file.display()
         ))
     })?;
-    writeln!(err, "Last Synced: {}", last_synced(&index))?;
+    let last_synced = LastSynced::of(&index);
+    writeln!(err, "Last Synced: {}", last_synced_label(last_synced))?;
     let categories = ve_core::paths::load_categories().map_err(Failure::Message)?;
     let context = QueryContext::new(categories.clone(), chrono::Local::now());
-    let query = match args.query.trim() {
+    let query = match search.query.trim() {
         "" => None,
         text => Some(Query::parse(text, &context).map_err(|e| Failure::Message(format!("bad Query: {e}")))?),
     };
     if query.as_ref().is_some_and(Query::needs_offline) {
         return Err(Failure::Message(
-            "bad Query: is:offline needs the app; the CLI does not know which Volumes are mounted".into(),
+            "bad Query: is:offline needs the app; the saved Index does not know which Volumes are mounted".into(),
         ));
     }
     if query.as_ref().is_some_and(Query::needs_duplicates) {
-        writeln!(
-            err,
-            "ve: dupe: and is:duplicate find nothing here; the CLI does not read the app's hashes"
-        )?;
+        writeln!(err, "ve: dupe: and is:duplicate find nothing here; the saved Index has no hashes")?;
     }
     if query.as_ref().is_some_and(Query::needs_cleanables) {
-        writeln!(err, "ve: is:cleanable finds nothing here; the CLI does not run the Cleaner")?;
+        writeln!(err, "ve: is:cleanable finds nothing here; the saved Index has no Cleaner results")?;
     }
-    let filter = Filter::compute(&index, query.as_ref());
-    let scope = scope(&index, args.path.as_deref())?;
-    let mut ids: Vec<EntryId> = match args.command {
-        Command::Find | Command::Export => scope.into_iter().filter(|&id| query.is_none() || filter.is_matched(id)).collect(),
-        Command::Top if args.files => scope.into_iter().filter(|&id| !index.is_dir(id) && filter.is_counted(id)).collect(),
-        Command::Top => scope
-            .into_iter()
-            .filter(|&id| index.is_dir(id) && filter.totals(&index, id).files > 0)
-            .collect(),
-    };
-    if args.command == Command::Top {
-        ids.sort_by_cached_key(|&id| (std::cmp::Reverse(filter.totals(&index, id).on_disk), index.path(id)));
-        match args.limit.unwrap_or(DEFAULT_LIMIT) {
-            0 => {}
-            n => ids.truncate(n),
-        }
-    } else {
-        ids.sort_by_cached_key(|&id| index.path(id));
-    }
-    write_entries(out, args, &index, &filter, &categories, &ids)?;
-    out.flush()?;
-    Ok(ids.len())
+    let rows = search::run(&index, &categories, query.as_ref(), search).map_err(Failure::Message)?;
+    Ok(Found { rows, last_synced })
 }
 
-fn write_entries(
-    out: &mut impl Write,
-    args: &Args,
-    index: &Index,
-    filter: &Filter,
-    categories: &CategoryMap,
-    ids: &[EntryId],
-) -> Result<(), Failure> {
+fn write_rows(out: &mut impl Write, args: &Args, rows: &[Row]) -> Result<(), Failure> {
     match args.format {
-        Format::Csv => write_csv(out, index, filter, categories, ids)?,
+        Format::Csv => {
+            out.write_all(export::HEADER)?;
+            for row in rows {
+                export::write_entry(
+                    out,
+                    &export::CsvEntry {
+                        path: &row.path,
+                        name: &row.name,
+                        logical: row.logical_size,
+                        on_disk: row.on_disk_size,
+                        modified_ns: row.modified_ns,
+                        category: row.category.as_deref().unwrap_or(""),
+                        owner: row.owner.as_deref().unwrap_or(""),
+                        owner_kind: row.owner_kind.as_deref().unwrap_or(""),
+                    },
+                )?;
+            }
+        }
         Format::Json => {
-            let rows: Vec<_> = ids
-                .iter()
-                .map(|&id| {
-                    let totals = filter.totals(index, id);
-                    let name = index.name(id);
-                    let owner = index.entry_owner(id);
-                    serde_json::json!({
-                        "path": index.path(id).to_string_lossy(),
-                        "name": name,
-                        "is_dir": index.is_dir(id),
-                        "logical_size": totals.logical,
-                        "on_disk_size": totals.on_disk,
-                        "modified_ns": index.modified(id),
-                        "category": (!index.is_dir(id)).then(|| categories.of_name(name).name()),
-                        "owner": owner.map(|o| o.name.as_str()),
-                        "owner_kind": owner.map(|o| o.kind.name()),
-                    })
-                })
-                .collect();
-            serde_json::to_writer_pretty(&mut *out, &rows).map_err(io::Error::from)?;
+            serde_json::to_writer_pretty(&mut *out, rows).map_err(io::Error::from)?;
             writeln!(out)?;
         }
         Format::Plain => {
-            for &id in ids {
+            for row in rows {
                 if args.command == Command::Top {
-                    write!(out, "{}\t", filter.totals(index, id).on_disk)?;
+                    write!(out, "{}\t", row.on_disk_size)?;
                 }
-                writeln!(out, "{}", index.path(id).display())?;
+                writeln!(out, "{}", row.path)?;
             }
         }
     }
     Ok(())
 }
 
-/// Live Entries under `path` (not `path` itself), or every live Entry without one.
-fn scope(index: &Index, path: Option<&std::path::Path>) -> Result<Vec<EntryId>, Failure> {
-    let Some(path) = path else {
-        return Ok((0..index.capacity() as u32).map(EntryId).filter(|&id| index.is_live(id)).collect());
-    };
-    let root = index
-        .find_path(path)
-        .ok_or_else(|| Failure::Message(format!("{} is not in the Index", path.display())))?;
-    let mut found = Vec::new();
-    let mut stack = vec![root];
-    while let Some(dir) = stack.pop() {
-        for child in index.children(dir) {
-            if index.is_live(child) {
-                found.push(child);
-                if index.is_dir(child) {
-                    stack.push(child);
-                }
-            }
-        }
-    }
-    Ok(found)
-}
-
-/// The app's overall Last Synced: its least recently synced Location's.
-fn last_synced(index: &Index) -> String {
-    match index.oldest_synced() {
-        None => "never (the Index has no Locations)".into(),
-        Some(None) => "never (a Location has not finished its first sync)".into(),
-        Some(Some(at)) => match chrono::DateTime::from_timestamp(at, 0) {
+fn last_synced_label(last_synced: LastSynced) -> String {
+    match last_synced {
+        LastSynced::NoLocations => "never (the Index has no Locations)".into(),
+        LastSynced::NotYet => "never (a Location has not finished its first sync)".into(),
+        LastSynced::At(at) => match chrono::DateTime::from_timestamp(at, 0) {
             Some(t) => t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %:z").to_string(),
             None => "unknown".into(),
         },

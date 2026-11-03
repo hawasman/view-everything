@@ -29,8 +29,10 @@ It keeps one Index of every file on your Volumes, saved between runs, so searchi
 - **Browse:** a tree and a flat list beside a Treemap, all driven by one Query box that works from every page. Double-click any folder to zoom into it. Select several rows for the right-click menu: Open, Show in file manager, Open terminal here, Copy path, Trash, Sync this folder and Export selection to CSV.
 - **Treemap and Inspector:** folders labelled with their name and size down to an adjustable Depth, coloured by Category or by Owner kind; hover shows every enclosing folder. The **Inspector** at the right shows the selected Entry's size, share and contents, with its actions; it shows a Location or a Task the same way.
 - **Owners:** the program, game, package or project a folder belongs to, found for Steam games, installed programs, system folders and code projects. [More](docs/guide/owners.md)
+- **Apps:** installed packages, Flatpaks, Steam games and `/opt` programs on Linux, each with its size on disk from its Owner roots. [More](docs/guide/apps.md)
 - **Snapshots and Compare with:** a daily Snapshot of folder sizes, and a Change column showing what grew. [More](docs/guide/snapshots-and-export.md)
 - **Export** to CSV or the Treemap to PNG. [More](docs/guide/snapshots-and-export.md#export)
+- **Performance:** CPU per core (performance and efficiency cores told apart), memory composition and per-disk throughput, now or at any second of the last hour on the Timeline dock (Linux). [More](docs/guide/performance.md)
 
 ### Clean
 - **Cleaner:** temporary files, caches and build artefacts (`target/`, `node_modules`, `.next` …), each with its size and a safe default tick. Every item is checked again on disk before it is removed. Add your own Cleanup Rules in TOML. [More](docs/guide/cleanup-rules.md)

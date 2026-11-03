@@ -2,9 +2,14 @@
 //! updates, Sync scheduling and Snapshots, and the Views computed for a Query. It knows nothing
 //! of a GUI; its clients hold an [`Engine`] and are told to redraw through [`Repaint`].
 
+pub mod apps;
 pub mod format;
 mod live;
+pub mod perf;
+pub mod permissions;
+pub mod socket;
 pub mod tasks;
+pub mod timeline;
 pub mod view;
 
 use chrono::{Local, Utc};
@@ -108,6 +113,8 @@ pub struct Shared {
     folders_syncing: Mutex<Vec<EntryId>>,
     /// Background work clients list (Sync, Duplicate search, Cleaner, ...).
     pub tasks: Tasks,
+    /// The Permissions the user granted, read through [`Engine::permissions`].
+    pub permissions: permissions::Store,
     /// Called from the background threads whenever something a client shows has changed.
     pub repaint: Repaint,
 }
@@ -190,6 +197,9 @@ pub struct Engine {
     /// How many Queries were sent; the view thread stops computing one when this has moved on.
     newest_query: Arc<AtomicU64>,
     indexer: Mutex<Option<JoinHandle<()>>>,
+    pub perf: perf::Perf,
+    /// The Apps Module's installed programs (`apps.list`).
+    pub apps: apps::Apps,
 }
 
 impl Engine {
@@ -238,6 +248,7 @@ impl Engine {
             sync_queued: AtomicBool::new(false),
             folders_syncing: Mutex::new(Vec::new()),
             tasks,
+            permissions: permissions::Store::default(),
             repaint,
         });
         let (commands, command_rx) = mpsc::channel();
@@ -262,11 +273,13 @@ impl Engine {
         let _ = commands.send(Command::SetLiveHelper(live_helper));
         let _ = queries.send(String::new());
         Engine {
+            perf: perf::Perf::start(perf::platform_backend(), shared.repaint.clone()),
             shared,
             commands,
             queries,
             newest_query,
             indexer: Mutex::new(Some(indexer)),
+            apps: apps::Apps::new(),
         }
     }
 
@@ -1397,6 +1410,7 @@ mod tests {
             live_held: AtomicU64::new(0),
             followed: Mutex::new(HashSet::new()),
             tasks: Tasks::new(),
+            permissions: Default::default(),
             repaint: Arc::new(|| {}),
         }
     }

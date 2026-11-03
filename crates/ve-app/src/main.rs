@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod apps;
 mod autostart;
 #[cfg(feature = "bench")]
 mod bench;
@@ -20,6 +21,7 @@ mod host;
 mod inspector;
 mod locations;
 mod motion;
+mod performance;
 mod scope;
 mod selection;
 mod settings;
@@ -55,6 +57,7 @@ fn main() {
     }
 
     let mut problems = Vec::new();
+    let socket = single_instance(&mut problems);
     let settings = Settings::load().unwrap_or_else(|e| {
         problems.push(format!("Settings ignored: {e}"));
         Settings::default()
@@ -108,6 +111,36 @@ fn main() {
             gpui_kit::init(cx);
             theme::init(settings.theme, cx);
             motion::init(settings.reduce_motion, cx);
-            host::Host::start(&settings, categories, volumes, problems, login, cx);
+            host::Host::start(&settings, categories, volumes, problems, login, socket, cx);
         });
+}
+
+/// The single-instance rule (ADR-0016): the first launch binds the engine socket and hosts the
+/// Engine; a later one asks it to show its window and exits here (a login start just exits).
+/// A socket that cannot be bound is a problem to show, not a reason not to start.
+fn single_instance(problems: &mut Vec<String>) -> Option<ve_engine::socket::Listener> {
+    use ve_engine::socket::{self, Claim};
+    let path = socket::path()?;
+    match socket::claim(&path) {
+        Ok(Claim::Host(listener)) => Some(listener),
+        Ok(Claim::Running(_)) if autostart::started_at_login() => std::process::exit(0),
+        Ok(Claim::Running(mut app)) => match app.call("show", Default::default()) {
+            Ok(_) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("View Everything is already running but did not show its window: {e}");
+                std::process::exit(1)
+            }
+        },
+        Ok(Claim::Incompatible(reason)) => {
+            eprintln!("Another version of View Everything is running ({reason}); quit it first.");
+            std::process::exit(1)
+        }
+        Err(e) => {
+            problems.push(format!(
+                "The engine socket {} could not be opened ({e}): `ve` reads the saved Index instead, and launching the app again starts a second copy",
+                path.display()
+            ));
+            None
+        }
+    }
 }

@@ -7493,6 +7493,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "ve-core",
+ "ve-engine",
+ "ve-scan",
 ]
 
 [[package]]
@@ -7519,9 +7521,12 @@ dependencies = [
  "libc",
  "parking_lot 0.13.0",
  "rayon",
+ "serde",
+ "serde_json",
  "tempfile",
  "ve-core",
  "ve-scan",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

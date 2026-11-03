@@ -1,7 +1,8 @@
-//! "Compare with": the Explorer's choice of a Snapshot date, and the comparison of the Index
-//! with it, computed off the UI thread and kept current while the Index changes.
+//! "Compare with": Browse's reading of the Moment (the Snapshot nearest it), and the
+//! comparison of the Index with that Snapshot, computed off the UI thread and kept current
+//! while the Index changes.
 
-use chrono::NaiveDate;
+use chrono::{Local, NaiveDate, TimeZone as _};
 use gpui_kit::*;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant};
 use ve_core::snapshot::{self, Comparison, Snapshot};
 use ve_engine::Shared;
 use ve_engine::tasks::{Outcome, TaskHandle, TaskKind, Tasks};
+use ve_engine::timeline::Moment;
 
 /// The least time between two recomputations while the Index keeps changing.
 const REFRESH: Duration = Duration::from_secs(5);
@@ -197,6 +199,24 @@ fn user_compare_running(tasks: &Tasks) -> bool {
     tasks.is_running(TaskKind::Compare)
 }
 
+/// The Moment a Snapshot's tick on the dock stands for: midday of its date.
+pub fn moment_of(date: NaiveDate) -> Moment {
+    let noon = date.and_hms_opt(12, 0, 0).expect("midday exists");
+    let time = Local
+        .from_local_datetime(&noon)
+        .earliest()
+        .map_or_else(|| noon.and_utc().timestamp(), |t| t.timestamp());
+    Moment::At(time)
+}
+
+/// The Snapshot Files shows at `moment`: none while Live, otherwise the one whose date is
+/// nearest the Moment's day (the earlier of two as near). `dates` is newest first.
+pub fn nearest_snapshot(dates: &[NaiveDate], moment: Moment) -> Option<NaiveDate> {
+    let Moment::At(time) = moment else { return None };
+    let day = Local.timestamp_opt(time, 0).earliest()?.date_naive();
+    dates.iter().rev().copied().min_by_key(|&d| (d - day).num_days().abs())
+}
+
 #[cfg(test)]
 mod tests {
     use ve_engine::tasks::{Outcome, TaskKind, Tasks};
@@ -212,5 +232,36 @@ mod tests {
         task.finish(Outcome::Cancelled);
         other.finish(Outcome::Cancelled);
         assert!(!super::user_compare_running(&tasks));
+    }
+
+    fn day(text: &str) -> chrono::NaiveDate {
+        text.parse().unwrap()
+    }
+
+    /// A local time on `date`.
+    fn at(date: &str, hour: u32) -> super::Moment {
+        use chrono::TimeZone as _;
+        let local = day(date).and_hms_opt(hour, 30, 0).unwrap();
+        super::Moment::At(chrono::Local.from_local_datetime(&local).earliest().unwrap().timestamp())
+    }
+
+    #[test]
+    fn files_shows_the_snapshot_nearest_the_moment() {
+        let dates = [day("2026-10-30"), day("2026-10-20"), day("2026-10-10")];
+        assert_eq!(super::nearest_snapshot(&dates, super::Moment::Live), None);
+        assert_eq!(super::nearest_snapshot(&dates, at("2026-10-30", 9)), Some(day("2026-10-30")));
+        assert_eq!(super::nearest_snapshot(&dates, at("2026-11-01", 23)), Some(day("2026-10-30")));
+        assert_eq!(super::nearest_snapshot(&dates, at("2026-10-24", 1)), Some(day("2026-10-20")));
+        // Five days from either: the earlier.
+        assert_eq!(super::nearest_snapshot(&dates, at("2026-10-15", 12)), Some(day("2026-10-10")));
+        assert_eq!(super::nearest_snapshot(&[], at("2026-10-15", 12)), None);
+    }
+
+    #[test]
+    fn a_snapshot_tick_maps_back_to_its_own_snapshot() {
+        let dates = [day("2026-10-30"), day("2026-10-29"), day("2026-10-28")];
+        for &date in &dates {
+            assert_eq!(super::nearest_snapshot(&dates, super::moment_of(date)), Some(date));
+        }
     }
 }

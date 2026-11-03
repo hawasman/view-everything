@@ -4,14 +4,22 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use ve_core::{MANUAL_REFRESH, Remote};
+use ve_engine::permissions::{Kind, Permission};
 use ve_scan::VolumeInfo;
 
 use ve_core::paths::APP_DIR;
 pub use ve_core::paths::load_categories;
 
+/// What `version` a settings file written now carries. Version 1 replaced the `live_helper` and
+/// `start_at_login` booleans with Permission entries.
+pub const VERSION: u32 = 1;
+
 /// User choices that outlive a session, stored as `settings.toml`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Settings {
+    /// The settings format; a file without one predates Permissions (0).
+    #[serde(default)]
+    pub version: u32,
     /// Removable Volumes and network shares the user asked to index, by identity. A mount path from an older
     /// settings file still matches the Volume mounted there.
     #[serde(default)]
@@ -49,10 +57,10 @@ pub struct Settings {
     /// When the last update check ran, in Unix seconds.
     #[serde(default)]
     pub last_update_check: Option<i64>,
-    /// Linux: follow file changes live with the `fanotify` helper, started with pkexec while the
-    /// app runs (ADR-0009). Off until the user asks.
+    /// The approvals the user granted (Permissions): the Live updates helper, start at login. The
+    /// Engine holds them while the app runs and is the one place they change.
     #[serde(default)]
-    pub live_helper: bool,
+    pub permissions: Vec<Permission>,
     /// Queries the user saved under a name, in the order saved.
     #[serde(default)]
     pub saved_queries: Vec<SavedQuery>,
@@ -74,9 +82,6 @@ pub struct Settings {
     /// Closing the window leaves the app running in the system tray (needs a tray).
     #[serde(default)]
     pub keep_in_tray: bool,
-    /// Start the app when the user logs in (straight to the tray, or a minimized window).
-    #[serde(default)]
-    pub start_at_login: bool,
     /// Show no animations (Reduce motion); off follows the operating system.
     #[serde(default)]
     pub reduce_motion: bool,
@@ -144,6 +149,7 @@ const NETWORK_REFRESH_MINUTES: u64 = 120;
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            version: VERSION,
             include: Vec::new(),
             exclude: Vec::new(),
             declined: Vec::new(),
@@ -154,7 +160,7 @@ impl Default for Settings {
             remote_names: BTreeMap::new(),
             recent_query: None,
             update_checks: true,
-            live_helper: false,
+            permissions: Vec::new(),
             last_update_check: None,
             saved_queries: Vec::new(),
             cleaner_temp_days: default_temp_days(),
@@ -163,7 +169,6 @@ impl Default for Settings {
             treemap_depth: default_treemap_depth(),
             treemap_colour_by: Default::default(),
             keep_in_tray: false,
-            start_at_login: false,
             reduce_motion: false,
         }
     }
@@ -183,6 +188,38 @@ fn names(key: &str, volume: &VolumeInfo) -> bool {
 }
 
 impl Settings {
+    /// Reads a settings file. In one older than [`VERSION`], a Live updates helper or start at
+    /// login the user had switched on becomes a Permission granted before this version.
+    pub fn from_toml(text: &str) -> Result<Settings, toml::de::Error> {
+        #[derive(Deserialize)]
+        struct Before {
+            #[serde(default)]
+            live_helper: bool,
+            #[serde(default)]
+            start_at_login: bool,
+        }
+        let mut settings: Settings = toml::from_str(text)?;
+        if settings.version < VERSION {
+            let before: Before = toml::from_str(text)?;
+            for (kind, on) in [(Kind::LiveHelper, before.live_helper), (Kind::StartAtLogin, before.start_at_login)] {
+                if on && !settings.has(kind) {
+                    settings.permissions.push(Permission {
+                        kind,
+                        subject: kind.subject().to_owned(),
+                        granted_at: None,
+                    });
+                }
+            }
+            settings.version = VERSION;
+        }
+        Ok(settings)
+    }
+
+    /// Whether a Permission of `kind` is granted.
+    pub fn has(&self, kind: Kind) -> bool {
+        self.permissions.iter().any(|p| p.kind == kind)
+    }
+
     /// Local fixed Volumes are indexed unless excluded; removable ones and network shares only
     /// when included.
     pub fn is_indexed(&self, volume: &VolumeInfo) -> bool {
@@ -388,24 +425,50 @@ impl Settings {
             return Ok(Settings::default());
         };
         match fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
+            Ok(text) => Settings::from_toml(&text).map_err(|e| format!("{}: {e}", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
             Err(e) => Err(format!("{}: {e}", path.display())),
         }
     }
 
-    pub fn save(&self) -> Result<(), String> {
+    /// Saves the settings with the Permissions `permissions` returns, read while no other save
+    /// can run: a Permission the Engine dropped meanwhile is never written back.
+    pub fn save(&mut self, permissions: impl FnOnce() -> Vec<Permission>) -> Result<(), String> {
+        let _writing = WRITING.lock();
+        self.permissions = permissions();
+        self.write()
+    }
+
+    /// Writes `permissions` into the settings file, leaving the rest as it is there. A file that
+    /// cannot be read is left alone rather than replaced with defaults.
+    pub fn save_permissions(permissions: &[Permission]) -> Result<(), String> {
+        let _writing = WRITING.lock();
+        let mut settings = Settings::load()?;
+        settings.permissions = permissions.to_vec();
+        settings.write()
+    }
+
+    fn write(&self) -> Result<(), String> {
         let path = settings_path().ok_or("no configuration folder on this system")?;
         let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
         write_file(&path, &text).map_err(|e| format!("{}: {e}", path.display()))
     }
 }
 
+/// Held while `settings.toml` is written. The Settings page and the Engine (through
+/// [`Settings::save_permissions`]) both write it, from different threads.
+static WRITING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Replaces `path` whole, so a reader never sees half a file. A symlinked file is replaced where
+/// the link points.
 fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    fs::write(path, text)
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let partial = path.with_extension("toml.partial");
+    fs::write(&partial, text)?;
+    fs::rename(&partial, &path)
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -451,10 +514,52 @@ mod tests {
 
     #[test]
     fn a_v0_1_0_file_loads_with_the_new_defaults() {
-        let s: Settings = toml::from_str("refresh_minutes = 30\n").unwrap();
+        let s = Settings::from_toml("refresh_minutes = 30\n").unwrap();
         assert_eq!(s.duplicate_exclusions, default_duplicate_exclusions());
         assert_eq!(s.treemap_depth, default_treemap_depth());
-        assert!(!s.keep_in_tray && !s.start_at_login);
+        assert!(!s.keep_in_tray && s.permissions.is_empty());
+    }
+
+    #[test]
+    fn an_old_file_s_helper_and_start_at_login_become_permissions_granted_before_this_version() {
+        let old = "live_helper = true\nstart_at_login = true\nkeep_in_tray = true\n";
+        let s = Settings::from_toml(old).unwrap();
+        let granted_before = |kind: Kind, subject: &str| Permission {
+            kind,
+            subject: subject.into(),
+            granted_at: None,
+        };
+        let expected = vec![
+            granted_before(Kind::LiveHelper, "ve-fanotify"),
+            granted_before(Kind::StartAtLogin, "view-everything"),
+        ];
+        assert_eq!(s.permissions, expected);
+        assert_eq!(s.version, 1);
+        assert!(s.keep_in_tray);
+        // Saved, the file holds the entries and no booleans; read again, nothing is added.
+        let saved = toml::to_string_pretty(&s).unwrap();
+        assert!(!saved.contains("live_helper =") && !saved.contains("start_at_login ="));
+        assert_eq!(Settings::from_toml(&saved).unwrap().permissions, expected);
+        // Switched off before, nothing is granted.
+        assert!(Settings::from_toml("live_helper = false\n").unwrap().permissions.is_empty());
+    }
+
+    #[test]
+    fn a_revoked_permission_stays_revoked_even_beside_a_stray_old_boolean() {
+        let s = Settings::from_toml("version = 1\nlive_helper = true\n").unwrap();
+        assert!(s.permissions.is_empty());
+    }
+
+    #[test]
+    fn a_permission_survives_a_save_with_its_grant_time() {
+        let mut s = Settings::default();
+        s.permissions.push(Permission {
+            kind: Kind::StartAtLogin,
+            subject: "view-everything".into(),
+            granted_at: Some(1_700_000_000),
+        });
+        let back = Settings::from_toml(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
     }
 
     #[test]

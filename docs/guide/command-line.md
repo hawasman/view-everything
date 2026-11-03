@@ -1,6 +1,6 @@
 # Command line
 
-`ve` reads the saved Index. It never writes it, so it works while the app runs. Open the app once to build the Index.
+`ve` asks the running app, so its answers include changes from the last few seconds. With the app closed it reads the saved Index instead, and says so on stderr. It never writes the Index. Open the app once to build it.
 
 ## Where to find it
 
@@ -21,7 +21,7 @@ ve export [--json] [--path DIR] [QUERY]...                           CSV of a Qu
 
 - `ve du` is the same as `ve top`. Under a Query it ranks by Filtered Size.
 - `top` prints `<bytes>\t<path>`.
-- `--index FILE` reads another saved Index.
+- `--index FILE` reads that saved Index file instead of asking the app.
 
 The Query is the same [language](query-language.md) as the app's. Quote it for your shell, or put `--` before words that start with `-`.
 
@@ -36,7 +36,7 @@ ve export dm:>=2025-01 > recent.csv
 
 ## Output and exit codes
 
-The Index's Last Synced time goes to stderr, so pipes stay clean.
+Last Synced goes to stderr, so pipes stay clean. So does `ve: the app is not running; reading the saved Index file` when `ve` falls back to the file.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -44,4 +44,26 @@ The Index's Last Synced time goes to stderr, so pipes stay clean.
 | 1 | no match |
 | 2 | a bad argument or Query, or an unreadable Index |
 
-`dupe:`, `is:duplicate` and `is:cleanable` find nothing from the command line, because it neither reads `hashes.bin` nor runs the Cleaner. `is:offline` is a bad Query there: the command line does not know which Volumes are mounted.
+## The app's socket
+
+While it runs, the app listens on `$XDG_RUNTIME_DIR/view-everything/engine.sock` (a per-user folder in the temporary folder where there is no `XDG_RUNTIME_DIR`). The folder is open to your account only, so other users on the machine cannot read your Index through it; the app refuses a folder that is not. `VE_SOCKET` moves the socket, into a folder that is yours alone or does not exist yet. On Windows it is a named pipe, `\\.\pipe\view-everything-<your user's SID>-engine`, that only your account can open and that refuses connections from other machines; `VE_SOCKET` names a different pipe. A request line longer than 1 MiB is refused, and a client gives up on an app that does not answer its handshake within 5 seconds (`ve` then reads the file).
+
+Asking the app, `dupe:` and `is:duplicate` use the Duplicates it has found so far, `is:cleanable` what the Cleaner last found, and `is:offline` the Volumes mounted now. Reading the file, `dupe:`, `is:duplicate` and `is:cleanable` find nothing, and `is:offline` is a bad Query: the file does not know which Volumes are mounted.
+
+Launching the app a second time uses the same socket: the running app shows its window and the new launch exits.
+
+### Protocol
+
+Newline-delimited JSON, one message per line. The client opens with `{"version": 1}`; the app answers `{"version": 1, "engine": "view-everything 0.3.0"}`, or refuses another version with `{"error": "...", "expected": 1}` and closes. Then each request is `{"id": 1, "method": "...", "params": ...}`, and every reply carries its `id`: one `{"id", "result"}`, a stream of `{"id", "item"}` lines ending with `{"id", "end"}`, or `{"id", "error"}`.
+
+| Method | Params | Replies |
+| --- | --- | --- |
+| `echo` | anything | `result`: the params |
+| `show` | none | shows the window; `result`: `null` |
+| `search` | `query`, `path` (absolute), `select` (`matches`, `largest_folders`, `largest_files`), `limit` | one `item` per Entry (`path`, `name`, `is_dir`, `logical_size`, `on_disk_size`, `modified_ns` (`null` when unknown), `category`, `owner`, `owner_kind`); `end`: `count`, `last_synced` |
+| `tasks` | `follow` (bool) | one `item` per running Task (`task`, `kind`, `label`, `done`, `total`, `unit`); following, then one per change, and one with `outcome` when a Task finishes, until none runs; `end`: `{}` |
+
+```sh
+printf '{"version":1}\n{"id":1,"method":"search","params":{"query":"ext:iso","limit":3}}\n' \
+  | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/view-everything/engine.sock
+```

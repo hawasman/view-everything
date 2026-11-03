@@ -67,7 +67,7 @@ Measurements recorded over time (performance, network), browsable by moment; a m
 _Avoid_: history, recording, log
 
 **Compare with**:
-The choice of a Snapshot date on the Timeline dock while on Browse. The tree then gains a **Change** column: each folder's On-disk Size now minus its Size in the Snapshot, `new` for a folder the Snapshot lacked, and a muted `(removed)` row under the parent of a folder it had that is gone. Back to Live ends it.
+Browse's reading of the Moment: the Snapshot nearest the Moment's day (none while Live). Clicking a Snapshot tick on the Timeline dock moves the Moment to that day. The tree then gains a **Change** column: each folder's On-disk Size now minus its Size in the Snapshot, `new` for a folder the Snapshot lacked, and a muted `(removed)` row under the parent of a folder it had that is gone. Back to Live ends it.
 
 ### Size
 
@@ -130,8 +130,12 @@ The column of Modules and their pages at the left of the window, with the Work b
 _Avoid_: sidebar, menu
 
 **Inspector**:
-The pane at the right that shows whatever is selected (an Entry, a Location, a Task, a group of Duplicates) with its facts and the actions it allows. It follows the selection; Esc clears it.
+The pane at the right that shows whatever is selected (an Entry, a Location, a Task, a group of Duplicates, an installed program) with its facts and the actions it allows. It follows the selection; Esc clears it.
 _Avoid_: details pane, properties, selection panel
+
+**Apps**:
+The page listing the installed programs (system packages, Flatpaks, Steam games, programs under `/opt`) with each one's On-disk Size: the Folder Size of its Owner roots, or "—" when none of them is indexed. Shown in the rail once any program is known.
+_Avoid_: programs page, software list
 
 **Timeline dock**:
 The strip at the foot of the window that holds the Moment and lets the user scrub each Module's Timeline or Snapshots.
