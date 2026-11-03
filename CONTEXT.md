@@ -67,7 +67,7 @@ Measurements recorded over time (performance, network), browsable by moment; a m
 _Avoid_: history, recording, log
 
 **Compare with**:
-The choice of a Snapshot date on the Timeline dock while on Browse. The tree then gains a **Change** column: each folder's On-disk Size now minus its Size in the Snapshot, `new` for a folder the Snapshot lacked, and a muted `(removed)` row under the parent of a folder it had that is gone. Back to Live ends it.
+Browse's reading of the Moment: the Snapshot nearest the Moment's day (none while Live). Clicking a Snapshot tick on the Timeline dock moves the Moment to that day. The tree then gains a **Change** column: each folder's On-disk Size now minus its Size in the Snapshot, `new` for a folder the Snapshot lacked, and a muted `(removed)` row under the parent of a folder it had that is gone. Back to Live ends it.
 
 ### Size
 
@@ -118,7 +118,7 @@ _Avoid_: owner folder, install dir
 ### Views
 
 **Overview**:
-The home view: what is indexed, what can be cleaned up, what is in the Trash and when the Index was last synced, then the Locations, the Categories, the largest and the most recently modified files.
+The home view: three answers first, most severe first (what is filling the disk, what is slowing the machine, what is talking on the network), then what is indexed, what is in the Trash and when the Index was last synced, the Locations, the Categories, the largest and the most recently modified files.
 _Avoid_: dashboard, home, summary
 
 **Browse**:
@@ -130,8 +130,16 @@ The column of Modules and their pages at the left of the window, with the Work b
 _Avoid_: sidebar, menu
 
 **Inspector**:
-The pane at the right that shows whatever is selected (an Entry, a Location, a Task, a group of Duplicates) with its facts and the actions it allows. It follows the selection; Esc clears it.
+The pane at the right that shows whatever is selected (an Entry, a Location, a Task, a group of Duplicates, an installed program) with its facts and the actions it allows. It follows the selection; Esc clears it.
 _Avoid_: details pane, properties, selection panel
+
+**Apps**:
+The page listing the installed programs (system packages, Flatpaks, Steam games, programs under `/opt`) with each one's On-disk Size: the Folder Size of its Owner roots, or "—" when none of them is indexed; and, on its Startup tab, the startup items. Shown in the rail once any program or startup item is known.
+_Avoid_: programs page, software list
+
+**Startup item**:
+Something that starts when the user logs in: an XDG autostart entry or a systemd user unit enabled in the default target, with what it runs and the file that defines it. A user's entry hides the system one of the same name.
+_Avoid_: login item, autorun, startup app
 
 **Timeline dock**:
 The strip at the foot of the window that holds the Moment and lets the user scrub each Module's Timeline or Snapshots.
@@ -140,8 +148,16 @@ The strip at the foot of the window that holds the Moment and lets the user scru
 The one point in time the whole window shows: Live, or a chosen time. Each Module reads it its own way — Files shows the nearest Snapshot, Performance and Network the sample taken then.
 _Avoid_: date, time cursor, position
 
+**Process**:
+A program running on the machine, as Performance lists it: known by its PID and its start time together, so a PID the system reuses names another Process. Not a Task, which is the app's own background work.
+_Avoid_: task, job (for these)
+
+**Connection**:
+An open TCP or UDP socket, as Network lists it: protocol, local and remote address, state, and the Process holding it, or "unknown" when that Process cannot be read. Not a Location, Remote or Volume, which are where files are.
+_Avoid_: socket (in the UI), link, session
+
 **Launcher**:
-The window the global hotkey opens anywhere on the desktop: a single line that finds Entries, installed apps and app actions by name, keyboard only. Not the Query box, which is the Files Module's search.
+The window the global hotkey (or the tray menu) opens anywhere on the desktop, with or without the main window: a single line that finds Entries and installed programs by name, keyboard only. Not the Query box, which is the Files Module's search.
 _Avoid_: search (for this), spotlight, palette
 
 **Work block**:
@@ -161,6 +177,10 @@ _Avoid_: size map, block view
 **Permission**:
 An approval the user granted for something beyond the app's core features, such as an elevated helper, the background service, start at login or an agent's access to a Module. Every Permission can be revoked.
 _Avoid_: consent, grant, access right
+
+**Agent**:
+A program the user runs that asks the app questions over MCP (`ve mcp serve`), such as Claude or an IDE assistant. An agent is its client name plus a key issued on first contact; it reads a Module only under a Permission for that Module, which the user grants by approving the agent's 4-character code. Agents only read.
+_Avoid_: client, bot, assistant (unqualified)
 
 ### Changes
 

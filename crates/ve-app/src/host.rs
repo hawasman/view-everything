@@ -1,15 +1,18 @@
-//! The app-level owner of the Engine (ADR-0012). The window is one view of it and the tray is
-//! another: the window can close while indexing, Live updates and Tasks go on, and a window
-//! opened later binds to the same Engine. The Engine itself knows nothing of GPUI.
+//! The app-level owner of the Engine (ADR-0012). The window is one view of it, the tray and the
+//! Launcher are others: the window can close while indexing, Live updates and Tasks go on, and a
+//! window opened later binds to the same Engine. The Engine itself knows nothing of GPUI.
 
+use crate::launcher::{self, Shortcut};
 use crate::settings::Settings;
 use crate::tray::{Tray, TrayAction, TrayState};
 use async_channel::{Receiver, Sender};
 use gpui_kit::*;
 use parking_lot::Mutex;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use ve_core::CategoryMap;
+use ve_engine::permissions::{Hooks, Kind};
 use ve_engine::{Config, Engine, Repaint};
 use ve_scan::VolumeInfo;
 
@@ -44,6 +47,10 @@ pub struct Host {
     problems: Vec<String>,
     /// How the Explorer looked when the last window closed to the tray; the next window starts there.
     pub remembered: Option<crate::app::Remembered>,
+    /// The main window and its Shell, while one is open.
+    main: Option<(AnyWindowHandle, WeakEntity<crate::app::Shell>)>,
+    /// The Launcher's global shortcut.
+    pub shortcut: Entity<Shortcut>,
 }
 
 impl Global for Host {}
@@ -56,9 +63,18 @@ pub struct Attached {
 }
 
 impl Host {
-    /// Starts the Engine, the tray and the loops that serve them, and registers the host. Opens
-    /// the first window unless this is a login start with a tray to wait in.
-    pub fn start(settings: &Settings, categories: CategoryMap, volumes: Vec<VolumeInfo>, problems: Vec<String>, login: bool, cx: &mut App) {
+    /// Starts the Engine, the tray, the engine socket (when `socket` is bound) and the loops that
+    /// serve them, and registers the host. Opens the first window unless this is a login start
+    /// with a tray to wait in.
+    pub fn start(
+        settings: &Settings,
+        categories: CategoryMap,
+        volumes: Vec<VolumeInfo>,
+        problems: Vec<String>,
+        login: bool,
+        socket: Option<ve_engine::socket::Listener>,
+        cx: &mut App,
+    ) {
         let wires = Arc::new(Mutex::new(Wires::default()));
         let repaint: Repaint = {
             let wires = wires.clone();
@@ -70,7 +86,7 @@ impl Host {
             })
         };
         let indexed: Vec<VolumeInfo> = volumes.iter().filter(|v| settings.is_indexed(v)).cloned().collect();
-        let paused = login && cfg!(target_os = "linux") && settings.live_helper;
+        let paused = login && cfg!(target_os = "linux") && settings.has(Kind::LiveHelper);
         let config = Config {
             index_path: ve_core::paths::index_path(),
             mounted: volumes.clone(),
@@ -78,14 +94,36 @@ impl Host {
             remotes: settings.remotes.clone(),
             intervals: settings.intervals(&indexed),
             categories: categories.clone(),
-            live_helper: settings.live_helper && !paused,
+            live_helper: settings.has(Kind::LiveHelper) && !paused,
         };
         let engine = Engine::start(config, repaint.clone());
         engine.set_duplicate_exclusions(settings.duplicate_exclusions.clone());
         engine.set_remote_names(&settings.remote_names);
+        engine.perf.set_recording(settings.keep_in_tray);
+        // The Engine holds the Permissions; a revoke from any client is undone and saved here.
+        engine.permissions().load(settings.permissions.clone());
+        engine.permissions().set_hooks(Hooks {
+            remove_login_entry: Box::new(|| crate::autostart::set(false)),
+            save: Box::new(Settings::save_permissions),
+        });
+        // An agent's request for a Module is announced on the desktop; Settings → Permissions lists it.
+        engine.agents().set_on_request(Box::new(crate::agent_notice::show));
         let engine = Arc::new(engine);
 
         let (actions, chosen) = async_channel::unbounded::<TrayAction>();
+        // A client's `show` (a second launch of the app) opens the window as the tray's Open does;
+        // its `launcher` (`view-everything --launcher`) opens the Launcher as the tray's does.
+        if let Some(listener) = socket {
+            let actions = actions.clone();
+            let show = Arc::new(move |surface| {
+                let action = match surface {
+                    ve_engine::socket::Surface::Window => TrayAction::Open,
+                    ve_engine::socket::Surface::Launcher => TrayAction::Launcher,
+                };
+                let _ = actions.send_blocking(action);
+            });
+            ve_engine::socket::serve(listener, engine.clone(), show);
+        }
         let tray = Tray::start(
             actions,
             TrayState {
@@ -94,6 +132,7 @@ impl Host {
             },
         );
         let has_tray = tray.is_some();
+        let shortcut = Shortcut::start(&settings.launcher_shortcut, launcher::toggle, cx);
         cx.set_global(Host {
             engine,
             categories,
@@ -106,6 +145,8 @@ impl Host {
             quitting: false,
             problems,
             remembered: None,
+            main: None,
+            shortcut,
         });
 
         // Quitting by any path (tray, update, the last window closing) saves the Index.
@@ -116,8 +157,18 @@ impl Host {
             async {}
         })
         .detach();
+        // Closing the main window quits unless the app stays in the tray; the Launcher closing
+        // never does.
         cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() && !cx.global::<Host>().stays_in_tray() {
+            let Some(main) = cx.global::<Host>().main_window() else {
+                return;
+            };
+            if cx.windows().contains(&main) {
+                return;
+            }
+            let host = cx.global_mut::<Host>();
+            host.main = None;
+            if !host.stays_in_tray() {
                 Host::quit(cx);
             }
         })
@@ -171,6 +222,11 @@ impl Host {
         }
     }
 
+    /// The main window, while one is open.
+    fn main_window(&self) -> Option<AnyWindowHandle> {
+        self.main.as_ref().map(|(window, _)| *window)
+    }
+
     /// Quits with the window and tray icon gone first: saving the Index can take seconds, and
     /// an app that looks frozen meanwhile is worse than one that has already vanished.
     pub fn quit(cx: &mut App) {
@@ -218,13 +274,16 @@ impl Host {
         }
     }
 
-    /// Starts the Live updates a login start held back.
+    /// Starts the Live updates a login start held back, if the helper's Permission is still held
+    /// (another client may have revoked it meanwhile).
     pub fn start_live(cx: &mut App) {
         let host = cx.global_mut::<Host>();
         if !std::mem::replace(&mut host.live_paused, false) {
             return;
         }
-        host.engine.set_live_helper(true);
+        if host.engine.permissions().has(Kind::LiveHelper) {
+            host.engine.set_live_helper(true);
+        }
         (host.repaint)();
     }
 
@@ -236,14 +295,16 @@ impl Host {
             }
             TrayAction::SyncNow => cx.global::<Host>().engine.sync_now(),
             TrayAction::StartLive => Self::start_live(cx),
+            TrayAction::Launcher => launcher::toggle(cx),
             TrayAction::Quit => Host::quit(cx),
         }
     }
 
-    /// Shows the window: raises the open one or builds a new one bound to this host.
+    /// Shows the main window: raises the open one or builds a new one bound to this host.
     pub fn open_window(cx: &mut App) -> Option<AnyWindowHandle> {
-        if let Some(window) = cx.windows().into_iter().next() {
-            let _ = window.update(cx, |_, window, _| window.activate_window());
+        if let Some(window) = cx.global::<Host>().main_window()
+            && window.update(cx, |_, window, _| window.activate_window()).is_ok()
+        {
             return Some(window);
         }
         // What the user changed while no window was open is in the file.
@@ -262,7 +323,7 @@ impl Host {
                 title: Some(crate::app::APP_NAME.into()),
                 ..Default::default()
             }),
-            app_id: Some("view-everything".into()),
+            app_id: Some(crate::app::APP_ID.into()),
             ..Default::default()
         };
         let opened = gpui_kit::open_window(options, cx, |window, cx| {
@@ -270,12 +331,28 @@ impl Host {
             cx.new(|cx| crate::app::Shell::new(settings, attached, window, cx))
         });
         match opened {
-            Ok((window, _)) => Some(window),
+            Ok((window, shell)) => {
+                cx.global_mut::<Host>().main = Some((window, shell.downgrade()));
+                Some(window)
+            }
             Err(e) => {
                 eprintln!("Could not open the window: {e}");
                 None
             }
         }
+    }
+
+    /// Shift+Enter in the Launcher: shows the Entry at `path` in Browse in the main window,
+    /// opening one if none is.
+    pub fn show_in_browse(path: &Path, cx: &mut App) {
+        let Some(window) = Self::open_window(cx) else { return };
+        cx.activate(true);
+        let Some(shell) = cx.global::<Host>().main.as_ref().and_then(|(_, shell)| shell.upgrade()) else {
+            return;
+        };
+        let _ = window.update(cx, |_, window, cx| {
+            shell.update(cx, |shell, cx| shell.show_path_in_browse(path, window, cx))
+        });
     }
 
     /// Connects a new window's wake-ups, replacing the previous window's.

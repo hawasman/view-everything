@@ -14,11 +14,25 @@
 - **Duplicates** lists one row per group under its title and facts (groups, copies, wasted space). Clicking a group opens it in the Inspector: its copies (click one to keep it), Open, Show in Browse and Trash others….
 - On Browse, **Filters** opens as a column beside the Treemap instead of replacing it, so the Treemap redraws as you narrow the Query.
 
+### Performance
+- A new Module, **Performance → System** (Linux), appears in the rail with its first sample: the whole machine's and each logical CPU's busy share, with performance and efficiency cores told apart where the kernel reports them; memory used, cache and buffers, free, available and swap; read and write throughput per disk. GPU, temperature and power read "unsupported" rather than zero; a reading the app could not take shows "—". [More](docs/guide/performance.md)
+- **Processes** on Performance → System: every running process with its CPU share, resident memory and, while the page is open, storage read and write per second, sortable by any column. A process is known by its PID and start time, so a recycled PID never shows another process's history. Click one for its command line, user, start time, parent and CPU time in the Inspector. At a past Moment the table shows the 200 busiest and largest processes kept for that second. [More](docs/guide/performance.md#processes)
+- The app keeps one sample a second for the last hour, in memory only, while the window is open or keep in tray is on. The Timeline dock shows that hour as CPU bars on Performance; press or drag on it to see any second, **Back to Live** to return. Seconds with no sample are drawn as gaps, never as idle.
+- The **Moment** on the dock is shared by every page: Browse compares with the Snapshot nearest it, Performance shows the sample of that second. Back to Live shows on every page while the Moment is not Live.
+
+### Network
+- A new Module, **Network** (Linux), appears in the rail under Performance → System once a sample has interfaces: each interface's receive and send rate at the Moment and what it moved in the last hour, with the busiest named. Loopback is left out. Recorded with Performance, in the same samples, so the Timeline dock scrubs it the same way; on the Network page its lane shows the hour's throughput. An interface that goes away keeps its row and its history for the hour. A rate the app cannot take (a new interface, a reset counter) shows "—". [More](docs/guide/network.md)
+- The page says that per-app traffic needs administrator rights and is not available yet; nothing prompts for them.
+- **Connections** on Network: every open TCP and UDP connection (IPv4 and IPv6) with its local and remote address, state and the process holding it; "unknown" where that process cannot be read (another user's), never "nobody". Click one to open its process in the Inspector, then **Show on Performance** to find it in the process table, where its row stays in view as the table re-sorts until you scroll it. Read every two seconds; Live lists them all, a past second keeps 200, open conversations first. [More](docs/guide/network.md#connections)
+
+### Overview
+- The **Overview** opens with three answers, the most severe first: what is filling the disk (how full the fullest Location is, what can be cleaned up, the largest Owner), what is slowing the machine (CPU and memory over the last hour, the busiest process) and what is talking on the network (the busiest interface over the last hour, how many connections were open in it, and the process holding the most open now). The page states the ranking rule under them. Click one to open its page: Browse with the largest Owner in the Inspector, Performance with the busiest process selected, or Network with that process's connections. A process that has exited since says so. A Module with no samples says "not recorded" and ranks last; it never reads as zero. The Cleanable finding line is now part of the disk answer, administrator share included.
+
 ### Query modifiers
 - New Query modifiers: `kind:file` and `kind:folder`; `is:cleanable` (what the Cleaner found), `is:duplicate` (same as `dupe:`) and `is:offline` (Entries on an Offline Volume); `at:/path` (a folder and everything below it); `since:7d`, `since:12h`, `since:2026-10-01` (files modified since then). They combine with text, `|`, `!` and every other modifier.
 - A Query that does not parse says why inside the Query box, naming the modifier.
 - Cleanup Rules accept `kind:` and `at:` (which names a location, like `parent:`), and refuse `is:` and `dupe:` with the reason.
-- `ve` refuses `is:offline` and warns that `is:cleanable` finds nothing.
+- Reading the saved Index, `ve` refuses `is:offline` and warns that `is:cleanable` finds nothing.
 - `Ctrl+1`, `Ctrl+2` and `Ctrl+3` (`Cmd` on macOS) switch to Overview, Browse and Work from any page, the Query box included.
 - The Entry Inspector has **Show in Browse**: it zooms the Query to the folder the Entry is in and selects the Entry there, among its siblings. The rest of the Query stays, unless it would hide the Entry. A Duplicate group's Show in Browse does the same for its kept copy, and the Cleaner's Show in Explorer is now called Show in Browse.
 - The Overview's finding line says how much of the Cleanable total needs administrator ("…; 1.2 GB of it needs administrator"); with none, it says nothing about it.
@@ -29,7 +43,7 @@
 - **Projects** are recognised by their marker files, on every Location, Remotes and Offline Volumes included: `.git`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `CMakeLists.txt`, `build.gradle` and `build.gradle.kts`, `Package.swift`, `*.sln` and `*.csproj`. Markers inside dependency folders (`node_modules`, `vendor`, `site-packages`, `.venv` and similar) do not make a Project.
 - **Steam games** are read from `steamapps/appmanifest_*.acf`, on every platform.
 - **Windows:** `C:\Windows` is System; `Program Files` and `Program Files (x86)` folders (`\<App>` and `\<Vendor>\<App>`) and `AppData\Local\Programs\<App>` are Programs.
-- **Linux:** `/usr`, `/etc`, `/boot`, `/var/lib` and `/var/cache` are System, named after your distribution; `/opt/<app>` is a Program; so are Flatpak apps (`/var/lib/flatpak/app`, `~/.local/share/flatpak/app`, `~/.var/app`). A folder wholly owned by one pacman package is System, named after the package.
+- **Linux:** `/usr`, `/etc`, `/boot`, `/var/lib` and `/var/cache` are System, named after your distribution; `/opt/<app>` is a Program; so are Flatpak apps (`/var/lib/flatpak/app`, `~/.local/share/flatpak/app`, `~/.var/app`). A folder wholly owned by one pacman or dpkg package is System, named after the package.
 - **macOS:** `/System` and `/usr` are System; `.app` bundles in `/Applications` and `~/Applications` are Programs.
 - Where a platform convention and a project marker find the same folder, the platform's Owner is kept.
 - Detection runs at the end of every Sync and Catch-up of a Location, inside the same Task. Steam, Windows, Linux and macOS detection read only mounted local Volumes; project markers are read from the Index alone. Live updates do not trigger it. The detectors are built in; you can't add your own Owner rules yet ([ADR-0014](docs/adr/0014-owners-live-in-the-index.md)).
@@ -42,6 +56,21 @@
 - CSV export gains `Owner` and `Owner kind` columns, in the app, in `ve export` and in `ve find --csv`.
 - The Overview has a **Largest Owners** panel: the 5 Owners with the largest Folder Size. Clicking one shows its Owner root in the Inspector. The panel is hidden while the Index has no Owners.
 
+### Apps
+- A new **Apps** page, under Files in the rail once installed programs are known (Linux for now): every pacman, dpkg and rpm package, Flatpak app, Steam game and folder under `/opt`, with its kind, version, install date and **On disk** size. Click a column title to sort by name, kind, install date or size.
+- A program's size is the Folder Size of its Owner roots in the Index, so it matches what Browse shows. A program none of whose folders is indexed shows "—", as do most packages (only folders a package owns wholly are its Owner roots) and every rpm package (rpm file lists are not read yet).
+- Clicking a program opens it in the Inspector: version, install date, size, each Owner root with its size, and **Show in Browse** for the largest root.
+- The list is read again after each Sync's Owner detection, so a newly installed game appears with its size.
+- A **Startup** tab lists what starts when you log in: XDG autostart entries (yours hiding the system's of the same name) and the systemd user units enabled in the default target, with what each runs and the file that defines it, drop-ins applied. Clicking one opens it in the Inspector with its command and file in full. Read-only. Apps now shows in the rail once any program or startup item is known.
+
+### Launcher
+- **Alt+Space** opens the **Launcher** from any app: a small window that lists files and folders in the Index by name as you type, at most 50, names starting with the text first, then a word in them, then anywhere, newest first. Enter opens one with its default app, Shift+Enter shows it in Browse, Esc or clicking elsewhere closes it. [More](docs/guide/launcher.md)
+- It works with the main window closed while the app stays in the tray, and the tray menu has a **Launcher** item. Entries on an Offline Volume or a Remote are marked and not opened.
+- The Launcher lists installed programs beside files and folders, marked **Program**, **Flatpak** or **Game**, ahead of files whose names match as well; Enter starts one: a package by the desktop entry it installed, a Flatpak with `flatpak run`, a Steam game through `steam://rungameid/`. Packages without a desktop entry a menu shows (libraries, terminal tools), rpm packages and `/opt` folders are not listed, since no launch command is known for them.
+- **Settings → Launcher** changes the shortcut and says whether the desktop gave it. On Wayland the app asks the desktop's GlobalShortcuts portal. Where the desktop refuses, the tray menu still opens the Launcher, and `view-everything --launcher` can be bound to a key; run with the app closed, it opens a Launcher that says the app is not running.
+- The packaged desktop file is now `io.github.hawasman.view-everything.desktop`, the app id its windows and the GlobalShortcuts portal use, so the desktop can tell whose shortcut it is asked for. A start at login entry keeps its name.
+- The app's socket answers `launcher` and `launch.match`.
+
 ### Index format
 - The Index is now format 8. A format 7 file is converted when loaded, and every Location is detected once at launch, so Owners appear without waiting for a Sync.
 - A file saved by v0.3 can't be read by v0.2.
@@ -49,6 +78,19 @@
 ### Engine
 - The engine (the Index, Tasks, Locations, Live updates, Sync scheduling and Snapshots) is its own crate, `ve-engine`, with no GUI in it ([ADR-0016](docs/adr/0016-engine-library-in-the-tray-process-with-a-local-socket.md)). The app hosts it and behaves as before.
 - A finished Sync's Task shows the Entries it read, as its result says; a quick Sync used to show 0.
+- The app listens on a local socket only your account can open (`$XDG_RUNTIME_DIR/view-everything/engine.sock`; `VE_SOCKET` overrides it), speaking newline-delimited JSON with a version handshake. On Windows it is a named pipe only your account can open (`\\.\pipe\view-everything-<your SID>-engine`). A second launch shows the running window and exits on both platforms, and `ve` gives up on an app that does not answer within 5 seconds.
+- Launching the app while it runs brings up the running window (from the tray too) instead of starting a second engine.
+- `ve find`, `ve top` and `ve export` ask the running app, so they see changes from seconds ago, and `dupe:`, `is:duplicate`, `is:cleanable` and `is:offline` work there. With the app closed, `ve` reads the saved Index and says so on stderr.
+
+### Permissions
+- **Settings → Permissions** lists every Permission you granted (the Live updates helper, start at login) with when you granted it. Switching one off revokes it fully: the helper stops and is not started again, the login entry is removed. The Live updates and Start at login switches read and change the same list.
+- Settings files are now version 1. A helper or start at login you had switched on is kept, as a Permission "granted before this version".
+- Dismissing or failing the helper's password prompt drops its Permission and turns the Live updates switch back off, so a prompt you said no to is not asked again at the next start.
+
+### Agents
+- `ve mcp serve` is an MCP server for your own agent (Claude, an IDE assistant): four read-only tools, `files.find`, `files.top`, `files.locations` and `files.summary`, each answering totals plus at most 200 rows and a cursor for the next ones. Bad Queries, paths outside the Index and arguments a tool does not take come back as refusals that say why. [More](docs/guide/agents.md)
+- An agent's first call is refused with a 4-character code, and the desktop shows who asked for which Module (Linux and macOS). Approve it in **Settings → Permissions** or with `ve mcp --approve CODE` within 10 minutes; `ve mcp --list-requests` lists the codes waiting. An approved agent is an **Agent access** Permission tied to the agent's name and a key issued on first contact; revoking it refuses the agent's next call.
+- With the app closed, `ve mcp serve` reads the saved Index for agents already approved.
 
 ## v0.2.1
 

@@ -1,7 +1,7 @@
 //! The Settings page: which Volumes are indexed, how often they are re-read, and the theme.
 
 use crate::settings::{Settings, ThemeChoice, default_duplicate_exclusions};
-use crate::theme::{self, CONTROL_H, RADIUS_CONTROL, palette};
+use crate::theme::{self, CONTROL_H, FS_SMALL, RADIUS_CONTROL, palette};
 use crate::ui::{ButtonKind, Tone, button, caption, dialog_title, panel, tag};
 use chrono::Local;
 use gpui_kit::component::Disableable as _;
@@ -16,9 +16,11 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use ve_core::paths::load_categories;
 use ve_core::{AzureRemote, CategoryMap, FtpRemote, FtpTls, Query, QueryContext, Remote, S3Remote, WebdavRemote};
-use ve_engine::{Intervals, last_synced_label};
+use ve_engine::permissions::{Kind, Permission};
+use ve_engine::{Engine, Intervals, last_synced_label};
 use ve_scan::VolumeInfo;
 
 /// How long typing in the Duplicate Exclusions pauses before they are saved.
@@ -390,8 +392,13 @@ pub struct SettingsPage {
     exclusions_error: Option<String>,
     /// The pending save of typed exclusions; dropping it cancels the save.
     exclusions_pending: Option<gpui::Task<()>>,
+    /// The Launcher's shortcut field, and why its text is not a usable shortcut.
+    shortcut: Entity<InputState>,
+    shortcut_error: Option<String>,
     /// The category names a Query may use, read once.
     categories: CategoryMap,
+    /// Where the Permissions are held, granted and revoked.
+    engine: Arc<Engine>,
     /// A start-at-login change is in flight.
     login_busy: bool,
     /// Set when the settings file could not be written.
@@ -491,6 +498,20 @@ impl SettingsPage {
             }
         })
         .detach();
+        let shortcut = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::launcher::DEFAULT_SHORTCUT)
+                .default_value(settings.launcher_shortcut.clone())
+        });
+        cx.subscribe_in(&shortcut, window, |this, _, event: &InputEvent, window, cx| match event {
+            InputEvent::PressEnter { .. } => this.apply_shortcut(true, window, cx),
+            InputEvent::Blur => this.apply_shortcut(false, window, cx),
+            _ => {}
+        })
+        .detach();
+        // The desktop answers a shortcut request later (Wayland).
+        let host_shortcut = cx.global::<crate::host::Host>().shortcut.clone();
+        cx.observe(&host_shortcut, |_, _, cx| cx.notify()).detach();
         let categories = load_categories().unwrap_or_else(|_| CategoryMap::builtin());
         Self {
             settings,
@@ -503,7 +524,10 @@ impl SettingsPage {
             exclusions,
             exclusions_error: None,
             exclusions_pending: None,
+            shortcut,
+            shortcut_error: None,
             categories,
+            engine: cx.global::<crate::host::Host>().engine.clone(),
             login_busy: false,
             problem: None,
             remote_host,
@@ -794,8 +818,15 @@ impl SettingsPage {
 
     /// Saves the settings and tells the window what to apply.
     fn commit(&mut self, cx: &mut Context<Self>) {
-        self.problem = self.settings.save().err().map(|e| format!("Could not save settings: {e}"));
+        self.save();
         self.emit_changed(cx);
+    }
+
+    /// Writes the settings, with the Permissions as the Engine holds them.
+    fn save(&mut self) {
+        let engine = self.engine.clone();
+        let saved = self.settings.save(|| engine.permissions().list());
+        self.problem = saved.err().map(|e| format!("Could not save settings: {e}"));
     }
 
     fn emit_changed(&mut self, cx: &mut Context<Self>) {
@@ -804,7 +835,7 @@ impl SettingsPage {
             mounted: self.volumes.clone(),
             remotes: self.settings.remotes.clone(),
             intervals: self.settings.intervals(&indexed),
-            live_helper: self.settings.live_helper,
+            live_helper: self.engine.permissions().has(Kind::LiveHelper),
             indexed,
         });
         cx.notify();
@@ -1085,10 +1116,9 @@ impl SettingsPage {
                 .items_center()
                 .child(
                     Switch::new("live-helper")
-                        .checked(self.settings.live_helper)
+                        .checked(self.engine.permissions().has(Kind::LiveHelper))
                         .on_click(cx.listener(|this, on: &bool, _, cx| {
-                            this.settings.live_helper = *on;
-                            this.commit(cx);
+                            this.set_permission(Kind::LiveHelper, Kind::LiveHelper.subject().to_owned(), *on, cx)
                         })),
                 )
                 .child("Follow file changes live (asks for administrator authentication)"),
@@ -1124,38 +1154,226 @@ impl SettingsPage {
             .items_center()
             .child(
                 Switch::new("start-at-login")
-                    .checked(self.settings.start_at_login)
+                    .checked(self.engine.permissions().has(Kind::StartAtLogin))
                     .disabled(self.login_busy)
-                    .on_click(cx.listener(|this, on: &bool, _, cx| this.set_start_at_login(*on, cx))),
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        this.set_permission(Kind::StartAtLogin, Kind::StartAtLogin.subject().to_owned(), *on, cx)
+                    })),
             )
             .child("Start at login");
         panel(cx).child(v_flex().gap(px(16.)).child(keep).child(login))
     }
 
-    /// Saves the setting, then makes (or removes) the login entry off the UI thread: on Windows
-    /// that waits for the elevation prompt. A failure puts the switch back and says why.
-    fn set_start_at_login(&mut self, on: bool, cx: &mut Context<Self>) {
-        if self.login_busy {
+    /// The Launcher section: its global shortcut, and what the desktop made of it.
+    fn launcher(&self, cx: &mut Context<Self>) -> Div {
+        use crate::launcher::ShortcutStatus;
+        let p = palette(cx);
+        let status = cx.global::<crate::host::Host>().shortcut.read(cx).status().clone();
+        let line = match &self.shortcut_error {
+            Some(error) => div().text_size(px(FS_SMALL)).text_color(p.negative).child(error.clone()),
+            None => match status {
+                ShortcutStatus::Pending => caption("Asking the desktop for the shortcut…", cx),
+                ShortcutStatus::Active { trigger, as_asked: true } => caption(format!("{trigger} opens the Launcher from any app"), cx),
+                ShortcutStatus::Active { trigger, as_asked: false } => caption(
+                    format!("Your desktop bound {trigger} to the Launcher; change it in the desktop's shortcut settings"),
+                    cx,
+                ),
+                ShortcutStatus::Refused(reason) => div().text_size(px(FS_SMALL)).text_color(p.warning).child(format!(
+                    "{reason}. Open the Launcher from the tray menu, or bind the command `view-everything --launcher` to a key in your desktop's shortcut settings."
+                )),
+            },
+        };
+        panel(cx).child(
+            v_flex()
+                .gap(px(8.))
+                .child(div().font_weight(FontWeight::MEDIUM).child("Shortcut"))
+                .child(caption(
+                    "Modifiers and one key, e.g. Alt+Space or Ctrl+Shift+K. Enter applies it.",
+                    cx,
+                ))
+                .child(div().w(px(240.)).child(Input::new(&self.shortcut)))
+                .child(line),
+        )
+    }
+
+    /// Asks for the typed shortcut and keeps it once it names one; otherwise shows why not.
+    /// Unchanged text asks again only on Enter after a refusal (the key may be free now), so
+    /// leaving the field never brings up a desktop dialog by itself.
+    fn apply_shortcut(&mut self, enter: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.shortcut.read(cx).value().to_string();
+        let shortcut = cx.global::<crate::host::Host>().shortcut.clone();
+        let refused = matches!(shortcut.read(cx).status(), crate::launcher::ShortcutStatus::Refused(_));
+        if text.trim() == self.settings.launcher_shortcut && !(enter && refused) {
+            self.shortcut_error = None;
+            cx.notify();
             return;
         }
-        let before = self.settings.start_at_login;
-        self.login_busy = true;
-        self.settings.start_at_login = on;
-        self.commit(cx);
+        match shortcut.update(cx, |s, cx| s.set(&text, cx)) {
+            Ok(canonical) => {
+                self.shortcut_error = None;
+                self.shortcut.update(cx, |input, cx| input.set_value(canonical.clone(), window, cx));
+                if self.settings.launcher_shortcut != canonical {
+                    self.settings.launcher_shortcut = canonical;
+                    self.commit(cx);
+                }
+            }
+            Err(e) => self.shortcut_error = Some(e),
+        }
+        cx.notify();
+    }
+
+    /// The Permissions section: agents' requests waiting for approval, then every Permission
+    /// granted, when, and a switch that revokes it.
+    fn permissions(&self, cx: &mut Context<Self>) -> Div {
+        let now = chrono::Utc::now().timestamp();
+        let requests = self.engine.agents().pending(now);
+        let list = self.engine.permissions().list();
+        if list.is_empty() && requests.is_empty() {
+            return panel(cx).child(caption("No Permissions granted", cx));
+        }
+        let rule = palette(cx).rule;
+        let requests = requests.into_iter().enumerate().map(|(ix, request)| {
+            let minutes = request.minutes_left(now);
+            let code = request.code.clone();
+            // Another key under a name already approved: approving moves the Permission to it.
+            let replaces = list
+                .iter()
+                .any(|p| p.kind == Kind::Agent && p.subject == request.agent && p.module.as_deref() == Some(request.module.as_str()));
+            let how = if replaces {
+                format!(
+                    "Already approved under this name with another key; approving replaces it. Approve here or run ve mcp --approve {}",
+                    request.code
+                )
+            } else {
+                format!("Approve here or run ve mcp --approve {}", request.code)
+            };
+            h_flex()
+                .gap(px(12.))
+                .items_center()
+                .when(ix > 0, |d| d.pt(px(12.)).border_t_1().border_color(rule))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(format!("{} asks to read {}", request.agent, request.module)),
+                        )
+                        .child(caption(
+                            format!("Agent access · Code {} · Expires in {minutes} min", request.code),
+                            cx,
+                        ))
+                        .child(caption(how, cx)),
+                )
+                .child(button(("approve-agent", ix), "Approve").small().build(
+                    cx,
+                    cx.listener(move |this, _, _, cx| {
+                        let approved = this.engine.agents().approve(&code, chrono::Utc::now().timestamp());
+                        this.permission_changed(approved.map(drop), cx);
+                    }),
+                ))
+        });
+        let requests: Vec<_> = requests.collect();
+        let granted = list.into_iter().enumerate().map(|(ix, permission)| {
+            let Permission {
+                kind,
+                subject,
+                granted_at,
+                module,
+                ..
+            } = permission;
+            let on = match &module {
+                Some(module) => format!("{subject} · {module}"),
+                None => subject.clone(),
+            };
+            let about = match granted_at {
+                Some(at) => format!("{on} · Granted {}", crate::format::time(at.saturating_mul(1_000_000_000))),
+                None => format!("{on} · Granted before this version"),
+            };
+            h_flex()
+                .gap(px(12.))
+                .items_start()
+                .when(ix > 0, |d| d.pt(px(12.)).border_t_1().border_color(rule))
+                .child(
+                    Switch::new(("revoke-permission", ix))
+                        .checked(true)
+                        .disabled(kind == Kind::StartAtLogin && self.login_busy)
+                        .on_click(cx.listener(move |this, on: &bool, _, cx| {
+                            if *on {
+                                return;
+                            }
+                            match &module {
+                                Some(module) => {
+                                    let revoked = this.engine.agents().revoke(&subject, module);
+                                    this.permission_changed(revoked, cx);
+                                }
+                                None => this.set_permission(kind, subject.clone(), false, cx),
+                            }
+                        })),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.))
+                        .child(div().font_weight(FontWeight::MEDIUM).child(kind.label()))
+                        .child(caption(about, cx))
+                        .child(caption(kind.revoke_note(), cx)),
+                )
+        });
+        let pending = requests.len();
+        panel(cx).child(
+            v_flex()
+                .gap(px(12.))
+                .children(requests)
+                .when(pending > 0, |d| d.child(div().h(px(1.)).bg(rule)))
+                .children(granted),
+        )
+    }
+
+    /// Grants (`on`) or revokes the Permission of `kind` on `subject` through the Engine. Start at
+    /// login makes or removes its login entry off the UI thread (Windows waits for the elevation
+    /// prompt), and its switch moves once that is done. A failure leaves the Permission as it was
+    /// and says why.
+    fn set_permission(&mut self, kind: Kind, subject: String, on: bool, cx: &mut Context<Self>) {
+        let engine = self.engine.clone();
+        let change = move || {
+            if !on {
+                return engine.permissions().revoke(kind, &subject);
+            }
+            if kind == Kind::StartAtLogin {
+                crate::autostart::set(true)?;
+            }
+            engine.permissions().grant(kind, chrono::Utc::now().timestamp())
+        };
+        if kind != Kind::StartAtLogin {
+            let done = change();
+            self.permission_changed(done, cx);
+            return;
+        }
+        if std::mem::replace(&mut self.login_busy, true) {
+            return;
+        }
+        cx.notify();
         cx.spawn(async move |this, cx| {
-            let done = cx.background_executor().spawn(async move { crate::autostart::set(on) }).await;
+            let done = cx.background_executor().spawn(async move { change() }).await;
             this.update(cx, |this, cx| {
                 this.login_busy = false;
-                if let Err(why) = done {
-                    this.settings.start_at_login = before;
-                    this.commit(cx);
-                    this.problem = Some(why);
-                }
-                cx.notify();
+                this.permission_changed(done, cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Saves what a grant or revoke left, and says why it failed, if it did.
+    fn permission_changed(&mut self, done: Result<(), String>, cx: &mut Context<Self>) {
+        self.commit(cx);
+        if let Err(why) = done {
+            self.problem = Some(why);
+        }
     }
 
     /// The Updates section: the daily-check switch, Check now and what the last check found.
@@ -1207,7 +1425,7 @@ impl SettingsPage {
         self.update_status = status;
         self.settings.last_update_check = Some(at);
         // Only the check time changed: nothing for the window to apply.
-        self.problem = self.settings.save().err().map(|e| format!("Could not save settings: {e}"));
+        self.save();
         cx.notify();
     }
 
@@ -1696,6 +1914,20 @@ impl Render for SettingsPage {
             "Background",
             "The app can keep running in the system tray after its window closes, so the Index stays fresh and Live updates keep running, and can start when you log in.",
             background,
+            cx,
+        ));
+        let launcher = self.launcher(cx);
+        column = column.child(div().h(px(1.)).bg(border)).child(section(
+            "Launcher",
+            "A global shortcut opens the Launcher from any app, even with this window closed while the app stays in the tray: type part of a file or folder name, Enter opens it, Shift+Enter shows it in Browse. The tray menu opens it too.",
+            launcher,
+            cx,
+        ));
+        let permissions = self.permissions(cx);
+        column = column.child(div().h(px(1.)).bg(border)).child(section(
+            "Permissions",
+            "Every approval you granted, and when. Switching one off revokes it fully: the Live updates helper stops and is not started again, the login entry is removed, an agent is refused from its next request. Agents asking for access wait here for 10 minutes.",
+            permissions,
             cx,
         ));
         #[cfg(feature = "updater")]

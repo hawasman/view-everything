@@ -1,10 +1,13 @@
 //! The window: the Module rail, the top bar with the Query, the pages (Overview, Browse,
-//! Cleaner, Duplicates, Tasks, Settings), the Timeline dock, the status strip and the Inspector.
+//! Cleaner, Duplicates, Performance, Tasks, Settings), the Timeline dock with the Moment, the
+//! status strip and the Inspector.
 
+use crate::apps::{AppsPage, InspectApp, InspectStartup};
 use crate::categories::CategoryPanel;
 use crate::cleaner::{CleanerPage, ShowInBrowse};
-use crate::compare::{Compare, CompareEvent};
+use crate::compare::{Compare, CompareEvent, moment_of, nearest_snapshot};
 use crate::dashboard::{Act, DashboardPage};
+use crate::dashboard_summary::Question;
 use crate::duplicates::{DuplicatesPanel, InspectGroup};
 use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
@@ -42,12 +45,18 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use ve_core::CategoryMap;
 use ve_engine::tasks::Outcome;
+use ve_engine::timeline::Moment;
 use ve_engine::view::Focus;
 use ve_engine::{Engine, Phase, last_synced_label};
 use ve_scan::VolumeInfo;
 
-/// The app's name as people read it (the binary, app id and data folders stay `view-everything`).
+/// The app's name as people read it (the binary and data folders stay `view-everything`).
 pub const APP_NAME: &str = "View Everything";
+
+/// The app id: its windows' Wayland app id, the name of its packaged desktop file
+/// (`<APP_ID>.desktop`, which the desktop matches windows and portal requests against), and who
+/// the GlobalShortcuts portal is told the app is.
+pub const APP_ID: &str = "io.github.hawasman.view-everything";
 
 /// Most Entries "Open" and "Show in file manager" act on at once; more would launch a process
 /// or window each.
@@ -97,9 +106,28 @@ enum Page {
     Browse,
     Cleaner,
     Duplicates,
+    /// The system at the Moment: CPU, memory, disks.
+    Performance,
+    /// Each network interface's throughput at the Moment.
+    Network,
+    Apps,
     /// Tasks and Locations, from the rail's Work block.
     Work,
     Settings,
+}
+
+/// A process Show on Performance opened: its row is scrolled back into view as the table
+/// re-sorts, until the table is scrolled by hand.
+struct Following {
+    id: ve_engine::perf::ProcessId,
+    /// The table's scroll offset once the last scroll to the row was laid out; `None` until then.
+    offset: Option<Point<Pixels>>,
+}
+
+/// The Network page's last hour, by the second it ends at and the newest sample then.
+struct NetHour {
+    at: (i64, Option<i64>),
+    summary: Rc<ve_engine::net::Summary>,
 }
 
 /// The self-update of the release in the sidebar row (ADR-0007).
@@ -135,7 +163,7 @@ const LIST_MIN_WIDTH_BESIDE_FILTERS: f32 = 400.;
 pub struct Remembered {
     page: Page,
     show_tree: bool,
-    compare: Option<chrono::NaiveDate>,
+    moment: Moment,
     expanded: HashSet<ve_core::EntryId>,
     tree_selection: crate::selection::Selection,
     list_selection: crate::selection::Selection,
@@ -149,8 +177,14 @@ pub struct Shell {
     query_debounce: Option<gpui::Task<()>>,
     table: Entity<TableState<FlatList>>,
     tree: Entity<TableState<TreeList>>,
-    /// The Snapshot the tree's Change column compares with.
+    /// The Snapshot the tree's Change column compares with: the one nearest the Moment.
     compare: Entity<Compare>,
+    /// The one point in time the window shows (Live or a chosen second); each page reads it its
+    /// own way.
+    moment: Moment,
+    /// The Moment and Snapshot count Browse last mapped to a Snapshot, so a comparison that
+    /// failed or was cancelled is not started again until either changes.
+    files_moment: Option<(Moment, usize)>,
     /// Whether the Explorer shows the tree rather than the flat list.
     show_tree: bool,
     duplicates: Entity<DuplicatesPanel>,
@@ -162,6 +196,7 @@ pub struct Shell {
     settings_page: Entity<SettingsPage>,
     dashboard: Entity<DashboardPage>,
     cleaner: Entity<CleanerPage>,
+    apps: Entity<AppsPage>,
     trash: Trash,
     treemap: Entity<Treemap>,
     /// Counts the folders under the inspected folder.
@@ -185,6 +220,16 @@ pub struct Shell {
     selected_size: Cell<Option<(SelectedSizeKey, u64)>>,
     /// What the Inspector shows.
     inspected: Option<Inspected>,
+    /// The Performance page's process table.
+    processes: Entity<TableState<crate::performance::ProcessList>>,
+    /// The process the Inspector shows, while it shows one.
+    process: Option<crate::performance::Inspecting>,
+    /// The process Show on Performance opened, kept in view as its table re-sorts.
+    following: Option<Following>,
+    /// The Network page's connections list.
+    connections_scroll: UniformListScrollHandle,
+    /// The Network page's last hour: read once per new sample rather than every frame.
+    net_hour: Option<NetHour>,
     /// The Entry a list selection last put in the Inspector.
     last_outlined: Option<ve_core::EntryId>,
     /// Show in Browse: the Entry to select once the View of this Query text arrives.
@@ -228,7 +273,7 @@ impl Shell {
         });
         let dashboard = cx.new(|cx| {
             let mut page = DashboardPage::new(
-                engine.shared.clone(),
+                engine.clone(),
                 cleaner.clone(),
                 trash.clone(),
                 categories.clone(),
@@ -246,6 +291,26 @@ impl Shell {
             cx.notify();
         })
         .detach();
+        let apps = cx.new(|cx| AppsPage::new(engine.clone(), window, cx));
+        cx.subscribe(&apps, |this, _, inspect: &InspectApp, cx| {
+            this.inspected = Some(Inspected::App(inspect.0.clone()));
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe(&apps, |this, _, inspect: &InspectStartup, cx| {
+            this.inspected = Some(Inspected::Startup(inspect.0.clone()));
+            cx.notify();
+        })
+        .detach();
+        let processes = {
+            let shell = cx.weak_entity();
+            let on_inspect: crate::performance::OnInspect = Rc::new(move |id, cx| {
+                let _ = shell.update(cx, |this, cx| this.inspect_process(id, cx));
+            });
+            cx.new(|cx| TableState::new(crate::performance::ProcessList::new(on_inspect), window, cx).col_resizable(false))
+        };
+        // A first list, or none left, shows or hides Apps in the rail.
+        cx.observe(&apps, |_, _, cx| cx.notify()).detach();
         let treemap_depth = settings.treemap_depth;
         let treemap_colour_by = settings.treemap_colour_by;
         let settings_page = cx.new(|cx| SettingsPage::new(settings, volumes.clone(), window, cx));
@@ -463,7 +528,10 @@ impl Shell {
             Ok("browse" | "explorer") => Page::Browse,
             Ok("cleaner") => Page::Cleaner,
             Ok("duplicates") => Page::Duplicates,
+            Ok("apps") => Page::Apps,
             Ok("work" | "tasks") => Page::Work,
+            Ok("performance") => Page::Performance,
+            Ok("network") => Page::Network,
             Ok("overview" | "dashboard") => Page::Overview,
             // The scroll measurement needs the Browse list on screen.
             _ if std::env::var_os("VE_BENCH").is_some() => Page::Browse,
@@ -525,6 +593,8 @@ impl Shell {
             table,
             tree,
             compare,
+            moment: Moment::Live,
+            files_moment: None,
             // The 10M-Entry measurement scrolls the flat list, so it must be the one on screen.
             show_tree: !cfg!(feature = "bench") || std::env::var_os("VE_BENCH").is_none(),
             filters,
@@ -534,6 +604,7 @@ impl Shell {
             settings_page,
             dashboard,
             cleaner,
+            apps,
             duplicates,
             trash,
             treemap,
@@ -550,6 +621,11 @@ impl Shell {
             list_width: Rc::default(),
             selected_size: Cell::new(None),
             inspected: None,
+            processes,
+            process: None,
+            following: None,
+            connections_scroll: UniformListScrollHandle::new(),
+            net_hour: None,
             last_outlined: None,
             reveal_on_view: None,
             tick: None,
@@ -560,11 +636,16 @@ impl Shell {
         if let Some(remembered) = cx.global_mut::<Host>().remembered.take() {
             shell.restore(remembered, cx);
         }
+        // Recording runs while a window is open, and after it closes only with keep-in-tray on.
+        shell.engine.perf.set_recording(true);
         cx.on_release(|this, cx| {
             // Text typed within the debounce has not reached the Engine yet; send it now.
             if this.query_debounce.take().is_some() {
                 this.engine.set_query(this.query.read(cx).value().to_string());
             }
+            this.engine.perf.set_watched(false);
+            this.engine.perf.set_process_io(false);
+            this.engine.perf.set_recording(this.settings_page.read(cx).settings().keep_in_tray);
             if cx.has_global::<Host>() {
                 let remembered = this.remember(cx);
                 cx.global_mut::<Host>().remembered = Some(remembered);
@@ -580,7 +661,7 @@ impl Shell {
         Remembered {
             page: self.page,
             show_tree: self.show_tree,
-            compare: self.compare.read(cx).active(),
+            moment: self.moment,
             expanded: tree.expanded().clone(),
             tree_selection: tree.selection.clone(),
             list_selection: self.table.read(cx).delegate().selection.clone(),
@@ -591,9 +672,7 @@ impl Shell {
     fn restore(&mut self, r: Remembered, cx: &mut Context<Self>) {
         self.page = r.page;
         self.show_tree = r.show_tree;
-        if r.compare.is_some() {
-            self.compare.update(cx, |c, cx| c.choose(r.compare, cx));
-        }
+        self.moment = r.moment;
         self.tree.update(cx, |t, _| {
             let tree = t.delegate_mut();
             tree.set_expanded(r.expanded);
@@ -892,6 +971,16 @@ impl Shell {
         cx.notify();
     }
 
+    /// Shift+Enter in the Launcher: Show in Browse of the Entry at `path`, inspected as if it
+    /// had been clicked. A path no longer in the Index changes nothing.
+    pub fn show_path_in_browse(&mut self, path: &std::path::Path, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.engine.shared.index.read().find_path(path) else {
+            return;
+        };
+        self.show_in_browse(id, window, cx);
+        self.inspected = Some(Inspected::Entry(id));
+    }
+
     /// Outlines on the Treemap what the shown list selects, the last-clicked Entry boldest, and
     /// shows that Entry in the Inspector. A list that cannot show what the Treemap selected
     /// leaves its outline alone.
@@ -1172,12 +1261,48 @@ impl Shell {
             Act::OpenCleaner => self.page = Page::Cleaner,
             Act::Inspect(what) => self.inspected = Some(what.clone()),
             Act::StartLive => Host::start_live(cx),
+            Act::Follow(question, inspect) => self.follow(*question, inspect.clone(), window, cx),
             Act::SaveQuery(text) => {
                 self.settings_page
                     .update(cx, |page, cx| page.apply(|s| s.recent_query = text.clone(), cx));
             }
         }
         cx.notify();
+    }
+
+    /// Opens the Module page an Overview answer is about, with what it names in the Inspector.
+    fn follow(&mut self, question: Question, inspect: Option<Inspected>, window: &mut Window, cx: &mut Context<Self>) {
+        let page = match question {
+            Question::Disk => Page::Browse,
+            Question::Slowing => Page::Performance,
+            Question::Talking => Page::Network,
+        };
+        self.go(page, cx);
+        match inspect {
+            // Show in Browse, as the Inspector's own button does.
+            Some(Inspected::Entry(id)) => {
+                self.show_in_browse(id, window, cx);
+                self.inspected = Some(Inspected::Entry(id));
+            }
+            // A process the answer read a moment ago, if it is still in the Moment's table: its
+            // row on Performance, its first connection on Network.
+            Some(Inspected::Process(id)) => {
+                if !self.inspect_process(id, cx) {
+                    window.push_notification(Notification::info("That process is no longer running."), cx);
+                } else if page == Page::Performance {
+                    self.show_process_on_performance(id, cx);
+                } else if let Some(row) = self
+                    .engine
+                    .net
+                    .at(self.moment)
+                    .and_then(|n| n.connections.value().and_then(|c| crate::network::row_of(c, id)))
+                {
+                    self.connections_scroll.scroll_to_item(row, ScrollStrategy::Top);
+                }
+            }
+            Some(other) => self.inspected = Some(other),
+            None => {}
+        }
     }
 
     /// The one-line bar under the Explorer: sync state, Last Synced, problems, totals, Trash.
@@ -1731,6 +1856,18 @@ impl Shell {
             .child(self.nav("nav-browse", "Browse", None, Page::Browse, true, cx))
             .child(self.nav("nav-cleaner", "Cleaner", None, Page::Cleaner, true, cx))
             .child(self.nav("nav-duplicates", "Duplicates", None, Page::Duplicates, true, cx))
+            // A Module appears once it has data (ADR-0015): Performance with its first sample,
+            // Network beside it once a sample has interfaces.
+            .when(self.engine.perf.has_samples(), |d| {
+                d.child(group_label("Performance", cx))
+                    .child(self.nav("nav-performance", "System", None, Page::Performance, true, cx))
+            })
+            .when(self.engine.net.has_samples(), |d| {
+                d.child(self.nav("nav-network", "Network", None, Page::Network, true, cx))
+            })
+            .when(self.apps.read(cx).has_apps(cx), |d| {
+                d.child(self.nav("nav-apps", "Apps", None, Page::Apps, true, cx))
+            })
             .child(div().flex_1().min_h_0())
             .child(self.work_block(rows, now, cx))
             .children(self.update_row(cx))
@@ -1820,20 +1957,48 @@ impl Shell {
             .child(self.find_box(cx))
     }
 
-    /// The Timeline dock: slim on every page; on Browse a days lane with a tick per Snapshot.
-    fn dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Moves the window to `moment`; each page reads it its own way.
+    fn set_moment(&mut self, moment: Moment, cx: &mut Context<Self>) {
+        self.moment = moment;
+        cx.notify();
+    }
+
+    /// Files shows the Snapshot nearest the Moment: compares with it once Browse is shown and
+    /// the Moment (or the Snapshots on disk) changed since the last time.
+    fn map_files_moment(&mut self, cx: &mut Context<Self>) {
+        let (active, dates) = {
+            let c = self.compare.read(cx);
+            (c.active(), c.dates().len())
+        };
+        let key = (self.moment, dates);
+        if self.files_moment == Some(key) {
+            return;
+        }
+        self.files_moment = Some(key);
+        let wanted = nearest_snapshot(self.compare.read(cx).dates(), self.moment);
+        if wanted != active {
+            self.compare.update(cx, |c, cx| c.choose(wanted, cx));
+        }
+    }
+
+    /// The Timeline dock: the Moment on every page, Back to Live once it is not; on Browse a
+    /// days lane with a tick per Snapshot, on Performance the last hour of samples.
+    fn dock(&self, now: i64, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let (active, working, dates) = {
             let c = self.compare.read(cx);
             (c.active(), c.working(), c.dates().to_vec())
         };
-        let browse = self.page == Page::Browse;
-        let moment = active.map_or_else(|| "Moment: Live".to_owned(), |d| format!("At {d}"));
-        let snapshots = match dates.first() {
-            Some(latest) => format!("Snapshots {} · latest {latest}", dates.len()),
-            None => "Snapshots 0".to_owned(),
+        let moment = crate::performance::moment_label(self.moment, now);
+        let context = match (self.page, dates.first()) {
+            (Page::Performance | Page::Network, _) => None,
+            (Page::Browse, _) if self.moment != Moment::Live => Some(match active {
+                Some(date) => format!("Snapshot {date}"),
+                None => "No Snapshot".to_owned(),
+            }),
+            (_, Some(latest)) => Some(format!("Snapshots {} · latest {latest}", dates.len())),
+            (_, None) => Some("Snapshots 0".to_owned()),
         };
-        let compare = self.compare.clone();
         let header = h_flex()
             .h(px(40.))
             .flex_none()
@@ -1841,74 +2006,35 @@ impl Shell {
             .items_center()
             .text_size(px(FS_BODY))
             .child(div().font_weight(FontWeight::MEDIUM).child("Timeline"))
-            .child(div().text_color(if active.is_some() { p.text } else { p.muted }).child(moment))
-            .child(caption(snapshots, cx))
+            .child(
+                div()
+                    .text_color(if self.moment == Moment::Live { p.muted } else { p.text })
+                    .child(moment),
+            )
+            .children(context.map(|c| caption(c, cx)))
             .child(div().flex_1())
             .when(working, |d| d.child(caption("Comparing…", cx)))
-            .when(browse && active.is_some(), |d| {
+            .when(self.moment != Moment::Live, |d| {
                 d.child(
                     button("back-to-live", "Back to Live")
                         .small()
                         .kind(ButtonKind::Ghost)
-                        .build(cx, move |_, _, cx| compare.update(cx, |c, cx| c.choose(None, cx))),
+                        .build(cx, cx.listener(|this, _, _, cx| this.set_moment(Moment::Live, cx))),
                 )
             });
-        let lane = browse.then(|| {
-            let Some(&oldest) = dates.last() else {
-                return div()
-                    .h(px(48.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .child(empty_state("No Snapshots yet: the first is taken once every Location has synced.", cx).flex_1())
-                    .into_any_element();
-            };
-            let today = Local::now().date_naive().max(dates[0]);
-            let span = (today - oldest).num_days().max(1) as f32;
-            let ticks = dates.iter().enumerate().map(|(i, &date)| {
-                let at = ((date - oldest).num_days() as f32 / span).clamp(0., 1.);
-                let chosen = active == Some(date);
-                let compare = self.compare.clone();
-                div()
-                    .id(("snapshot-tick", i))
-                    .absolute()
-                    .top(px(0.))
-                    .left(relative(at))
-                    .ml(px(-6.))
-                    .w(px(12.))
-                    .h(px(28.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .tooltip(move |window, cx| Tooltip::new(date.to_string()).build(window, cx))
-                    .on_click(move |_, _, cx| compare.update(cx, |c, cx| c.choose(Some(date), cx)))
-                    .child(
-                        div()
-                            .w(px(2.))
-                            .h(px(if chosen { 24. } else { 18. }))
-                            .bg(if chosen { p.accent } else { p.text }),
-                    )
-            });
-            v_flex()
-                .h(px(48.))
-                .flex_none()
-                .px(px(6.))
-                .child(
-                    div()
-                        .relative()
-                        .h(px(28.))
-                        .child(div().absolute().top(px(14.)).left_0().right_0().h(px(1.)).bg(p.border))
-                        .children(ticks),
-                )
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .child(caption(oldest.to_string(), cx))
-                        .child(caption("Today", cx)),
-                )
-                .into_any_element()
-        });
+        // Pressing or dragging on a Module's lane moves the Moment to that second.
+        let scrub = || -> crate::performance::Scrub {
+            let shell = cx.weak_entity();
+            Rc::new(move |time, cx| {
+                let _ = shell.update(cx, |this, cx| this.set_moment(Moment::At(time), cx));
+            })
+        };
+        let lane = match self.page {
+            Page::Browse => Some(self.snapshot_lane(active, &dates, cx)),
+            Page::Performance => Some(crate::performance::lane(&self.engine.perf, self.moment, now, scrub(), cx)),
+            Page::Network => Some(crate::network::lane(&self.engine.net, self.moment, now, scrub(), cx)),
+            _ => None,
+        };
         v_flex()
             .flex_none()
             .px(px(PAD))
@@ -1917,6 +2043,65 @@ impl Shell {
             .border_color(p.border)
             .child(header)
             .children(lane)
+    }
+
+    /// Browse's lane: a tick per Snapshot over the days they span; a tick moves the Moment to
+    /// that day.
+    fn snapshot_lane(&self, active: Option<chrono::NaiveDate>, dates: &[chrono::NaiveDate], cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let Some(&oldest) = dates.last() else {
+            return div()
+                .h(px(48.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .child(empty_state("No Snapshots yet: the first is taken once every Location has synced.", cx).flex_1())
+                .into_any_element();
+        };
+        let today = Local::now().date_naive().max(dates[0]);
+        let span = (today - oldest).num_days().max(1) as f32;
+        let ticks = dates.iter().enumerate().map(|(i, &date)| {
+            let at = ((date - oldest).num_days() as f32 / span).clamp(0., 1.);
+            let chosen = active == Some(date);
+            div()
+                .id(("snapshot-tick", i))
+                .absolute()
+                .top(px(0.))
+                .left(relative(at))
+                .ml(px(-6.))
+                .w(px(12.))
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .tooltip(move |window, cx| Tooltip::new(date.to_string()).build(window, cx))
+                .on_click(cx.listener(move |this, _, _, cx| this.set_moment(moment_of(date), cx)))
+                .child(
+                    div()
+                        .w(px(2.))
+                        .h(px(if chosen { 24. } else { 18. }))
+                        .bg(if chosen { p.accent } else { p.text }),
+                )
+        });
+        v_flex()
+            .h(px(48.))
+            .flex_none()
+            .px(px(6.))
+            .child(
+                div()
+                    .relative()
+                    .h(px(28.))
+                    .child(div().absolute().top(px(14.)).left_0().right_0().h(px(1.)).bg(p.border))
+                    .children(ticks.collect::<Vec<_>>()),
+            )
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(caption(oldest.to_string(), cx))
+                    .child(caption("Today", cx)),
+            )
+            .into_any_element()
     }
 
     /// The Browse page: title and actions, Tree / Flat list, then the list with the Categories
@@ -2318,7 +2503,78 @@ impl Shell {
             Inspected::Location(identity) => self.location_panel(identity, rows, now, cx),
             Inspected::Task(id) => self.task_panel(*id, cx),
             Inspected::Duplicates(first) => self.duplicates_panel(*first, cx),
+            Inspected::App(key) => {
+                let app = self.apps.read(cx).app(key, cx)?;
+                let largest = app.roots.first().map(|(path, _)| path.clone());
+                let show = Item::new(
+                    "inspector-app-browse",
+                    "Show in Browse",
+                    cx.listener(move |this, _, window, cx| {
+                        let id = largest.as_ref().and_then(|path| this.engine.shared.index.read().find_path(path));
+                        if let Some(id) = id {
+                            this.show_in_browse(id, window, cx);
+                            this.inspected = Some(Inspected::Entry(id));
+                        }
+                    }),
+                );
+                Some(crate::apps::panel(&app, show))
+            }
+            Inspected::Process(id) => {
+                let inspecting = self.process.as_ref().filter(|p| p.id == *id)?;
+                let table = self.engine.perf.processes(self.moment);
+                let mut panel = crate::performance::inspector_panel(inspecting, table.as_deref(), now)?;
+                if self.page != Page::Performance {
+                    let id = *id;
+                    panel.actions.push(Item::new(
+                        "inspector-process-performance",
+                        "Show on Performance",
+                        cx.listener(move |this, _, _, cx| this.show_process_on_performance(id, cx)),
+                    ));
+                }
+                Some(panel)
+            }
+            Inspected::Startup(key) => Some(crate::apps::startup_panel(&self.apps.read(cx).startup_item(key, cx)?)),
         }
+    }
+
+    /// Opens process `id` of the Moment's table in the Inspector and reads its command line
+    /// and user off the UI thread; false if the table does not have it.
+    fn inspect_process(&mut self, id: ve_engine::perf::ProcessId, cx: &mut Context<Self>) -> bool {
+        let Some(seen) = self.engine.perf.processes(self.moment).filter(|t| t.get(id).is_some()) else {
+            return false;
+        };
+        self.inspected = Some(Inspected::Process(id));
+        self.process = Some(crate::performance::Inspecting { id, seen, details: None });
+        let engine = self.engine.clone();
+        cx.spawn(async move |this, cx| {
+            let details = cx.background_spawn(async move { engine.perf.details(id) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(p) = this.process.as_mut().filter(|p| p.id == id) {
+                    p.details = Some(details);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+        true
+    }
+
+    /// Opens Performance with process `id` selected in its table, scrolled to the middle of it,
+    /// and still in the Inspector. Its row is kept in view as the table re-sorts, until the table
+    /// is scrolled by hand or something else is inspected.
+    fn show_process_on_performance(&mut self, id: ve_engine::perf::ProcessId, cx: &mut Context<Self>) {
+        self.go(Page::Performance, cx);
+        self.inspected = Some(Inspected::Process(id));
+        self.following = Some(Following { id, offset: None });
+        let table = self.engine.perf.processes(self.moment);
+        self.processes.update(cx, |t, cx| {
+            t.delegate_mut().show(table, Some(id));
+            if let Some(row) = t.delegate().row_of(id) {
+                t.vertical_scroll_handle.scroll_to_item(row, ScrollStrategy::Center);
+            }
+            cx.notify();
+        });
     }
 
     /// A Duplicate group: size, copies and wasted space; Open, Show in Browse and Trash others…
@@ -2637,6 +2893,16 @@ impl Render for Shell {
         let _frame_index = shared.index.read();
         let now = chrono::Utc::now().timestamp();
         self.compare.update(cx, |c, _| c.refresh_dates());
+        if self.page == Page::Browse {
+            self.map_files_moment(cx);
+        }
+        // Live readings repaint each second only while the Performance or Network page shows
+        // them; each process's I/O is read only while Performance does.
+        self.engine.perf.set_watched(matches!(self.page, Page::Performance | Page::Network));
+        self.engine.perf.set_process_io(self.page == Page::Performance);
+        // The Apps sizes walk program folders under the Index lock: redone only while shown.
+        let apps_shown = self.page == Page::Apps;
+        self.apps.update(cx, |apps, cx| apps.set_shown(apps_shown, cx));
         // The Tasks page shows each running Task's elapsed time; nothing else repaints a Task that
         // reports no progress, so tick once a second while it is shown and Tasks run.
         if self.page == Page::Work && self.tick.is_none() && self.engine.shared.tasks.running_count() > 0 {
@@ -2663,6 +2929,78 @@ impl Render for Shell {
             Page::Browse => self.browse(cx).into_any_element(),
             Page::Cleaner => self.cleaner.clone().into_any_element(),
             Page::Duplicates => self.duplicates_page(cx).into_any_element(),
+            Page::Performance => {
+                let sample = self.engine.perf.at(self.moment);
+                let table = self.engine.perf.processes(self.moment);
+                let selected = match &self.inspected {
+                    Some(Inspected::Process(id)) => Some(*id),
+                    _ => None,
+                };
+                let following = &mut self.following;
+                self.processes.update(cx, |t, cx| {
+                    let changed = t.delegate_mut().show(table, selected);
+                    if let Some(f) = following.as_mut() {
+                        let offset = t.vertical_scroll_handle.0.borrow().base_handle.offset();
+                        if selected != Some(f.id) || f.offset.is_some_and(|o| o != offset) {
+                            // Something else is inspected, or the table was scrolled by hand.
+                            *following = None;
+                        } else if changed {
+                            if let Some(row) = t.delegate().row_of(f.id) {
+                                t.vertical_scroll_handle.scroll_to_item(row, ScrollStrategy::Nearest);
+                            }
+                            // Known again once that scroll is laid out.
+                            f.offset = None;
+                        } else if f.offset.is_none() {
+                            f.offset = Some(offset);
+                        }
+                    }
+                    if changed {
+                        cx.notify();
+                    }
+                });
+                crate::performance::page(sample.as_deref(), self.moment, now, &self.processes, cx)
+            }
+            Page::Network => {
+                let sample = self.engine.net.at(self.moment);
+                // The hour up to the Moment, so scrubbing moves the totals with the rates.
+                let end = match self.moment {
+                    Moment::Live => now,
+                    Moment::At(time) => time,
+                };
+                let at = (end, sample.as_ref().map(|s| s.time));
+                let hour = match &self.net_hour {
+                    Some(h) if h.at == at => h.summary.clone(),
+                    _ => {
+                        let summary = Rc::new(self.engine.net.summary(end - ve_engine::perf::SPAN + 1, end));
+                        self.net_hour = Some(NetHour {
+                            at,
+                            summary: summary.clone(),
+                        });
+                        summary
+                    }
+                };
+                let selected = match &self.inspected {
+                    Some(Inspected::Process(id)) => Some(*id),
+                    _ => None,
+                };
+                let shell = cx.weak_entity();
+                let inspect = crate::network::Inspect {
+                    selected,
+                    processes: self.engine.perf.processes(self.moment),
+                    on_inspect: Rc::new(move |id, cx| {
+                        let _ = shell.update(cx, |this, cx| this.inspect_process(id, cx));
+                    }),
+                };
+                crate::network::page(sample.as_ref(), &hour, self.moment, now, &inspect, &self.connections_scroll, cx)
+            }
+            Page::Apps => {
+                let shown = match &self.inspected {
+                    Some(Inspected::App(key) | Inspected::Startup(key)) => Some(key.clone()),
+                    _ => None,
+                };
+                self.apps.update(cx, |a, cx| a.set_selected(shown, cx));
+                self.apps.clone().into_any_element()
+            }
             Page::Work => self.work_page(&rows, now, cx).into_any_element(),
             Page::Settings => self.settings_page.clone().into_any_element(),
         };
@@ -2723,7 +3061,7 @@ impl Render for Shell {
                                 .min_w_0()
                                 .h_full()
                                 .child(div().flex_1().min_h_0().when(gutter, |d| d.px(px(PAD)).pt(px(PAD))).child(page))
-                                .child(self.dock(cx))
+                                .child(self.dock(now, cx))
                                 .child(self.status_bar(cx)),
                         )
                         .children(inspector),

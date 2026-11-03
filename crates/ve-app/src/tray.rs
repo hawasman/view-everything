@@ -1,4 +1,4 @@
-//! The system tray icon and its menu (ADR-0012): Open, Sync now, the running Tasks and Quit.
+//! The system tray icon and its menu (ADR-0012): Open, Launcher, Sync now, the running Tasks and Quit.
 //! GPUI has no tray API, so each platform talks to its own: a StatusNotifierItem over D-Bus on
 //! Linux (`ksni`), `Shell_NotifyIconW` on Windows, `NSStatusItem` on macOS. Menu choices travel
 //! as [`TrayAction`]s over a channel the app loop reads; the tray holds no GPUI types.
@@ -14,6 +14,8 @@ pub enum TrayAction {
     SyncNow,
     /// Start Live updates (paused on a login start).
     StartLive,
+    /// Open the Launcher (or close it when open).
+    Launcher,
     Quit,
 }
 
@@ -120,6 +122,7 @@ mod platform {
         fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
             let mut menu = vec![
                 self.action("Open", "window-new", TrayAction::Open),
+                self.action("Launcher", "system-search", TrayAction::Launcher),
                 self.action("Sync now", "view-refresh", TrayAction::SyncNow),
             ];
             if self.state.live_paused {
@@ -194,6 +197,7 @@ mod platform {
     const ID_SYNC: usize = 2;
     const ID_LIVE: usize = 3;
     const ID_QUIT: usize = 4;
+    const ID_LAUNCHER: usize = 5;
 
     /// What the window procedure reads; it has no other way to reach the app.
     struct Shared {
@@ -404,6 +408,7 @@ mod platform {
                 AppendMenuW(menu, flags, id, wide(text).as_ptr());
             };
             add(MF_STRING, ID_OPEN, "Open");
+            add(MF_STRING, ID_LAUNCHER, "Launcher");
             add(MF_STRING, ID_SYNC, "Sync now");
             if state.live_paused {
                 add(MF_STRING, ID_LIVE, "Live updates paused: Start");
@@ -436,6 +441,7 @@ mod platform {
                 ID_OPEN => TrayAction::Open,
                 ID_SYNC => TrayAction::SyncNow,
                 ID_LIVE => TrayAction::StartLive,
+                ID_LAUNCHER => TrayAction::Launcher,
                 ID_QUIT => TrayAction::Quit,
                 _ => return,
             };
@@ -481,6 +487,11 @@ mod platform {
             #[unsafe(method(live:))]
             fn live(&self, _sender: Option<&AnyObject>) {
                 let _ = self.ivars().actions.send_blocking(TrayAction::StartLive);
+            }
+
+            #[unsafe(method(launcher:))]
+            fn launcher(&self, _sender: Option<&AnyObject>) {
+                let _ = self.ivars().actions.send_blocking(TrayAction::Launcher);
             }
 
             #[unsafe(method(quit:))]
@@ -551,6 +562,7 @@ mod platform {
                 menu.addItem(&item);
             };
             add("Open", Some(sel!(open:)));
+            add("Launcher", Some(sel!(launcher:)));
             add("Sync now", Some(sel!(sync:)));
             if state.live_paused {
                 add("Live updates paused: Start", Some(sel!(live:)));

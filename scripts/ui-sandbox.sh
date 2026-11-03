@@ -58,6 +58,12 @@ start() {
     chmod 700 "$BASE" "$d"
     # Without this, XTEST input from xdotool waits on a permission dialog inside the sandbox.
     printf '[Xwayland]\nXwaylandEisNoPromptApps=xdotool\n' >"$d/xdg/config/kwinrc"
+    # The app's desktop file, as a package installs it: the portal registers the app id (and so
+    # grants the Launcher's global shortcut) only for an app whose desktop file it finds, and
+    # GLib skips one whose Exec program is not on PATH, so it names the binary in full.
+    mkdir -p "$d/xdg/data/applications"
+    sed "s|^Exec=.*|Exec=$bin|" "$ROOT/packaging/linux/io.github.hawasman.view-everything.desktop" \
+        >"$d/xdg/data/applications/io.github.hawasman.view-everything.desktop"
     if [[ -n ${VE_SANDBOX_SETTINGS:-} ]]; then
         mkdir -p "$d/xdg/config/view-everything"
         cp "$VE_SANDBOX_SETTINGS" "$d/xdg/config/view-everything/settings.toml"
@@ -121,8 +127,17 @@ EOF
     chmod +x "$d/app.sh"
     echo "wayland-ve-$name" >"$d/socket"
 
+    local user_wayland=${WAYLAND_DISPLAY:-wayland-0}
+    [[ "wayland-ve-$name" != "$user_wayland" ]] || die "the sandbox socket would be the user's own ($user_wayland)"
     unset DISPLAY WAYLAND_DISPLAY
+    # Its own engine socket: with the shared one, the app would find the user's running copy (or
+    # another sandbox's), ask it to show its window and exit.
+    # WAYLAND_DISPLAY names the sandbox's own compositor for everything the session bus starts
+    # (xdg-desktop-portal-kde, which serves GlobalShortcuts): unset, a Wayland client falls back
+    # to wayland-0 in the shared XDG_RUNTIME_DIR, the user's real desktop.
+    WAYLAND_DISPLAY=wayland-ve-$name \
     XDG_CONFIG_HOME=$d/xdg/config XDG_DATA_HOME=$d/xdg/data XDG_CACHE_HOME=$d/xdg/cache XDG_STATE_HOME=$d/xdg/state \
+    VE_SOCKET=$d/run/engine.sock \
     KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1 \
         systemd-run --user --scope --quiet --collect --unit="ve-ui-sandbox-$name" \
             -p MemoryHigh="${VE_SANDBOX_MEMORY_HIGH:-1536M}" -p MemoryMax="${VE_SANDBOX_MEMORY_MAX:-2G}" \

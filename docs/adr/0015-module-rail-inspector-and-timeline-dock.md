@@ -18,4 +18,4 @@ The `achromatic-ledger` app style from the taste study: no colour on chrome, one
 
 - Every page starts with a title row and sits in the Shell's gutter; pages stop drawing their own outer frame.
 - Module pages that have no data are not drawn: the rail shows what exists, so Performance, Apps, Network, Agents and Plugins appear when their data does.
-- Not done yet, by decision: the Query grammar with `kind:`/`is:`/`at:`/`since:` facets that would make the rail a rendering of the Query (Design 1); the severity-ranked three-question Overview (Design 3) waits for Performance and Network data; the Cleaner and Duplicates pages keep their v0.2 insides until the Files rework.
+- Not done yet, by decision: the Query grammar with `kind:`/`is:`/`at:`/`since:` facets that would make the rail a rendering of the Query (Design 1); the Cleaner and Duplicates pages keep their v0.2 insides until the Files rework. The severity-ranked three-question Overview (Design 3) came with the Performance and Network data (#59).

@@ -25,6 +25,12 @@ pub enum Inspected {
     Task(u64),
     /// A group of Duplicates, by its first copy.
     Duplicates(EntryId),
+    /// An installed program, by its key (`ve_engine::apps::App::key`).
+    App(String),
+    /// A running or past process, by its PID and start time.
+    Process(ve_engine::perf::ProcessId),
+    /// A startup item, by its key (`ve_engine::apps::StartupItem::key`).
+    Startup(String),
 }
 
 /// The width of the pane.
@@ -79,6 +85,15 @@ pub struct Panel {
     pub actions: Vec<Item>,
 }
 
+/// Marks a fact made by [`long_fact`]; never shown.
+const LONG: char = '\u{2063}';
+
+/// A fact whose value is long (a command, a path): drawn with the value wrapping under its
+/// label instead of cut to one line. Other facts are unchanged.
+pub fn long_fact(label: impl Into<SharedString>, value: impl Into<SharedString>) -> (SharedString, SharedString) {
+    (format!("{LONG}{}", label.into()).into(), value.into())
+}
+
 /// One copy of a Duplicate group, listed under Copies; a click makes it the copy to keep.
 pub struct Member {
     /// The copy's name, and the folder it sits in.
@@ -92,15 +107,21 @@ pub struct Member {
 pub fn render(panel: Panel, members: Vec<Member>, cx: &App) -> Stateful<Div> {
     let p = palette(cx);
     let facts = panel.facts.into_iter().enumerate().map(|(i, (label, value))| {
-        h_flex()
-            .min_h(px(32.))
-            .gap(px(12.))
-            .items_center()
-            .justify_between()
-            .text_size(px(FS_BODY))
-            .when(i > 0, |d| d.border_t_1().border_color(p.rule))
-            .child(div().flex_none().text_color(p.muted).child(label))
-            .child(div().min_w_0().truncate().text_color(p.text).child(value))
+        let row = match label.strip_prefix(LONG) {
+            Some(label) => v_flex()
+                .py(px(6.))
+                .gap(px(2.))
+                .child(div().text_color(p.muted).child(SharedString::from(label.to_owned())))
+                .child(div().w_full().text_color(p.text).child(value)),
+            None => h_flex()
+                .min_h(px(32.))
+                .gap(px(12.))
+                .items_center()
+                .justify_between()
+                .child(div().flex_none().text_color(p.muted).child(label))
+                .child(div().min_w_0().truncate().text_color(p.text).child(value)),
+        };
+        row.text_size(px(FS_BODY)).when(i > 0, |d| d.border_t_1().border_color(p.rule))
     });
     let has_members = !members.is_empty();
     let members = members.into_iter().enumerate().map(|(i, m)| {
@@ -165,8 +186,11 @@ pub fn render(panel: Panel, members: Vec<Member>, cx: &App) -> Stateful<Div> {
                         .child(div().text_size(px(FS_SMALL)).text_color(p.muted).child(panel.kind))
                         .children(panel.tag.map(|(label, tone)| tag(label, tone, cx))),
                 )
+                // Truncated text may shrink to nothing in a column taller than the pane: the
+                // title and subtitle keep their height and the body scrolls instead.
                 .child(
                     div()
+                        .flex_none()
                         .mt(px(4.))
                         .text_size(px(FS_SECTION))
                         .font_weight(FontWeight::SEMIBOLD)
@@ -177,7 +201,7 @@ pub fn render(panel: Panel, members: Vec<Member>, cx: &App) -> Stateful<Div> {
                 .children(
                     panel
                         .subtitle
-                        .map(|s| div().text_size(px(FS_SMALL)).text_color(p.muted).truncate().child(s)),
+                        .map(|s| div().flex_none().text_size(px(FS_SMALL)).text_color(p.muted).truncate().child(s)),
                 )
                 .child(v_flex().mt(px(12.)).children(facts))
                 .when(has_members, |d| {

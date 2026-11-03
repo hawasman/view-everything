@@ -215,9 +215,18 @@ impl Live {
                     shared_ready.resolve("live");
                     let _ = commands_ready.send(Command::Refresh);
                 },
-                move |why| {
+                move |code| {
                     active_ended.store(false, Ordering::Relaxed);
                     ended_flag.store(true, Ordering::Relaxed);
+                    let why = live::fanotify::describe_exit(code);
+                    // Refused at the prompt: the Permission was not given after all, and the
+                    // helper is not asked for again until the user grants it again.
+                    let forgotten = live::fanotify::refused(code).then(|| shared.permissions.forget(crate::permissions::Kind::LiveHelper));
+                    let why = match forgotten {
+                        Some(Ok(())) => format!("{why}; the Live updates helper Permission was not granted"),
+                        Some(Err(e)) => format!("{why}; {e}"),
+                        None => why,
+                    };
                     shared.report("live", format!("{why}; changes are found by the periodic re-walk"));
                     // Whatever changed while the helper was not watching is found now.
                     let _ = commands.send(Command::Refresh);
