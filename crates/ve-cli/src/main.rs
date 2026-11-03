@@ -175,7 +175,10 @@ impl From<io::Error> for Failure {
 /// Runs a command, returning how many Entries it printed.
 fn run(args: &Args, out: &mut impl Write, err: &mut impl Write) -> Result<usize, Failure> {
     let path = match &args.path {
-        // The app resolves paths from its own working folder.
+        // The app resolves paths from its own working folder, so a relative path is made absolute
+        // here. A rooted one stays as written: on Windows `absolute` would prefix `\w` with the
+        // current drive, which is not the Remote or Location path the user named.
+        Some(path) if path.has_root() => Some(path.to_string_lossy().into_owned()),
         Some(path) => Some(std::path::absolute(path)?.to_string_lossy().into_owned()),
         None => None,
     };

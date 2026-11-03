@@ -79,7 +79,21 @@ fn make(path: &Path, days: u64) {
         fs::write(path, b"x").unwrap();
     }
     let when = SystemTime::now() - Duration::from_secs(days * 86_400);
-    fs::File::open(path).unwrap().set_modified(when).unwrap();
+    open_to_touch(path).set_modified(when).unwrap();
+}
+
+/// A handle that may set `path`'s times. Windows opens a folder only with backup semantics.
+fn open_to_touch(path: &Path) -> fs::File {
+    let mut options = fs::OpenOptions::new();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        options.write(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    #[cfg(not(windows))]
+    options.read(true);
+    options.open(path).unwrap()
 }
 
 fn names(matches: &[Match]) -> Vec<&str> {
