@@ -53,7 +53,6 @@ package() {
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/view-everything.svg"
   install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
   install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
-  # Instrument Sans and Instrument Serif are compiled into the binary.
+  # Instrument Sans is compiled into the binary.
   install -Dm644 crates/ve-app/assets/fonts/OFL-InstrumentSans.txt -t "$pkgdir/usr/share/licenses/$pkgname/"
-  install -Dm644 crates/ve-app/assets/fonts/OFL-InstrumentSerif.txt -t "$pkgdir/usr/share/licenses/$pkgname/"
 }

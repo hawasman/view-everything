@@ -22,12 +22,10 @@
               Source="target\release\view-everything.exe" KeyPath="yes" />
         <File Id="VeExe" Name="ve.exe" Source="target\release\ve.exe" />
       </Component>
-      <!-- Instrument Sans and Instrument Serif are compiled into the executable; their OFL travels with them. -->
+      <!-- Instrument Sans is compiled into the executable; its OFL travels with it. -->
       <Component Id="FontLicense" Guid="42329E3C-CAB4-4D55-A1D2-23A0A8027E08" Win64="yes">
         <File Id="InstrumentSansOfl" Name="OFL-InstrumentSans.txt"
               Source="crates\ve-app\assets\fonts\OFL-InstrumentSans.txt" KeyPath="yes" />
-        <File Id="InstrumentSerifOfl" Name="OFL-InstrumentSerif.txt"
-              Source="crates\ve-app\assets\fonts\OFL-InstrumentSerif.txt" />
       </Component>
     </DirectoryRef>
 
