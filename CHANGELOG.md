@@ -1,9 +1,11 @@
 # Changelog
 
-## v0.3.0 — unreleased
+## v0.3.0-rc.1
+
+First release candidate of v0.3.0. Linux is the target for the new Modules (Performance, Network, Apps, Launcher, agent access); on Windows and macOS they show what they support. Self-updates skip pre-releases: install this one by hand.
 
 ### One shell for every Module
-- The window has a new frame, built to hold the Modules to come (Search, Performance, Apps, Network) without filling up ([ADR-0015](docs/adr/0015-module-rail-inspector-and-timeline-dock.md)): a rail of Modules on the left (Overview; Files with Browse, Cleaner and Duplicates; Settings), one Query box in the top bar that works from every page (`/` focuses it; typing opens Browse), an **Inspector** on the right that shows whatever is selected (an Entry, a Location, a Task) with its facts and actions, a **Timeline** dock at the bottom, and a status strip on every page.
+- The window has a new frame, built to hold the Modules (Performance, Apps, Network) without filling up ([ADR-0015](docs/adr/0015-module-rail-inspector-and-timeline-dock.md)): a rail of Modules on the left (Overview; Files with Browse, Cleaner and Duplicates; Settings), one Query box in the top bar that works from every page (`/` focuses it; typing opens Browse), an **Inspector** on the right that shows whatever is selected (an Entry, a Location, a Task) with its facts and actions, a **Timeline** dock at the bottom, and a status strip on every page.
 - The Dashboard is now the **Overview**: what is indexed, what can be cleaned up, what is in the Trash and when the Index was last synced, then Locations, Categories, Largest files and Recently modified. Clicking a Location opens it in the Inspector, where Sync now, Open in Browse and Forget live.
 - **Duplicates** is its own page under Files, not a tab of the Explorer. **Work** is a page of every Task and every Location, opened from the rail's Work block, which shows the first running Task's progress and the Locations' health; the Tasks and Locations popovers are gone.
 - **Compare with** is the Timeline dock: on Browse it shows one tick per Snapshot; click one to compare, Back to Live to stop.

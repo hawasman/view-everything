@@ -7492,7 +7492,7 @@ dependencies = [
 
 [[package]]
 name = "ve-app"
-version = "0.3.0"
+version = "0.3.0-rc.1"
 dependencies = [
  "ashpd",
  "async-channel",
@@ -7527,7 +7527,7 @@ dependencies = [
 
 [[package]]
 name = "ve-cli"
-version = "0.3.0"
+version = "0.3.0-rc.1"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
@@ -7542,7 +7542,7 @@ dependencies = [
 
 [[package]]
 name = "ve-core"
-version = "0.3.0"
+version = "0.3.0-rc.1"
 dependencies = [
  "bincode",
  "chrono",
@@ -7558,7 +7558,7 @@ dependencies = [
 
 [[package]]
 name = "ve-engine"
-version = "0.3.0"
+version = "0.3.0-rc.1"
 dependencies = [
  "chrono",
  "getrandom 0.3.4",
@@ -7575,7 +7575,7 @@ dependencies = [
 
 [[package]]
 name = "ve-fanotify"
-version = "0.3.0"
+version = "0.3.0-rc.1"
 dependencies = [
  "libc",
  "tempfile",
@@ -7583,7 +7583,7 @@ dependencies = [
 
 [[package]]
 name = "ve-scan"
-version = "0.3.0"
+version = "0.3.0-rc.1"
 dependencies = [
  "base64 0.23.1",
  "bincode",
