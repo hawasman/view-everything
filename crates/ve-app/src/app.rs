@@ -7,6 +7,7 @@ use crate::categories::CategoryPanel;
 use crate::cleaner::{CleanerPage, ShowInBrowse};
 use crate::compare::{Compare, CompareEvent, moment_of, nearest_snapshot};
 use crate::dashboard::{Act, DashboardPage};
+use crate::dashboard_summary::Question;
 use crate::duplicates::{DuplicatesPanel, InspectGroup};
 use crate::explorer::FlatList;
 use crate::filters::FiltersPanel;
@@ -115,6 +116,20 @@ enum Page {
     Settings,
 }
 
+/// A process Show on Performance opened: its row is scrolled back into view as the table
+/// re-sorts, until the table is scrolled by hand.
+struct Following {
+    id: ve_engine::perf::ProcessId,
+    /// The table's scroll offset once the last scroll to the row was laid out; `None` until then.
+    offset: Option<Point<Pixels>>,
+}
+
+/// The Network page's last hour, by the second it ends at and the newest sample then.
+struct NetHour {
+    at: (i64, Option<i64>),
+    summary: Rc<ve_engine::net::Summary>,
+}
+
 /// The self-update of the release in the sidebar row (ADR-0007).
 #[cfg(feature = "updater")]
 enum SelfUpdate {
@@ -209,6 +224,12 @@ pub struct Shell {
     processes: Entity<TableState<crate::performance::ProcessList>>,
     /// The process the Inspector shows, while it shows one.
     process: Option<crate::performance::Inspecting>,
+    /// The process Show on Performance opened, kept in view as its table re-sorts.
+    following: Option<Following>,
+    /// The Network page's connections list.
+    connections_scroll: UniformListScrollHandle,
+    /// The Network page's last hour: read once per new sample rather than every frame.
+    net_hour: Option<NetHour>,
     /// The Entry a list selection last put in the Inspector.
     last_outlined: Option<ve_core::EntryId>,
     /// Show in Browse: the Entry to select once the View of this Query text arrives.
@@ -252,7 +273,7 @@ impl Shell {
         });
         let dashboard = cx.new(|cx| {
             let mut page = DashboardPage::new(
-                engine.shared.clone(),
+                engine.clone(),
                 cleaner.clone(),
                 trash.clone(),
                 categories.clone(),
@@ -602,6 +623,9 @@ impl Shell {
             inspected: None,
             processes,
             process: None,
+            following: None,
+            connections_scroll: UniformListScrollHandle::new(),
+            net_hour: None,
             last_outlined: None,
             reveal_on_view: None,
             tick: None,
@@ -1237,12 +1261,48 @@ impl Shell {
             Act::OpenCleaner => self.page = Page::Cleaner,
             Act::Inspect(what) => self.inspected = Some(what.clone()),
             Act::StartLive => Host::start_live(cx),
+            Act::Follow(question, inspect) => self.follow(*question, inspect.clone(), window, cx),
             Act::SaveQuery(text) => {
                 self.settings_page
                     .update(cx, |page, cx| page.apply(|s| s.recent_query = text.clone(), cx));
             }
         }
         cx.notify();
+    }
+
+    /// Opens the Module page an Overview answer is about, with what it names in the Inspector.
+    fn follow(&mut self, question: Question, inspect: Option<Inspected>, window: &mut Window, cx: &mut Context<Self>) {
+        let page = match question {
+            Question::Disk => Page::Browse,
+            Question::Slowing => Page::Performance,
+            Question::Talking => Page::Network,
+        };
+        self.go(page, cx);
+        match inspect {
+            // Show in Browse, as the Inspector's own button does.
+            Some(Inspected::Entry(id)) => {
+                self.show_in_browse(id, window, cx);
+                self.inspected = Some(Inspected::Entry(id));
+            }
+            // A process the answer read a moment ago, if it is still in the Moment's table: its
+            // row on Performance, its first connection on Network.
+            Some(Inspected::Process(id)) => {
+                if !self.inspect_process(id, cx) {
+                    window.push_notification(Notification::info("That process is no longer running."), cx);
+                } else if page == Page::Performance {
+                    self.show_process_on_performance(id, cx);
+                } else if let Some(row) = self
+                    .engine
+                    .net
+                    .at(self.moment)
+                    .and_then(|n| n.connections.value().and_then(|c| crate::network::row_of(c, id)))
+                {
+                    self.connections_scroll.scroll_to_item(row, ScrollStrategy::Top);
+                }
+            }
+            Some(other) => self.inspected = Some(other),
+            None => {}
+        }
     }
 
     /// The one-line bar under the Explorer: sync state, Last Synced, problems, totals, Trash.
@@ -2462,17 +2522,26 @@ impl Shell {
             Inspected::Process(id) => {
                 let inspecting = self.process.as_ref().filter(|p| p.id == *id)?;
                 let table = self.engine.perf.processes(self.moment);
-                crate::performance::inspector_panel(inspecting, table.as_deref(), now)
+                let mut panel = crate::performance::inspector_panel(inspecting, table.as_deref(), now)?;
+                if self.page != Page::Performance {
+                    let id = *id;
+                    panel.actions.push(Item::new(
+                        "inspector-process-performance",
+                        "Show on Performance",
+                        cx.listener(move |this, _, _, cx| this.show_process_on_performance(id, cx)),
+                    ));
+                }
+                Some(panel)
             }
             Inspected::Startup(key) => Some(crate::apps::startup_panel(&self.apps.read(cx).startup_item(key, cx)?)),
         }
     }
 
     /// Opens process `id` of the Moment's table in the Inspector and reads its command line
-    /// and user off the UI thread.
-    fn inspect_process(&mut self, id: ve_engine::perf::ProcessId, cx: &mut Context<Self>) {
+    /// and user off the UI thread; false if the table does not have it.
+    fn inspect_process(&mut self, id: ve_engine::perf::ProcessId, cx: &mut Context<Self>) -> bool {
         let Some(seen) = self.engine.perf.processes(self.moment).filter(|t| t.get(id).is_some()) else {
-            return;
+            return false;
         };
         self.inspected = Some(Inspected::Process(id));
         self.process = Some(crate::performance::Inspecting { id, seen, details: None });
@@ -2488,6 +2557,24 @@ impl Shell {
         })
         .detach();
         cx.notify();
+        true
+    }
+
+    /// Opens Performance with process `id` selected in its table, scrolled to the middle of it,
+    /// and still in the Inspector. Its row is kept in view as the table re-sorts, until the table
+    /// is scrolled by hand or something else is inspected.
+    fn show_process_on_performance(&mut self, id: ve_engine::perf::ProcessId, cx: &mut Context<Self>) {
+        self.go(Page::Performance, cx);
+        self.inspected = Some(Inspected::Process(id));
+        self.following = Some(Following { id, offset: None });
+        let table = self.engine.perf.processes(self.moment);
+        self.processes.update(cx, |t, cx| {
+            t.delegate_mut().show(table, Some(id));
+            if let Some(row) = t.delegate().row_of(id) {
+                t.vertical_scroll_handle.scroll_to_item(row, ScrollStrategy::Center);
+            }
+            cx.notify();
+        });
     }
 
     /// A Duplicate group: size, copies and wasted space; Open, Show in Browse and Trash others…
@@ -2849,8 +2936,25 @@ impl Render for Shell {
                     Some(Inspected::Process(id)) => Some(*id),
                     _ => None,
                 };
+                let following = &mut self.following;
                 self.processes.update(cx, |t, cx| {
-                    if t.delegate_mut().show(table, selected) {
+                    let changed = t.delegate_mut().show(table, selected);
+                    if let Some(f) = following.as_mut() {
+                        let offset = t.vertical_scroll_handle.0.borrow().base_handle.offset();
+                        if selected != Some(f.id) || f.offset.is_some_and(|o| o != offset) {
+                            // Something else is inspected, or the table was scrolled by hand.
+                            *following = None;
+                        } else if changed {
+                            if let Some(row) = t.delegate().row_of(f.id) {
+                                t.vertical_scroll_handle.scroll_to_item(row, ScrollStrategy::Nearest);
+                            }
+                            // Known again once that scroll is laid out.
+                            f.offset = None;
+                        } else if f.offset.is_none() {
+                            f.offset = Some(offset);
+                        }
+                    }
+                    if changed {
                         cx.notify();
                     }
                 });
@@ -2863,8 +2967,31 @@ impl Render for Shell {
                     Moment::Live => now,
                     Moment::At(time) => time,
                 };
-                let hour = self.engine.net.summary(end - ve_engine::perf::SPAN + 1, end);
-                crate::network::page(sample.as_ref(), &hour, self.moment, now, cx)
+                let at = (end, sample.as_ref().map(|s| s.time));
+                let hour = match &self.net_hour {
+                    Some(h) if h.at == at => h.summary.clone(),
+                    _ => {
+                        let summary = Rc::new(self.engine.net.summary(end - ve_engine::perf::SPAN + 1, end));
+                        self.net_hour = Some(NetHour {
+                            at,
+                            summary: summary.clone(),
+                        });
+                        summary
+                    }
+                };
+                let selected = match &self.inspected {
+                    Some(Inspected::Process(id)) => Some(*id),
+                    _ => None,
+                };
+                let shell = cx.weak_entity();
+                let inspect = crate::network::Inspect {
+                    selected,
+                    processes: self.engine.perf.processes(self.moment),
+                    on_inspect: Rc::new(move |id, cx| {
+                        let _ = shell.update(cx, |this, cx| this.inspect_process(id, cx));
+                    }),
+                };
+                crate::network::page(sample.as_ref(), &hour, self.moment, now, &inspect, &self.connections_scroll, cx)
             }
             Page::Apps => {
                 let shown = match &self.inspected {

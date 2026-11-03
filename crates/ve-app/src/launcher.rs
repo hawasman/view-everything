@@ -1,9 +1,10 @@
-//! The Launcher: a small keyboard-only window over the Index. A global shortcut (default
-//! Alt+Space), the tray menu or `view-everything --launcher` opens it from anywhere, with or
-//! without the app's main window. Typing lists Entries whose names match (`launch.match`); Enter
-//! opens one with the system handler, Shift+Enter shows it in Browse, Esc or clicking elsewhere
-//! closes it. A copy started with `--launcher` while the app is not running has no Engine to ask,
-//! and says so.
+//! The Launcher: a small keyboard-only window over the Index and installed programs. A global
+//! shortcut (default Alt+Space), the tray menu or `view-everything --launcher` opens it from
+//! anywhere, with or without the app's main window. Typing lists Entries and programs whose
+//! names match (`launch.match`); Enter opens an Entry with the system handler or starts a
+//! program by its launch command, Shift+Enter shows an Entry in Browse, Esc or clicking
+//! elsewhere closes it. A copy started with `--launcher` while the app is not running has no
+//! Engine to ask, and says so.
 
 mod hotkey;
 
@@ -18,7 +19,7 @@ use gpui_kit::*;
 use std::ops::Range;
 use std::sync::Arc;
 use ve_engine::Engine;
-use ve_engine::launch::{Kind, Match};
+use ve_engine::launch::{Kind, Launch, Match, Start};
 
 const WIDTH: f32 = 640.;
 const HEIGHT: f32 = 440.;
@@ -119,7 +120,7 @@ impl Launcher {
     fn new(engine: Option<Arc<Engine>>, text: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Open a file or folder by name")
+                .placeholder("Open a file, folder or program by name")
                 .default_value(text.clone())
         });
         input.update(cx, |input, cx| {
@@ -243,12 +244,24 @@ impl Launcher {
         true
     }
 
-    /// Enter opens the selected match with the system handler; Shift+Enter shows it in Browse in
-    /// the main window. Either closes the Launcher; a match that cannot be opened leaves a note.
+    /// Enter opens the selected Entry with the system handler or starts the selected program;
+    /// Shift+Enter shows an Entry in Browse in the main window. Either closes the Launcher; a
+    /// match that cannot be opened leaves a note.
     fn act(&mut self, act: Act, window: &mut Window, cx: &mut Context<Self>) {
         let Some(found) = self.matches().get(self.selected).cloned() else {
             return;
         };
+        if let Some(launch) = &found.launch {
+            if act == Act::ShowInBrowse {
+                self.note = Some(format!("{} is a program: Enter starts it", found.name));
+            } else {
+                match start(launch) {
+                    Ok(()) => return window.remove_window(),
+                    Err(e) => self.note = Some(format!("Could not start {}: {e}", found.name)),
+                }
+            }
+            return cx.notify();
+        }
         if act == Act::ShowInBrowse {
             window.remove_window();
             cx.defer(move |cx| crate::host::Host::show_in_browse(&found.path, cx));
@@ -270,7 +283,15 @@ impl Launcher {
     fn row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
         let m = &self.matches()[ix];
-        let folder = m.path.parent().map(|f| f.display().to_string()).unwrap_or_default();
+        let (detail, kind) = match &m.launch {
+            Some(Launch::DesktopEntry(path)) => (path.display().to_string(), "Program"),
+            Some(Launch::Flatpak(id)) => (format!("Flatpak {id}"), "Flatpak"),
+            Some(Launch::Steam(id)) => (format!("Steam app {id}"), "Game"),
+            None => (
+                m.path.parent().map(|f| f.display().to_string()).unwrap_or_default(),
+                if m.kind == Kind::Folder { "Folder" } else { "File" },
+            ),
+        };
         h_flex()
             .w_full()
             .h(px(ROW_H))
@@ -289,18 +310,11 @@ impl Launcher {
                             .truncate()
                             .child(m.name.clone()),
                     )
-                    .child(div().text_size(px(FS_SMALL)).text_color(p.muted).truncate().child(folder)),
+                    .child(div().text_size(px(FS_SMALL)).text_color(p.muted).truncate().child(detail)),
             )
             .when(m.offline, |d| d.child(tag("Offline", Tone::Warning, cx)))
             .when(m.remote, |d| d.child(tag("Remote", Tone::Neutral, cx)))
-            .child(tag(
-                match m.kind {
-                    Kind::File => "File",
-                    Kind::Folder => "Folder",
-                },
-                Tone::Neutral,
-                cx,
-            ))
+            .child(tag(kind, Tone::Neutral, cx))
             .into_any_element()
     }
 
@@ -310,9 +324,9 @@ impl Launcher {
             return Some("View Everything is not running. Start it, then open the Launcher again.".into());
         }
         match &self.found {
-            Found::Nothing => Some("Type part of a file or folder name".into()),
+            Found::Nothing => Some("Type part of a file, folder or program name".into()),
             Found::Failed(e) => Some(capitalized(e)),
-            Found::Matches(m) if m.is_empty() => Some(format!("No Entry name holds “{}”", self.input.read(cx).value().trim())),
+            Found::Matches(m) if m.is_empty() => Some(format!("No Entry or program name holds “{}”", self.input.read(cx).value().trim())),
             Found::Matches(_) => None,
         }
     }
@@ -321,6 +335,27 @@ impl Launcher {
 fn capitalized(text: &str) -> String {
     let mut chars = text.chars();
     chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
+/// Starts a program by its launch command, apart from this process: it keeps running when the
+/// app quits.
+fn start(launch: &Launch) -> Result<(), String> {
+    match launch.start()? {
+        Start::Open(url) => opener::open(&url).map_err(|e| e.to_string()),
+        Start::Run { argv, dir } => {
+            let mut command = std::process::Command::new(&argv[0]);
+            command.args(&argv[1..]).stdin(std::process::Stdio::null());
+            if let Some(dir) = dir {
+                command.current_dir(dir);
+            }
+            #[cfg(unix)]
+            std::os::unix::process::CommandExt::process_group(&mut command, 0);
+            let mut child = command.spawn().map_err(|e| e.to_string())?;
+            // Reaped when it exits, so it never lingers as a zombie.
+            std::thread::spawn(move || child.wait());
+            Ok(())
+        }
+    }
 }
 
 impl Render for Launcher {
@@ -350,7 +385,7 @@ impl Render for Launcher {
         let hint = match &self.note {
             Some(note) => div().text_size(px(FS_SMALL)).text_color(p.warning).truncate().child(note.clone()),
             None if self.engine.is_none() => caption("Esc closes", cx),
-            None => caption("Enter opens · Shift+Enter shows in Browse · Esc closes", cx),
+            None => caption("Enter opens or starts · Shift+Enter shows in Browse · Esc closes", cx),
         };
         v_flex()
             .size_full()

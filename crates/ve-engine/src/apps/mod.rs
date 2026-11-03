@@ -6,7 +6,8 @@
 mod readers;
 mod startup;
 
-pub use readers::{AppKind, Program, Sources};
+pub(crate) use readers::group_value;
+pub use readers::{AppKind, Launch, Program, Sources};
 pub use startup::{Scope, StartupItem, StartupKind};
 
 use crate::{Engine, Shared};
@@ -124,35 +125,48 @@ impl Apps {
     /// files without an Index lock.
     pub fn list(&self, shared: &Shared) -> Arc<Vec<App>> {
         let mut cache = self.cache.lock();
-        let sources = self.sources.lock().clone();
-        let key = {
+        {
             let index = shared.index.read();
             if let (Some((sized_at, apps)), Some((read_under, _))) = (&cache.apps, &cache.programs)
                 && *sized_at == index.generation()
-                && read_under.sources == sources
+                && read_under.sources == *self.sources.lock()
             {
                 return apps.clone();
             }
-            ReadKey {
-                sources,
-                synced: index.volumes().map(|(_, v)| v.last_synced).collect(),
-                owner_roots: index.owner_roots().count(),
-            }
-        };
-        let programs = match &cache.programs {
-            Some((read_under, programs)) if *read_under == key => programs.clone(),
-            _ => {
-                let programs = Arc::new(key.sources.as_ref().map(readers::read).unwrap_or_default());
-                cache.programs = Some((key, programs.clone()));
-                programs
-            }
-        };
+        }
+        let programs = self.read(&mut cache, shared);
         let index = shared.index.read();
         let generation = index.generation();
         let apps = Arc::new(size(&index, &programs));
         drop(index);
         cache.apps = Some((generation, apps.clone()));
         apps
+    }
+
+    /// The installed programs, unsized: read again under the same rule as [`Apps::list`].
+    pub fn programs(&self, shared: &Shared) -> Arc<Vec<Program>> {
+        let mut cache = self.cache.lock();
+        self.read(&mut cache, shared)
+    }
+
+    /// The programs read under the current key, reading the sources when it changed.
+    fn read(&self, cache: &mut Cache, shared: &Shared) -> Arc<Vec<Program>> {
+        let key = {
+            let index = shared.index.read();
+            ReadKey {
+                sources: self.sources.lock().clone(),
+                synced: index.volumes().map(|(_, v)| v.last_synced).collect(),
+                owner_roots: index.owner_roots().count(),
+            }
+        };
+        match &cache.programs {
+            Some((read_under, programs)) if *read_under == key => programs.clone(),
+            _ => {
+                let programs = Arc::new(key.sources.as_ref().map(readers::read).unwrap_or_default());
+                cache.programs = Some((key, programs.clone()));
+                programs
+            }
+        }
     }
 
     /// The startup items, read afresh from the sources: a few small files, without an Index
@@ -193,6 +207,7 @@ mod tests {
             version: None,
             installed: None,
             owner,
+            launch: None,
         }
     }
 

@@ -26,7 +26,7 @@ It keeps one Index of every file on your Volumes, saved between runs, so searchi
 - **Agents:** `ve mcp serve` lets your own agent (any MCP client) read the Index, once you approve it. [More](docs/guide/agents.md)
 
 ### See
-- **Overview:** what is indexed, what can be cleaned up, the Trash, when the Index was last synced; then a used bar per Location, the Categories, and the largest and most recently modified files.
+- **Overview:** three answers, most severe first: what is filling the disk (the fullest Location, what can be cleaned up, the largest Owner), what is slowing the machine (CPU and memory over the last hour, the busiest process) and what is talking (the busiest interface, the hour's connections, the process holding the most open); each opens its page. Then what is indexed, the Trash, when the Index was last synced, a used bar per Location, the Categories, and the largest and most recently modified files.
 - **Browse:** a tree and a flat list beside a Treemap, all driven by one Query box that works from every page. Double-click any folder to zoom into it. Select several rows for the right-click menu: Open, Show in file manager, Open terminal here, Copy path, Trash, Sync this folder and Export selection to CSV.
 - **Treemap and Inspector:** folders labelled with their name and size down to an adjustable Depth, coloured by Category or by Owner kind; hover shows every enclosing folder. The **Inspector** at the right shows the selected Entry's size, share and contents, with its actions; it shows a Location or a Task the same way.
 - **Owners:** the program, game, package or project a folder belongs to, found for Steam games, installed programs, system folders and code projects. [More](docs/guide/owners.md)
@@ -34,7 +34,7 @@ It keeps one Index of every file on your Volumes, saved between runs, so searchi
 - **Snapshots and Compare with:** a daily Snapshot of folder sizes, and a Change column showing what grew. [More](docs/guide/snapshots-and-export.md)
 - **Export** to CSV or the Treemap to PNG. [More](docs/guide/snapshots-and-export.md#export)
 - **Performance:** CPU per core (performance and efficiency cores told apart), memory composition, per-disk throughput and every process by CPU, memory and I/O, now or at any second of the last hour on the Timeline dock (Linux). [More](docs/guide/performance.md)
-- **Network:** receive and send throughput per interface and what each moved in the last hour, on the same Timeline; an interface that goes away keeps its history (Linux). [More](docs/guide/network.md)
+- **Network:** receive and send throughput per interface and what each moved in the last hour, and every open TCP/UDP connection with the process holding it, on the same Timeline; an interface that goes away keeps its history (Linux). [More](docs/guide/network.md)
 
 ### Clean
 - **Cleaner:** temporary files, caches and build artefacts (`target/`, `node_modules`, `.next` …), each with its size and a safe default tick. Every item is checked again on disk before it is removed. Add your own Cleanup Rules in TOML. [More](docs/guide/cleanup-rules.md)

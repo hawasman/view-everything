@@ -186,8 +186,11 @@ pub fn render(panel: Panel, members: Vec<Member>, cx: &App) -> Stateful<Div> {
                         .child(div().text_size(px(FS_SMALL)).text_color(p.muted).child(panel.kind))
                         .children(panel.tag.map(|(label, tone)| tag(label, tone, cx))),
                 )
+                // Truncated text may shrink to nothing in a column taller than the pane: the
+                // title and subtitle keep their height and the body scrolls instead.
                 .child(
                     div()
+                        .flex_none()
                         .mt(px(4.))
                         .text_size(px(FS_SECTION))
                         .font_weight(FontWeight::SEMIBOLD)
@@ -198,7 +201,7 @@ pub fn render(panel: Panel, members: Vec<Member>, cx: &App) -> Stateful<Div> {
                 .children(
                     panel
                         .subtitle
-                        .map(|s| div().text_size(px(FS_SMALL)).text_color(p.muted).truncate().child(s)),
+                        .map(|s| div().flex_none().text_size(px(FS_SMALL)).text_color(p.muted).truncate().child(s)),
                 )
                 .child(v_flex().mt(px(12.)).children(facts))
                 .when(has_members, |d| {

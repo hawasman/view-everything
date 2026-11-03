@@ -118,7 +118,7 @@ _Avoid_: owner folder, install dir
 ### Views
 
 **Overview**:
-The home view: what is indexed, what can be cleaned up, what is in the Trash and when the Index was last synced, then the Locations, the Categories, the largest and the most recently modified files.
+The home view: three answers first, most severe first (what is filling the disk, what is slowing the machine, what is talking on the network), then what is indexed, what is in the Trash and when the Index was last synced, the Locations, the Categories, the largest and the most recently modified files.
 _Avoid_: dashboard, home, summary
 
 **Browse**:
@@ -151,6 +151,10 @@ _Avoid_: date, time cursor, position
 **Process**:
 A program running on the machine, as Performance lists it: known by its PID and its start time together, so a PID the system reuses names another Process. Not a Task, which is the app's own background work.
 _Avoid_: task, job (for these)
+
+**Connection**:
+An open TCP or UDP socket, as Network lists it: protocol, local and remote address, state, and the Process holding it, or "unknown" when that Process cannot be read. Not a Location, Remote or Volume, which are where files are.
+_Avoid_: socket (in the UI), link, session
 
 **Launcher**:
 The window the global hotkey (or the tray menu) opens anywhere on the desktop, with or without the main window: a single line that finds Entries and installed programs by name, keyboard only. Not the Query box, which is the Files Module's search.
