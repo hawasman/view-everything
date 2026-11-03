@@ -11,22 +11,50 @@ use std::time::UNIX_EPOCH;
 use ve_core::Owner;
 use ve_core::owners::{self, vdf_value};
 
-/// Where installed programs are read from.
+/// Where installed programs and startup items are read from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sources {
-    /// The filesystem root the system databases and `/opt` are found under: `/`.
+    /// The filesystem root the system databases, `/opt` and the system-wide autostart and
+    /// systemd folders are found under: `/`.
     pub root: PathBuf,
-    /// The user's home folder, for per-user Flatpaks and the Steam libraries.
+    /// The user's home folder, for per-user Flatpaks, the Steam libraries and per-user units.
     pub home: Option<PathBuf>,
+    /// The user's configuration folder (`$XDG_CONFIG_HOME`, else `~/.config`): their autostart
+    /// entries and systemd units.
+    pub config_home: Option<PathBuf>,
+    /// The system configuration folders (`$XDG_CONFIG_DIRS`, else `/etc/xdg`), most important
+    /// first.
+    pub config_dirs: Vec<PathBuf>,
 }
 
 impl Sources {
     /// The running system's, on Linux; `None` elsewhere (Apps reads Linux only for now).
     pub fn local() -> Option<Sources> {
-        cfg!(target_os = "linux").then(|| Sources {
-            root: PathBuf::from("/"),
-            home: std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute()),
+        let absolute = |var: &str| std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute());
+        cfg!(target_os = "linux").then(|| {
+            let mut sources = Sources::new(PathBuf::from("/"), absolute("HOME"));
+            if let Some(config) = absolute("XDG_CONFIG_HOME") {
+                sources.config_home = Some(config);
+            }
+            let dirs: Vec<PathBuf> = std::env::var_os("XDG_CONFIG_DIRS")
+                .map(|dirs| std::env::split_paths(&dirs).filter(|p| p.is_absolute()).collect())
+                .unwrap_or_default();
+            if !dirs.is_empty() {
+                sources.config_dirs = dirs;
+            }
+            sources
         })
+    }
+
+    /// Reads below `root` and `home`, with the configuration folders where the XDG base
+    /// directory defaults put them: `<home>/.config` and `<root>/etc/xdg`.
+    pub fn new(root: PathBuf, home: Option<PathBuf>) -> Sources {
+        Sources {
+            config_home: home.as_ref().map(|h| h.join(".config")),
+            config_dirs: vec![under(&root, "/etc/xdg")],
+            root,
+            home,
+        }
     }
 }
 
@@ -84,12 +112,12 @@ pub fn read(sources: &Sources) -> Vec<Program> {
 }
 
 /// `path` below `root`, for an absolute `path`.
-fn under(root: &Path, path: &str) -> PathBuf {
+pub(super) fn under(root: &Path, path: &str) -> PathBuf {
     root.join(path.trim_start_matches('/'))
 }
 
 /// The names in a folder; nothing when it cannot be listed.
-fn names(dir: &Path) -> Vec<String> {
+pub(super) fn names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .map(|entries| entries.flatten().filter_map(|e| e.file_name().into_string().ok()).collect())
         .unwrap_or_default();
@@ -245,13 +273,34 @@ pub fn flatpak(sources: &Sources) -> Vec<Program> {
 
 /// `Name=` of a desktop file's `[Desktop Entry]` group.
 fn desktop_name(text: &str) -> Option<String> {
-    text.lines()
-        .skip_while(|l| l.trim() != "[Desktop Entry]")
-        .skip(1)
-        .take_while(|l| !l.starts_with('['))
-        .find_map(|l| l.strip_prefix("Name="))
-        .map(|n| n.trim().to_owned())
-        .filter(|n| !n.is_empty())
+    group_value(text, "Desktop Entry", "Name").map(str::to_owned)
+}
+
+/// The `key=value` lines of `[group]` in an ini-style file (desktop entries, systemd units), in
+/// file order, keys and values trimmed. A group named twice is read in both places.
+pub(super) fn group_entries<'a>(text: &'a str, group: &'a str) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+    let mut inside = false;
+    text.lines().filter_map(move |line| {
+        let line = line.trim();
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            inside = name == group;
+            return None;
+        }
+        if !inside || line.starts_with('#') || line.starts_with(';') {
+            return None;
+        }
+        let (key, value) = line.split_once('=')?;
+        Some((key.trim(), value.trim()))
+    })
+}
+
+/// The last non-empty value of `key` in `[group]`.
+pub(super) fn group_value<'a>(text: &'a str, group: &'a str, key: &str) -> Option<&'a str> {
+    group_entries(text, group)
+        .filter(|(k, _)| *k == key)
+        .map(|(_, v)| v)
+        .last()
+        .filter(|v| !v.is_empty())
 }
 
 /// The `version` of the first `<release>` in AppStream metainfo, which lists the newest first.
@@ -353,10 +402,7 @@ mod tests {
     }
 
     fn sources(dir: &Path) -> Sources {
-        Sources {
-            root: dir.join("root"),
-            home: Some(dir.join("home")),
-        }
+        Sources::new(dir.join("root"), Some(dir.join("home")))
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! Cleaner, Duplicates, Performance, Tasks, Settings), the Timeline dock with the Moment, the
 //! status strip and the Inspector.
 
-use crate::apps::{AppsPage, InspectApp};
+use crate::apps::{AppsPage, InspectApp, InspectStartup};
 use crate::categories::CategoryPanel;
 use crate::cleaner::{CleanerPage, ShowInBrowse};
 use crate::compare::{Compare, CompareEvent, moment_of, nearest_snapshot};
@@ -49,8 +49,13 @@ use ve_engine::view::Focus;
 use ve_engine::{Engine, Phase, last_synced_label};
 use ve_scan::VolumeInfo;
 
-/// The app's name as people read it (the binary, app id and data folders stay `view-everything`).
+/// The app's name as people read it (the binary and data folders stay `view-everything`).
 pub const APP_NAME: &str = "View Everything";
+
+/// The app id: its windows' Wayland app id, the name of its packaged desktop file
+/// (`<APP_ID>.desktop`, which the desktop matches windows and portal requests against), and who
+/// the GlobalShortcuts portal is told the app is.
+pub const APP_ID: &str = "io.github.hawasman.view-everything";
 
 /// Most Entries "Open" and "Show in file manager" act on at once; more would launch a process
 /// or window each.
@@ -102,6 +107,8 @@ enum Page {
     Duplicates,
     /// The system at the Moment: CPU, memory, disks.
     Performance,
+    /// Each network interface's throughput at the Moment.
+    Network,
     Apps,
     /// Tasks and Locations, from the rail's Work block.
     Work,
@@ -198,6 +205,10 @@ pub struct Shell {
     selected_size: Cell<Option<(SelectedSizeKey, u64)>>,
     /// What the Inspector shows.
     inspected: Option<Inspected>,
+    /// The Performance page's process table.
+    processes: Entity<TableState<crate::performance::ProcessList>>,
+    /// The process the Inspector shows, while it shows one.
+    process: Option<crate::performance::Inspecting>,
     /// The Entry a list selection last put in the Inspector.
     last_outlined: Option<ve_core::EntryId>,
     /// Show in Browse: the Entry to select once the View of this Query text arrives.
@@ -265,6 +276,18 @@ impl Shell {
             cx.notify();
         })
         .detach();
+        cx.subscribe(&apps, |this, _, inspect: &InspectStartup, cx| {
+            this.inspected = Some(Inspected::Startup(inspect.0.clone()));
+            cx.notify();
+        })
+        .detach();
+        let processes = {
+            let shell = cx.weak_entity();
+            let on_inspect: crate::performance::OnInspect = Rc::new(move |id, cx| {
+                let _ = shell.update(cx, |this, cx| this.inspect_process(id, cx));
+            });
+            cx.new(|cx| TableState::new(crate::performance::ProcessList::new(on_inspect), window, cx).col_resizable(false))
+        };
         // A first list, or none left, shows or hides Apps in the rail.
         cx.observe(&apps, |_, _, cx| cx.notify()).detach();
         let treemap_depth = settings.treemap_depth;
@@ -487,6 +510,7 @@ impl Shell {
             Ok("apps") => Page::Apps,
             Ok("work" | "tasks") => Page::Work,
             Ok("performance") => Page::Performance,
+            Ok("network") => Page::Network,
             Ok("overview" | "dashboard") => Page::Overview,
             // The scroll measurement needs the Browse list on screen.
             _ if std::env::var_os("VE_BENCH").is_some() => Page::Browse,
@@ -576,6 +600,8 @@ impl Shell {
             list_width: Rc::default(),
             selected_size: Cell::new(None),
             inspected: None,
+            processes,
+            process: None,
             last_outlined: None,
             reveal_on_view: None,
             tick: None,
@@ -594,6 +620,7 @@ impl Shell {
                 this.engine.set_query(this.query.read(cx).value().to_string());
             }
             this.engine.perf.set_watched(false);
+            this.engine.perf.set_process_io(false);
             this.engine.perf.set_recording(this.settings_page.read(cx).settings().keep_in_tray);
             if cx.has_global::<Host>() {
                 let remembered = this.remember(cx);
@@ -918,6 +945,16 @@ impl Shell {
             self.reveal_on_view = Some((id, text));
         }
         cx.notify();
+    }
+
+    /// Shift+Enter in the Launcher: Show in Browse of the Entry at `path`, inspected as if it
+    /// had been clicked. A path no longer in the Index changes nothing.
+    pub fn show_path_in_browse(&mut self, path: &std::path::Path, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.engine.shared.index.read().find_path(path) else {
+            return;
+        };
+        self.show_in_browse(id, window, cx);
+        self.inspected = Some(Inspected::Entry(id));
     }
 
     /// Outlines on the Treemap what the shown list selects, the last-clicked Entry boldest, and
@@ -1759,10 +1796,14 @@ impl Shell {
             .child(self.nav("nav-browse", "Browse", None, Page::Browse, true, cx))
             .child(self.nav("nav-cleaner", "Cleaner", None, Page::Cleaner, true, cx))
             .child(self.nav("nav-duplicates", "Duplicates", None, Page::Duplicates, true, cx))
-            // A Module appears once it has data (ADR-0015): Performance with its first sample.
+            // A Module appears once it has data (ADR-0015): Performance with its first sample,
+            // Network beside it once a sample has interfaces.
             .when(self.engine.perf.has_samples(), |d| {
                 d.child(group_label("Performance", cx))
                     .child(self.nav("nav-performance", "System", None, Page::Performance, true, cx))
+            })
+            .when(self.engine.net.has_samples(), |d| {
+                d.child(self.nav("nav-network", "Network", None, Page::Network, true, cx))
             })
             .when(self.apps.read(cx).has_apps(cx), |d| {
                 d.child(self.nav("nav-apps", "Apps", None, Page::Apps, true, cx))
@@ -1890,7 +1931,7 @@ impl Shell {
         };
         let moment = crate::performance::moment_label(self.moment, now);
         let context = match (self.page, dates.first()) {
-            (Page::Performance, _) => None,
+            (Page::Performance | Page::Network, _) => None,
             (Page::Browse, _) if self.moment != Moment::Live => Some(match active {
                 Some(date) => format!("Snapshot {date}"),
                 None => "No Snapshot".to_owned(),
@@ -1921,15 +1962,17 @@ impl Shell {
                         .build(cx, cx.listener(|this, _, _, cx| this.set_moment(Moment::Live, cx))),
                 )
             });
+        // Pressing or dragging on a Module's lane moves the Moment to that second.
+        let scrub = || -> crate::performance::Scrub {
+            let shell = cx.weak_entity();
+            Rc::new(move |time, cx| {
+                let _ = shell.update(cx, |this, cx| this.set_moment(Moment::At(time), cx));
+            })
+        };
         let lane = match self.page {
             Page::Browse => Some(self.snapshot_lane(active, &dates, cx)),
-            Page::Performance => {
-                let shell = cx.weak_entity();
-                let scrub: crate::performance::Scrub = Rc::new(move |time, cx| {
-                    let _ = shell.update(cx, |this, cx| this.set_moment(Moment::At(time), cx));
-                });
-                Some(crate::performance::lane(&self.engine.perf, self.moment, now, scrub, cx))
-            }
+            Page::Performance => Some(crate::performance::lane(&self.engine.perf, self.moment, now, scrub(), cx)),
+            Page::Network => Some(crate::network::lane(&self.engine.net, self.moment, now, scrub(), cx)),
             _ => None,
         };
         v_flex()
@@ -2416,7 +2459,35 @@ impl Shell {
                 );
                 Some(crate::apps::panel(&app, show))
             }
+            Inspected::Process(id) => {
+                let inspecting = self.process.as_ref().filter(|p| p.id == *id)?;
+                let table = self.engine.perf.processes(self.moment);
+                crate::performance::inspector_panel(inspecting, table.as_deref(), now)
+            }
+            Inspected::Startup(key) => Some(crate::apps::startup_panel(&self.apps.read(cx).startup_item(key, cx)?)),
         }
+    }
+
+    /// Opens process `id` of the Moment's table in the Inspector and reads its command line
+    /// and user off the UI thread.
+    fn inspect_process(&mut self, id: ve_engine::perf::ProcessId, cx: &mut Context<Self>) {
+        let Some(seen) = self.engine.perf.processes(self.moment).filter(|t| t.get(id).is_some()) else {
+            return;
+        };
+        self.inspected = Some(Inspected::Process(id));
+        self.process = Some(crate::performance::Inspecting { id, seen, details: None });
+        let engine = self.engine.clone();
+        cx.spawn(async move |this, cx| {
+            let details = cx.background_spawn(async move { engine.perf.details(id) }).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(p) = this.process.as_mut().filter(|p| p.id == id) {
+                    p.details = Some(details);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     /// A Duplicate group: size, copies and wasted space; Open, Show in Browse and Trash others…
@@ -2738,8 +2809,10 @@ impl Render for Shell {
         if self.page == Page::Browse {
             self.map_files_moment(cx);
         }
-        // Live readings repaint each second only while the Performance page shows them.
-        self.engine.perf.set_watched(self.page == Page::Performance);
+        // Live readings repaint each second only while the Performance or Network page shows
+        // them; each process's I/O is read only while Performance does.
+        self.engine.perf.set_watched(matches!(self.page, Page::Performance | Page::Network));
+        self.engine.perf.set_process_io(self.page == Page::Performance);
         // The Apps sizes walk program folders under the Index lock: redone only while shown.
         let apps_shown = self.page == Page::Apps;
         self.apps.update(cx, |apps, cx| apps.set_shown(apps_shown, cx));
@@ -2771,11 +2844,31 @@ impl Render for Shell {
             Page::Duplicates => self.duplicates_page(cx).into_any_element(),
             Page::Performance => {
                 let sample = self.engine.perf.at(self.moment);
-                crate::performance::page(sample.as_deref(), self.moment, now, cx)
+                let table = self.engine.perf.processes(self.moment);
+                let selected = match &self.inspected {
+                    Some(Inspected::Process(id)) => Some(*id),
+                    _ => None,
+                };
+                self.processes.update(cx, |t, cx| {
+                    if t.delegate_mut().show(table, selected) {
+                        cx.notify();
+                    }
+                });
+                crate::performance::page(sample.as_deref(), self.moment, now, &self.processes, cx)
+            }
+            Page::Network => {
+                let sample = self.engine.net.at(self.moment);
+                // The hour up to the Moment, so scrubbing moves the totals with the rates.
+                let end = match self.moment {
+                    Moment::Live => now,
+                    Moment::At(time) => time,
+                };
+                let hour = self.engine.net.summary(end - ve_engine::perf::SPAN + 1, end);
+                crate::network::page(sample.as_ref(), &hour, self.moment, now, cx)
             }
             Page::Apps => {
                 let shown = match &self.inspected {
-                    Some(Inspected::App(key)) => Some(key.clone()),
+                    Some(Inspected::App(key) | Inspected::Startup(key)) => Some(key.clone()),
                     _ => None,
                 };
                 self.apps.update(cx, |a, cx| a.set_selected(shown, cx));

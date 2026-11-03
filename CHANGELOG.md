@@ -16,8 +16,13 @@
 
 ### Performance
 - A new Module, **Performance → System** (Linux), appears in the rail with its first sample: the whole machine's and each logical CPU's busy share, with performance and efficiency cores told apart where the kernel reports them; memory used, cache and buffers, free, available and swap; read and write throughput per disk. GPU, temperature and power read "unsupported" rather than zero; a reading the app could not take shows "—". [More](docs/guide/performance.md)
+- **Processes** on Performance → System: every running process with its CPU share, resident memory and, while the page is open, storage read and write per second, sortable by any column. A process is known by its PID and start time, so a recycled PID never shows another process's history. Click one for its command line, user, start time, parent and CPU time in the Inspector. At a past Moment the table shows the 200 busiest and largest processes kept for that second. [More](docs/guide/performance.md#processes)
 - The app keeps one sample a second for the last hour, in memory only, while the window is open or keep in tray is on. The Timeline dock shows that hour as CPU bars on Performance; press or drag on it to see any second, **Back to Live** to return. Seconds with no sample are drawn as gaps, never as idle.
 - The **Moment** on the dock is shared by every page: Browse compares with the Snapshot nearest it, Performance shows the sample of that second. Back to Live shows on every page while the Moment is not Live.
+
+### Network
+- A new Module, **Network** (Linux), appears in the rail under Performance → System once a sample has interfaces: each interface's receive and send rate at the Moment and what it moved in the last hour, with the busiest named. Loopback is left out. Recorded with Performance, in the same samples, so the Timeline dock scrubs it the same way; on the Network page its lane shows the hour's throughput. An interface that goes away keeps its row and its history for the hour. A rate the app cannot take (a new interface, a reset counter) shows "—". [More](docs/guide/network.md)
+- The page says that per-app traffic needs administrator rights and is not available yet; nothing prompts for them.
 
 ### Query modifiers
 - New Query modifiers: `kind:file` and `kind:folder`; `is:cleanable` (what the Cleaner found), `is:duplicate` (same as `dupe:`) and `is:offline` (Entries on an Offline Volume); `at:/path` (a folder and everything below it); `since:7d`, `since:12h`, `since:2026-10-01` (files modified since then). They combine with text, `|`, `!` and every other modifier.
@@ -52,6 +57,14 @@
 - A program's size is the Folder Size of its Owner roots in the Index, so it matches what Browse shows. A program none of whose folders is indexed shows "—", as do most packages (only folders a package owns wholly are its Owner roots) and every rpm package (rpm file lists are not read yet).
 - Clicking a program opens it in the Inspector: version, install date, size, each Owner root with its size, and **Show in Browse** for the largest root.
 - The list is read again after each Sync's Owner detection, so a newly installed game appears with its size.
+- A **Startup** tab lists what starts when you log in: XDG autostart entries (yours hiding the system's of the same name) and the systemd user units enabled in the default target, with what each runs and the file that defines it, drop-ins applied. Clicking one opens it in the Inspector with its command and file in full. Read-only. Apps now shows in the rail once any program or startup item is known.
+
+### Launcher
+- **Alt+Space** opens the **Launcher** from any app: a small window that lists files and folders in the Index by name as you type, at most 50, names starting with the text first, then a word in them, then anywhere, newest first. Enter opens one with its default app, Shift+Enter shows it in Browse, Esc or clicking elsewhere closes it. [More](docs/guide/launcher.md)
+- It works with the main window closed while the app stays in the tray, and the tray menu has a **Launcher** item. Entries on an Offline Volume or a Remote are marked and not opened.
+- **Settings → Launcher** changes the shortcut and says whether the desktop gave it. On Wayland the app asks the desktop's GlobalShortcuts portal. Where the desktop refuses, the tray menu still opens the Launcher, and `view-everything --launcher` can be bound to a key; run with the app closed, it opens a Launcher that says the app is not running.
+- The packaged desktop file is now `io.github.hawasman.view-everything.desktop`, the app id its windows and the GlobalShortcuts portal use, so the desktop can tell whose shortcut it is asked for. A start at login entry keeps its name.
+- The app's socket answers `launcher` and `launch.match`.
 
 ### Index format
 - The Index is now format 8. A format 7 file is converted when loaded, and every Location is detected once at launch, so Owners appear without waiting for a Sync.
@@ -68,6 +81,11 @@
 - **Settings → Permissions** lists every Permission you granted (the Live updates helper, start at login) with when you granted it. Switching one off revokes it fully: the helper stops and is not started again, the login entry is removed. The Live updates and Start at login switches read and change the same list.
 - Settings files are now version 1. A helper or start at login you had switched on is kept, as a Permission "granted before this version".
 - Dismissing or failing the helper's password prompt drops its Permission and turns the Live updates switch back off, so a prompt you said no to is not asked again at the next start.
+
+### Agents
+- `ve mcp serve` is an MCP server for your own agent (Claude, an IDE assistant): four read-only tools, `files.find`, `files.top`, `files.locations` and `files.summary`, each answering totals plus at most 200 rows and a cursor for the next ones. Bad Queries, paths outside the Index and arguments a tool does not take come back as refusals that say why. [More](docs/guide/agents.md)
+- An agent's first call is refused with a 4-character code, and the desktop shows who asked for which Module (Linux and macOS). Approve it in **Settings → Permissions** or with `ve mcp --approve CODE` within 10 minutes; `ve mcp --list-requests` lists the codes waiting. An approved agent is an **Agent access** Permission tied to the agent's name and a key issued on first contact; revoking it refuses the agent's next call.
+- With the app closed, `ve mcp serve` reads the saved Index for agents already approved.
 
 ## v0.2.1
 

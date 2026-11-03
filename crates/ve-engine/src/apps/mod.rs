@@ -1,11 +1,13 @@
-//! The Apps Module's engine side: `apps.list`, the installed programs with their On-disk Size.
-//! A program's size is the Folder Size of its Owner roots in the Index (the folders Owner
-//! detection gave its Owner), so it matches what Browse shows; a program none of whose
-//! folders is indexed has no size rather than a guess.
+//! The Apps Module's engine side: `apps.list`, the installed programs with their On-disk Size,
+//! and `apps.startup`, what starts at login. A program's size is the Folder Size of its Owner
+//! roots in the Index (the folders Owner detection gave its Owner), so it matches what Browse
+//! shows; a program none of whose folders is indexed has no size rather than a guess.
 
 mod readers;
+mod startup;
 
 pub use readers::{AppKind, Program, Sources};
+pub use startup::{Scope, StartupItem, StartupKind};
 
 use crate::{Engine, Shared};
 use parking_lot::Mutex;
@@ -152,6 +154,13 @@ impl Apps {
         cache.apps = Some((generation, apps.clone()));
         apps
     }
+
+    /// The startup items, read afresh from the sources: a few small files, without an Index
+    /// lock.
+    pub fn startup(&self) -> Vec<StartupItem> {
+        let sources = self.sources.lock().clone();
+        sources.as_ref().map(startup::read).unwrap_or_default()
+    }
 }
 
 impl Engine {
@@ -159,6 +168,12 @@ impl Engine {
     /// refreshed after Owner detection. See [`Apps::list`].
     pub fn apps_list(&self) -> Arc<Vec<App>> {
         self.apps.list(&self.shared)
+    }
+
+    /// `apps.startup`: what starts at login, XDG autostart entries and enabled systemd user
+    /// units, each with what it runs and the file that defines it. See [`Apps::startup`].
+    pub fn apps_startup(&self) -> Vec<StartupItem> {
+        self.apps.startup()
     }
 }
 
@@ -261,7 +276,7 @@ mod tests {
         std::os::unix::fs::symlink("x86_64/stable", gimp.join("current")).unwrap();
         write(home.join(".local/share/Steam/steamapps/appmanifest_70.acf"), MANIFEST);
         std::fs::create_dir_all(home.join(".local/share/Steam/steamapps/common/HL")).unwrap();
-        let programs = readers::read(&Sources { root, home: Some(home) });
+        let programs = readers::read(&Sources::new(root, Some(home)));
 
         // An Index of `/` holding each program's folder, its roots found by Owner detection.
         let mut index = Index::new();

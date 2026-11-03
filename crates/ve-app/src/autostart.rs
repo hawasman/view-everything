@@ -27,6 +27,9 @@ pub fn set(on: bool) -> Result<(), String> {
 mod platform {
     use std::path::PathBuf;
 
+    /// The login entry keeps its first name rather than the app id: renaming it would leave the
+    /// entry already written for people who turned start at login on, starting the app twice and
+    /// reading as off. It is written by the app, not the packaged desktop file.
     fn entry_path() -> Result<PathBuf, String> {
         dirs::config_dir()
             .map(|d| d.join("autostart").join("view-everything.desktop"))

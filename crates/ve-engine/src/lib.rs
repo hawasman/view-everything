@@ -2,9 +2,12 @@
 //! updates, Sync scheduling and Snapshots, and the Views computed for a Query. It knows nothing
 //! of a GUI; its clients hold an [`Engine`] and are told to redraw through [`Repaint`].
 
+pub mod agents;
 pub mod apps;
 pub mod format;
+pub mod launch;
 mod live;
+pub mod net;
 pub mod perf;
 pub mod permissions;
 pub mod socket;
@@ -115,6 +118,8 @@ pub struct Shared {
     pub tasks: Tasks,
     /// The Permissions the user granted, read through [`Engine::permissions`].
     pub permissions: permissions::Store,
+    /// Agents' pending approval requests, read through [`Engine::agents`].
+    pub agents: agents::Store,
     /// Called from the background threads whenever something a client shows has changed.
     pub repaint: Repaint,
 }
@@ -198,6 +203,8 @@ pub struct Engine {
     newest_query: Arc<AtomicU64>,
     indexer: Mutex<Option<JoinHandle<()>>>,
     pub perf: perf::Perf,
+    /// The Network Module's interfaces (`net.live`, `net.at`, `net.summary`), from `perf`'s samples.
+    pub net: net::Net,
     /// The Apps Module's installed programs (`apps.list`).
     pub apps: apps::Apps,
 }
@@ -249,6 +256,7 @@ impl Engine {
             folders_syncing: Mutex::new(Vec::new()),
             tasks,
             permissions: permissions::Store::default(),
+            agents: agents::Store::default(),
             repaint,
         });
         let (commands, command_rx) = mpsc::channel();
@@ -272,8 +280,10 @@ impl Engine {
         }
         let _ = commands.send(Command::SetLiveHelper(live_helper));
         let _ = queries.send(String::new());
+        let perf = perf::Perf::start(perf::platform_backend(), shared.repaint.clone());
         Engine {
-            perf: perf::Perf::start(perf::platform_backend(), shared.repaint.clone()),
+            net: net::Net::new(&perf),
+            perf,
             shared,
             commands,
             queries,
@@ -1411,6 +1421,7 @@ mod tests {
             followed: Mutex::new(HashSet::new()),
             tasks: Tasks::new(),
             permissions: Default::default(),
+            agents: Default::default(),
             repaint: Arc::new(|| {}),
         }
     }

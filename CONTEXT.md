@@ -134,8 +134,12 @@ The pane at the right that shows whatever is selected (an Entry, a Location, a T
 _Avoid_: details pane, properties, selection panel
 
 **Apps**:
-The page listing the installed programs (system packages, Flatpaks, Steam games, programs under `/opt`) with each one's On-disk Size: the Folder Size of its Owner roots, or "—" when none of them is indexed. Shown in the rail once any program is known.
+The page listing the installed programs (system packages, Flatpaks, Steam games, programs under `/opt`) with each one's On-disk Size: the Folder Size of its Owner roots, or "—" when none of them is indexed; and, on its Startup tab, the startup items. Shown in the rail once any program or startup item is known.
 _Avoid_: programs page, software list
+
+**Startup item**:
+Something that starts when the user logs in: an XDG autostart entry or a systemd user unit enabled in the default target, with what it runs and the file that defines it. A user's entry hides the system one of the same name.
+_Avoid_: login item, autorun, startup app
 
 **Timeline dock**:
 The strip at the foot of the window that holds the Moment and lets the user scrub each Module's Timeline or Snapshots.
@@ -144,8 +148,12 @@ The strip at the foot of the window that holds the Moment and lets the user scru
 The one point in time the whole window shows: Live, or a chosen time. Each Module reads it its own way — Files shows the nearest Snapshot, Performance and Network the sample taken then.
 _Avoid_: date, time cursor, position
 
+**Process**:
+A program running on the machine, as Performance lists it: known by its PID and its start time together, so a PID the system reuses names another Process. Not a Task, which is the app's own background work.
+_Avoid_: task, job (for these)
+
 **Launcher**:
-The window the global hotkey opens anywhere on the desktop: a single line that finds Entries, installed apps and app actions by name, keyboard only. Not the Query box, which is the Files Module's search.
+The window the global hotkey (or the tray menu) opens anywhere on the desktop, with or without the main window: a single line that finds Entries and installed programs by name, keyboard only. Not the Query box, which is the Files Module's search.
 _Avoid_: search (for this), spotlight, palette
 
 **Work block**:
@@ -165,6 +173,10 @@ _Avoid_: size map, block view
 **Permission**:
 An approval the user granted for something beyond the app's core features, such as an elevated helper, the background service, start at login or an agent's access to a Module. Every Permission can be revoked.
 _Avoid_: consent, grant, access right
+
+**Agent**:
+A program the user runs that asks the app questions over MCP (`ve mcp serve`), such as Claude or an IDE assistant. An agent is its client name plus a key issued on first contact; it reads a Module only under a Permission for that Module, which the user grants by approving the agent's 4-character code. Agents only read.
+_Avoid_: client, bot, assistant (unqualified)
 
 ### Changes
 

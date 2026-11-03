@@ -309,6 +309,7 @@ impl Backend for Steady {
                     })
                     .collect(),
             ),
+            network: Reading::Unsupported,
         }
     }
 }

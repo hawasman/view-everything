@@ -18,7 +18,7 @@ mkdir -p "$appdir/usr/bin" "$icons/scalable/apps" "$icons/256x256/apps" "$out"
 install -m755 target/release/view-everything "$appdir/usr/bin/view-everything"
 install -m755 target/release/ve "$appdir/usr/bin/ve"
 # App stores and launchers read the version from the desktop entry (Shelly shows "Unknown" without it).
-{ cat packaging/linux/view-everything.desktop; echo "X-AppImage-Version=$version"; } > "$appdir/view-everything.desktop"
+{ cat packaging/linux/io.github.hawasman.view-everything.desktop; echo "X-AppImage-Version=$version"; } > "$appdir/io.github.hawasman.view-everything.desktop"
 install -m644 packaging/icons/view-everything.svg "$icons/scalable/apps/view-everything.svg"
 rsvg-convert -w 256 -h 256 packaging/icons/view-everything.svg -o "$icons/256x256/apps/view-everything.png"
 ln -s usr/share/icons/hicolor/scalable/apps/view-everything.svg "$appdir/view-everything.svg"
