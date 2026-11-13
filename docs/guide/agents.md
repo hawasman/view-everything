@@ -90,6 +90,8 @@ ve proposals --dismiss 3
 
 `--apply` checks every row against the Index again and leaves out the ones that changed (a file that is now a folder, or another size or modification time; for a folder, anything in it), vanished or whose Volume went offline since it was proposed, and says which. It then lists what will move with its size, asks `Move N items to the Trash? [y/N]`, and on yes runs the Trash Task (it shows on the Work page). Only rows still as proposed move; whatever the Trash could not move is reported. Anything but yes moves nothing and leaves the Proposal pending.
 
+When no row is left as proposed, `--apply` asks nothing: it answers the Proposal as applied with nothing moved, so the agent reads why in `outcome.dropped`. A save of the Proposals that fails is shown among the app's problems; what was answered stays answered while the app runs.
+
 A Proposal left unanswered for 24 hours lapses and can no longer be applied. Proposals are kept beside the Index (`proposals.json`), so restarting the app keeps them and their clock; an answered or lapsed one stays readable by its agent for 7 days. An agent may have 20 Proposals waiting at once (`too_many_pending` after that), and only reads its own (`no_proposal` for any other id).
 
 ### Refusals

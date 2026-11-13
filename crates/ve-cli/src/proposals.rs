@@ -154,7 +154,11 @@ fn apply(id: u64, input: &mut impl BufRead, out: &mut impl Write) -> Result<(), 
     for f in &outcome.failed {
         writeln!(out, "Could not move {}: {}", f.path.display(), f.error).map_err(io)?;
     }
-    writeln!(out, "Proposal {id} is applied.").map_err(io)?;
+    if outcome.trashed.is_empty() {
+        writeln!(out, "Proposal {id} is applied; nothing moved.").map_err(io)?;
+    } else {
+        writeln!(out, "Proposal {id} is applied.").map_err(io)?;
+    }
     if outcome.failed.is_empty() {
         Ok(())
     } else {

@@ -179,6 +179,13 @@ struct Held {
     key: String,
 }
 
+impl Held {
+    /// Whether `agent` (name and key) made it.
+    fn made_by(&self, agent: &Agent) -> bool {
+        self.proposal.agent == agent.name && self.key == agent.key
+    }
+}
+
 /// What `proposals.json` holds.
 #[derive(Default, Serialize, Deserialize)]
 struct Saved {
@@ -223,16 +230,19 @@ pub struct Store {
 
 impl Store {
     /// The Proposals kept beside the Index at `index_path`, or none kept anywhere without one.
-    /// A file that cannot be read is reported and set aside: the Proposals start empty.
+    /// A file that cannot be read is reported and set aside (`proposals.json.bad`): the
+    /// Proposals start empty.
     pub(crate) fn load(index_path: Option<&Path>) -> Store {
         let path = index_path.map(|p| p.with_file_name("proposals.json"));
-        let saved = match path.as_deref().map(std::fs::read_to_string) {
+        let saved = match path.as_deref().map(|p| (p, std::fs::read_to_string(p))) {
             None => Saved::default(),
-            Some(Err(e)) if e.kind() == io::ErrorKind::NotFound => Saved::default(),
-            Some(read) => match read.map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())) {
+            Some((_, Err(e))) if e.kind() == io::ErrorKind::NotFound => Saved::default(),
+            Some((path, read)) => match read.map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())) {
                 Ok(saved) => saved,
                 Err(e) => {
-                    eprintln!("Could not read the Proposals ({e}); starting with none");
+                    let aside = path.with_extension("json.bad");
+                    let moved = std::fs::rename(path, &aside).map_or_else(|e| format!(" (not set aside: {e})"), |()| String::new());
+                    eprintln!("Could not read the Proposals ({e}); starting with none, the file is {}{moved}", aside.display());
                     Saved::default()
                 }
             },
@@ -245,38 +255,37 @@ impl Store {
         }
     }
 
-    /// Writes `saved` to `proposals.json`, readable by the user alone.
-    fn save(&self, saved: &Saved) {
+    /// Writes `saved` to `proposals.json`, readable by the user alone, or says why it could not.
+    fn save(&self, saved: &Saved) -> Result<(), String> {
         let Some(path) = &self.path else {
-            return;
+            return Ok(());
         };
         let write = || -> io::Result<()> {
             let text = serde_json::to_string_pretty(saved).map_err(io::Error::other)?;
             let partial = path.with_extension("json.partial");
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
+            let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&partial)?;
+            // Also a partial file left by a crash, whatever it allowed.
             #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-            options.open(&partial)?.write_all(text.as_bytes())?;
+            file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+            file.write_all(text.as_bytes())?;
             std::fs::rename(&partial, path)
         };
-        if let Err(e) = write() {
-            eprintln!("Could not save the Proposals to {}: {e}", path.display());
-        }
+        write().map_err(|e| format!("Could not save the Proposals to {}: {e}", path.display()))
     }
 
     /// Runs `f` on the Proposals as of `now` (lapsed ones lapsed), saving when `f` says it
-    /// changed them or tidying did.
-    fn with<T>(&self, now: i64, f: impl FnOnce(&mut Saved) -> (T, bool)) -> T {
+    /// changed them or tidying did; the second value is that save's result, if one was made.
+    fn with<T>(&self, now: i64, f: impl FnOnce(&mut Saved) -> (T, bool)) -> (T, Option<Result<(), String>>) {
         let mut saved = self.held.lock();
         let tidied = saved.tidy(now);
         let (result, changed) = f(&mut saved);
-        if tidied || changed {
-            self.save(&saved);
-        }
-        result
+        let stored = (tidied || changed).then(|| self.save(&saved));
+        (result, stored)
     }
 }
+
+/// The problem the app reports while the Proposals cannot be saved.
+const UNSAVED: &str = "proposals";
 
 /// The Proposals through the [`Engine`] handle (`proposals.list`, `proposals.check`,
 /// `proposals.apply`, `proposals.dismiss`).
@@ -312,12 +321,17 @@ fn row(index: &Index, id: EntryId) -> Row {
     }
 }
 
+/// The Location `id` is on.
+fn volume(index: &Index, id: EntryId) -> Option<&ve_core::Volume> {
+    index.volume(index.volume_of(id)?)
+}
+
 /// Why `row` cannot be applied as proposed, if so.
 fn recheck(index: &Index, row: &Row) -> Option<Why> {
     let Some(id) = index.find_path(&row.path) else {
         return Some(Why::Vanished);
     };
-    if index.volume_of(id).and_then(|v| index.volume(v)).is_none_or(|v| !v.online) {
+    if volume(index, id).is_none_or(|v| !v.online) {
         return Some(Why::Offline);
     }
     (self::row(index, id) != *row).then_some(Why::Changed)
@@ -358,6 +372,22 @@ impl Proposals<'_> {
         &self.engine.shared.proposals
     }
 
+    /// [`Store::with`], with a failed save reported as the app's problem (and the report
+    /// dropped once a save works again): what was answered stays answered, but would not
+    /// survive a restart.
+    fn with<T>(&self, now: i64, f: impl FnOnce(&mut Saved) -> (T, bool)) -> T {
+        let (result, stored) = self.store().with(now, f);
+        match stored {
+            None => {}
+            Some(Ok(())) => self.engine.shared.resolve(UNSAVED),
+            Some(Err(e)) => {
+                eprintln!("{e}");
+                self.engine.shared.report(UNSAVED, e);
+            }
+        }
+        result
+    }
+
     /// Has `on_proposal` called with each new Proposal.
     pub fn set_on_proposal(&self, on_proposal: OnProposal) {
         *self.store().on_proposal.lock() = Some(Arc::new(on_proposal));
@@ -394,7 +424,7 @@ impl Proposals<'_> {
                     unknown.push(text.clone());
                     continue;
                 };
-                match index.volume_of(id).and_then(|v| index.volume(v)) {
+                match volume(&index, id) {
                     Some(v) if v.is_remote() => remote.push(text.clone()),
                     Some(v) if !v.online => offline.push(text.clone()),
                     _ if index.parent(id).is_none() => volumes.push(text.clone()),
@@ -456,11 +486,11 @@ impl Proposals<'_> {
                 .map(|id| row(&index, id))
                 .collect::<Vec<_>>()
         };
-        let proposal = self.store().with(now, |saved| {
+        let proposal = self.with(now, |saved| {
             let waiting = saved
                 .proposals
                 .iter()
-                .filter(|h| h.proposal.status == Status::Pending && h.proposal.agent == agent.name && h.key == agent.key)
+                .filter(|h| h.proposal.status == Status::Pending && h.made_by(agent))
                 .count();
             if waiting >= MAX_PENDING {
                 let refusal = Refusal::new(
@@ -502,35 +532,33 @@ impl Proposals<'_> {
 
     /// `agent`'s Proposal `id` as it stands at `now`; another agent's is not found.
     pub fn of_agent(&self, agent: &Agent, id: u64, now: i64) -> Result<Proposal, Refusal> {
-        self.store()
-            .with(now, |saved| {
-                let found = saved
-                    .proposals
-                    .iter()
-                    .find(|h| h.proposal.id == id && h.proposal.agent == agent.name && h.key == agent.key)
-                    .map(|h| h.proposal.clone());
-                (found, false)
-            })
-            .ok_or_else(|| {
-                Refusal::new(
-                    Reason::NoProposal,
-                    format!(
-                        "this agent has no Proposal {id}; an answered Proposal is kept for {} days",
-                        KEEP / 86_400
-                    ),
-                )
-            })
+        self.with(now, |saved| {
+            let found = saved
+                .proposals
+                .iter()
+                .find(|h| h.proposal.id == id && h.made_by(agent))
+                .map(|h| h.proposal.clone());
+            (found, false)
+        })
+        .ok_or_else(|| {
+            Refusal::new(
+                Reason::NoProposal,
+                format!(
+                    "this agent has no Proposal {id}; an answered Proposal is kept for {} days",
+                    KEEP / 86_400
+                ),
+            )
+        })
     }
 
     /// Every Proposal kept at `now`, newest first.
     pub fn list(&self, now: i64) -> Vec<Proposal> {
-        self.store()
-            .with(now, |saved| (saved.proposals.iter().rev().map(|h| h.proposal.clone()).collect(), false))
+        self.with(now, |saved| (saved.proposals.iter().rev().map(|h| h.proposal.clone()).collect(), false))
     }
 
     /// The pending Proposal `id` at `now`, or why it cannot be answered.
     fn pending(&self, id: u64, now: i64) -> Result<Proposal, String> {
-        self.store().with(now, |saved| {
+        self.with(now, |saved| {
             let found = match saved.find(id) {
                 None => Err(format!("No Proposal {id}")),
                 Some(p) if p.status != Status::Pending => Err(answered(p)),
@@ -601,7 +629,7 @@ impl Proposals<'_> {
 
     /// Records the user's answer to Proposal `id`.
     fn answer(&self, id: u64, now: i64, status: Status, outcome: Option<Outcome>) -> Result<Proposal, String> {
-        self.store().with(now, |saved| match saved.find(id) {
+        self.with(now, |saved| match saved.find(id) {
             Some(p) => {
                 p.status = status;
                 p.answered_at = Some(now);
