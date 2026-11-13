@@ -7,18 +7,16 @@
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use ve_core::{CategoryMap, EntryMeta, Index, SyncState};
-use ve_engine::net::{InterfaceCounters, Net, Protocol, Socket, SocketHolder, State};
-use ve_engine::perf::{
-    Backend, Counters, CpuCounters, CpuTimes, Memory, Perf, ProcessCounters, ProcessCountersTable, ProcessId, Reading,
-};
-use ve_engine::socket::{self, Claim};
 use ve_engine::apps::Sources;
+use ve_engine::net::{InterfaceCounters, Net, Protocol, Socket, SocketHolder, State};
+use ve_engine::perf::{Backend, Counters, CpuCounters, CpuTimes, Memory, Perf, ProcessCounters, ProcessCountersTable, ProcessId, Reading};
+use ve_engine::socket::{self, Claim};
 use ve_engine::{Config, Engine, Phase};
 use ve_scan::VolumeInfo;
 
@@ -254,7 +252,12 @@ impl Backend for Machine {
 
 /// The PIDs of an answer's rows.
 fn pids(answer: &Value) -> Vec<u64> {
-    answer["rows"].as_array().unwrap().iter().map(|r| r["pid"].as_u64().unwrap()).collect()
+    answer["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["pid"].as_u64().unwrap())
+        .collect()
 }
 
 #[test]
@@ -471,10 +474,7 @@ fn performance_is_refused_until_approved_then_answered_from_the_recorder() {
     let first = answer(&first).clone();
     assert_eq!((first["total"].as_u64(), first["limit"].as_u64()), (Some(250), Some(200)));
     assert_eq!(pids(&first)[..3], [250, 249, 248]);
-    let rest = mcp.call(
-        "performance.processes",
-        json!({ "limit": 500, "cursor": first["next_cursor"] }),
-    );
+    let rest = mcp.call("performance.processes", json!({ "limit": 500, "cursor": first["next_cursor"] }));
     let rest = answer(&rest).clone();
     assert_eq!(rest["next_cursor"], Value::Null);
     let all: HashSet<u64> = pids(&first).into_iter().chain(pids(&rest)).collect();
@@ -496,10 +496,7 @@ fn performance_is_refused_until_approved_then_answered_from_the_recorder() {
     // Approving Performance granted nothing else, and revoking it refuses again.
     assert_eq!(refusal(&mcp.call("files.locations", json!({})))["reason"], "approval_pending");
     engine.agents().revoke("perf-agent", "Performance").unwrap();
-    assert_eq!(
-        refusal(&mcp.call("performance.summary", json!({})))["reason"],
-        "approval_pending"
-    );
+    assert_eq!(refusal(&mcp.call("performance.summary", json!({})))["reason"], "approval_pending");
     engine.shutdown();
 }
 
@@ -560,15 +557,9 @@ fn network_is_refused_until_approved_then_answered_from_the_recorder() {
     assert_eq!(refusal(&gap)["reason"], "no_sample");
 
     // Approving Network granted nothing else, and revoking it refuses again.
-    assert_eq!(
-        refusal(&mcp.call("performance.summary", json!({})))["reason"],
-        "approval_pending"
-    );
+    assert_eq!(refusal(&mcp.call("performance.summary", json!({})))["reason"], "approval_pending");
     engine.agents().revoke("net-agent", "Network").unwrap();
-    assert_eq!(
-        refusal(&mcp.call("network.connections", json!({})))["reason"],
-        "approval_pending"
-    );
+    assert_eq!(refusal(&mcp.call("network.connections", json!({})))["reason"], "approval_pending");
     engine.shutdown();
 }
 
@@ -596,7 +587,10 @@ fn apps_is_refused_until_approved_then_answered_with_on_disk_sizes() {
     for (file, name) in [("backup.desktop", "Backup"), ("chat.desktop", "Chat")] {
         write(
             &format!("user/.config/autostart/{file}"),
-            &format!("[Desktop Entry]\nType=Application\nName={name}\nExec={} --background\n", name.to_lowercase()),
+            &format!(
+                "[Desktop Entry]\nType=Application\nName={name}\nExec={} --background\n",
+                name.to_lowercase()
+            ),
         );
     }
     let volume = VolumeInfo {
@@ -620,10 +614,9 @@ fn apps_is_refused_until_approved_then_answered_with_on_disk_sizes() {
         },
         Arc::new(|| {}),
     );
-    engine.apps.set_sources(Some(Sources::new(
-        fixture.path().join("system"),
-        Some(fixture.path().join("user")),
-    )));
+    engine
+        .apps
+        .set_sources(Some(Sources::new(fixture.path().join("system"), Some(fixture.path().join("user")))));
     let (engine, socket_path) = host(engine, home.path());
     let mut mcp = Mcp::start(&socket_path, home.path(), "apps-agent");
 

@@ -43,12 +43,12 @@ pub(super) fn answer(out: &mut impl Write, id: &Value, method: &str, params: Val
         method => match Module::from_method(method) {
             Some(module) => serde_json::from_value::<ToolCall>(params)
                 .map_err(|e| format!("bad {method} call: {e}"))
-                .map(|ToolCall { agent, tool, arguments }| {
-                    match engine.agents().read(module, &agent, &tool, arguments, now) {
+                .map(
+                    |ToolCall { agent, tool, arguments }| match engine.agents().read(module, &agent, &tool, arguments, now) {
                         Ok(answer) => json!({ "answer": answer }),
                         Err(refusal) => json!({ "refusal": refusal }),
-                    }
-                }),
+                    },
+                ),
             None => Err(format!("unknown method `{method}`")),
         },
     };

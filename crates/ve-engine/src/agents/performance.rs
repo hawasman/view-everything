@@ -114,10 +114,12 @@ pub(super) fn answer(perf: &Perf, name: &str, arguments: Value, now: i64) -> Res
                 Refusal::new(
                     Reason::NoSample,
                     match args.at {
-                        Some(at) => format!(
-                            "no process table was recorded at {at}: the recorder did not run then, or it is more than an hour ago"
-                        ),
-                        None => "no process table is recorded yet: the recorder has not run, or this system's processes cannot be read".into(),
+                        Some(at) => {
+                            format!("no process table was recorded at {at}: the recorder did not run then, or it is more than an hour ago")
+                        }
+                        None => {
+                            "no process table is recorded yet: the recorder has not run, or this system's processes cannot be read".into()
+                        }
                     },
                 )
             })?;

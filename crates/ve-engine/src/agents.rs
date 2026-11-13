@@ -214,8 +214,9 @@ impl Refusal {
 fn arguments<T: DeserializeOwned + Default>(name: &str, arguments: Value) -> Result<T, Refusal> {
     match arguments {
         Value::Null => Ok(T::default()),
-        arguments => serde_json::from_value(arguments)
-            .map_err(|e| Refusal::new(Reason::BadArguments, format!("bad arguments for {name}: {e}"))),
+        arguments => {
+            serde_json::from_value(arguments).map_err(|e| Refusal::new(Reason::BadArguments, format!("bad arguments for {name}: {e}")))
+        }
     }
 }
 

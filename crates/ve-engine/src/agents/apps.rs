@@ -1,5 +1,5 @@
 //! The Apps Module's tools for agents: `apps.programs`, the installed programs with their
-//! On-disk Size, and `apps.startup`, what starts at login. They read what the running app's Apps
+//! On-disk Size, and `apps.startup`, the Startup items. They read what the running app's Apps
 //! page lists, so they answer only while the app runs. A program none of whose folders is in the
 //! Index has no size (`null`), never 0.
 
@@ -41,7 +41,7 @@ impl Tool {
                  whose name contains a text. Answers one page of rows and a cursor. Read-only."
             }
             Tool::Startup => {
-                "What starts when the user logs in: XDG autostart entries and enabled systemd user units, each with what \
+                "The Startup items, what starts when the user logs in: XDG autostart entries and enabled systemd user units, each with what \
                  it runs and the file that defines it. Answers one page of rows and a cursor. Read-only."
             }
         }
@@ -94,13 +94,9 @@ pub(super) fn answer(engine: &Engine, name: &str, arguments: Value) -> Result<Va
                 .filter(|a| wanted.as_ref().is_none_or(|w| a.program.name.to_lowercase().contains(w)))
                 .collect();
             rows.sort_by(|a, b| largest_first(a.size, b.size).then_with(|| a.program.name.cmp(&b.program.name)));
-            let sized = rows.iter().filter_map(|a| a.size);
-            let (sized, on_disk) = sized.fold((0usize, 0u64), |(n, total), size| (n + 1, total + size));
-            Ok(page.answer(
-                rows.into_iter(),
-                program,
-                json!({ "sized": sized, "on_disk_size": on_disk }),
-            ))
+            let sizes = rows.iter().filter_map(|a| a.size);
+            let (sized, on_disk) = sizes.fold((0usize, 0u64), |(n, total), size| (n + 1, total + size));
+            Ok(page.answer(rows.into_iter(), program, json!({ "sized": sized, "on_disk_size": on_disk })))
         }
         Tool::Startup => {
             let args: StartupArgs = super::arguments(name, arguments)?;

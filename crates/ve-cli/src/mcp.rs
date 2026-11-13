@@ -198,7 +198,7 @@ impl Server {
             "serverInfo": { "name": "view-everything", "version": env!("CARGO_PKG_VERSION") },
             "instructions": "Read-only access to view-everything's Modules: Files (the user's file Index), Performance \
                 (the last hour of CPU, memory and processes), Network (the last hour of interface traffic, and open \
-                connections) and Apps (installed programs with their size, and what starts at login). Each Module needs \
+                connections) and Apps (installed programs with their size, and the Startup items). Each Module needs \
                 its own approval: the first call to one \
                 is refused with an approval code until the user approves this agent; tell the user the code. \
                 Every answer is capped in rows; pass next_cursor back as cursor for the next rows.",

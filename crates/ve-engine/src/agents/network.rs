@@ -92,9 +92,7 @@ pub(super) fn answer(net: &Net, name: &str, arguments: Value, now: i64) -> Resul
             rows.sort_by(|a, b| b.moved().cmp(&a.moved()).then_with(|| a.name.cmp(&b.name)));
             Ok(page.answer(
                 rows.into_iter(),
-                |i: InterfaceSummary| {
-                    json!({ "name": &*i.name, "received": i.received, "sent": i.sent, "last_seen": i.last_seen })
-                },
+                |i: InterfaceSummary| json!({ "name": &*i.name, "received": i.received, "sent": i.sent, "last_seen": i.last_seen }),
                 json!({ "from": from, "to": to, "seconds": summary.seconds, "connections": summary.connections }),
             ))
         }
@@ -104,9 +102,7 @@ pub(super) fn answer(net: &Net, name: &str, arguments: Value, now: i64) -> Resul
             let no_sample = |why: String| Refusal::new(Reason::NoSample, why);
             let sample = net.at(super::moment(args.at)).ok_or_else(|| {
                 no_sample(match args.at {
-                    Some(at) => format!(
-                        "nothing was recorded at {at}: the recorder did not run then, or it is more than an hour ago"
-                    ),
+                    Some(at) => format!("nothing was recorded at {at}: the recorder did not run then, or it is more than an hour ago"),
                     None => "nothing is recorded yet: the recorder has not run".into(),
                 })
             })?;
@@ -116,11 +112,7 @@ pub(super) fn answer(net: &Net, name: &str, arguments: Value, now: i64) -> Resul
                     sample.time
                 )));
             };
-            Ok(page.answer(
-                connections.list.iter(),
-                |c| row(c),
-                json!({ "at": args.at, "time": sample.time }),
-            ))
+            Ok(page.answer(connections.list.iter(), |c| row(c), json!({ "at": args.at, "time": sample.time })))
         }
     }
 }
