@@ -35,12 +35,15 @@ pub(crate) fn tcp_bytes() -> Option<HashMap<u64, TcpBytes>> {
     {
         let mut counts = HashMap::new();
         let mut read = false;
+        // One receive buffer and one scratch map for both families.
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut of_family = HashMap::new();
         for family in [libc::AF_INET, libc::AF_INET6] {
             // A socket per family, so what is left of a failed dump never reads as the next;
             // a failed dump adds nothing, since what it did read may miss sockets.
-            let mut of_family = HashMap::new();
-            if netlink::Socket::open().and_then(|s| s.dump(family as u8, &mut of_family)).is_some() {
-                counts.extend(of_family);
+            of_family.clear();
+            if netlink::Socket::open().and_then(|s| s.dump(family as u8, &mut buf, &mut of_family)).is_some() {
+                counts.extend(of_family.drain());
                 read = true;
             }
         }
@@ -163,8 +166,9 @@ mod netlink {
             (set == 0).then_some(socket)
         }
 
-        /// Asks for every TCP socket of `family` and adds their byte counts to `counts`.
-        pub(super) fn dump(&self, family: u8, counts: &mut HashMap<u64, TcpBytes>) -> Option<()> {
+        /// Asks for every TCP socket of `family` and adds their byte counts to `counts`,
+        /// receiving into `buf`.
+        pub(super) fn dump(&self, family: u8, buf: &mut [u8], counts: &mut HashMap<u64, TcpBytes>) -> Option<()> {
             let req = request(family);
             // SAFETY: zeroed is a valid sockaddr_nl: port 0 and no groups address the kernel.
             let mut kernel: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
@@ -183,7 +187,6 @@ mod netlink {
             if sent < 0 {
                 return None;
             }
-            let mut buf = vec![0u8; 64 * 1024];
             loop {
                 // SAFETY: the pointer and length describe `buf`, which outlives the call.
                 let got = unsafe { libc::recv(self.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };

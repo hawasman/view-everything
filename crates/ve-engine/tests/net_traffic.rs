@@ -167,6 +167,29 @@ fn a_socket_of_an_unreadable_process_counts_for_no_one() {
 }
 
 #[test]
+fn a_socket_uncounted_at_the_previous_reading_is_no_spike() {
+    let mut uncounted = tcp(2, pid(10), 0, 0);
+    uncounted.bytes = None;
+    let (perf, net) = recorder(
+        vec![(10, "firefox")],
+        vec![
+            vec![tcp(1, pid(10), 0, 0), uncounted],
+            // Its family's dump failed at the reading before: what it moved since is unknown.
+            vec![tcp(1, pid(10), 100, 10), tcp(2, pid(10), 9_000_000, 9_000_000)],
+            vec![tcp(1, pid(10), 200, 20), tcp(2, pid(10), 9_000_500, 9_000_000)],
+        ],
+    );
+    for t in [100, 101] {
+        perf.tick(t);
+    }
+    assert_eq!(rows(&traffic(&net, Moment::Live)), vec![("firefox", 100, 10)]);
+    for t in [102, 103] {
+        perf.tick(t);
+    }
+    assert_eq!(rows(&traffic(&net, Moment::Live)), vec![("firefox", 600, 10)]);
+}
+
+#[test]
 fn no_socket_counts_are_unsupported_not_zero() {
     let mut uncounted = tcp(1, pid(10), 0, 0);
     uncounted.bytes = None;
@@ -252,11 +275,14 @@ fn a_connection_to_the_machine_itself_is_no_network_traffic() {
                 tcp(1, pid(10), 0, 0),
                 to(tcp(2, pid(20), 0, 0), "127.0.0.1:4000"),
                 to(tcp(3, pid(20), 0, 0), "[::ffff:127.0.0.1]:4000"),
+                // Its own LAN address at both ends: routed over loopback too.
+                to(tcp(4, pid(20), 0, 0), "10.0.0.2:4000"),
             ],
             vec![
                 tcp(1, pid(10), 300, 30),
                 to(tcp(2, pid(20), 9_000, 9_000), "127.0.0.1:4000"),
                 to(tcp(3, pid(20), 9_000, 9_000), "[::ffff:127.0.0.1]:4000"),
+                to(tcp(4, pid(20), 9_000, 9_000), "10.0.0.2:4000"),
             ],
         ],
     );

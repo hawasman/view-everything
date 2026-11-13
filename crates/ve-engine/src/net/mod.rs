@@ -10,8 +10,8 @@
 //! shows), and the user's own Processes are found holding them. So it is TCP only, and only
 //! the user's own Processes: UDP and other users' Processes need administrator rights and are
 //! not read. A sample keeps the Processes that moved bytes, the top [`RETAINED`]; the live
-//! view lists every one. Agents read it through [`Net::traffic`] (a stretch) and
-//! [`NetSample::traffic`] (one Moment).
+//! view lists every one. [`Net::traffic`] sums a stretch and [`NetSample::traffic`] holds one
+//! Moment; agents do not read it yet.
 
 mod diag;
 mod linux;
@@ -480,16 +480,21 @@ pub(crate) struct TcpCounters {
     /// The second it was read.
     pub(crate) time: i64,
     by_inode: HashMap<u64, TcpBytes>,
+    /// The TCP sockets open then without a count (their family's dump failed): the next
+    /// reading cannot tell what they moved since, so it counts nothing for them.
+    uncounted: HashSet<u64>,
 }
 
 /// The TCP traffic per Process of `sockets`, read at second `now` with the process table
 /// `table`, against `prev` (the previous reading's counters, `None` at a run's first): each
 /// socket's bytes since `prev`, summed per Process holding it now. A socket that opened since
-/// counts all its bytes; one that closed counts none, so no rate ever goes back. A socket
+/// counts all its bytes; one that closed counts none, so no rate ever goes back. One that was
+/// open but uncounted at `prev` (its family's dump failed then) counts nothing. A socket
 /// whose holder is unknown (another user's, or a Process that cannot be read) counts for no
-/// one, and one to the machine itself (loopback) is no network traffic, as loopback is no
-/// interface (see [`interface_counters`]). Unsupported when no socket has a count, or at a
-/// run's first reading; returns the counters for the next reading as well.
+/// one, and one to the machine itself (loopback, or its own address at both ends) is no
+/// network traffic, as loopback is no interface (see [`interface_counters`]). Unsupported
+/// when no socket has a count, or at a run's first reading; returns the counters for the next
+/// reading as well.
 pub(crate) fn traffic(
     now: i64,
     sockets: &[Socket],
@@ -503,6 +508,11 @@ pub(crate) fn traffic(
             .filter(|s| s.inode != 0)
             .filter_map(|s| Some((s.inode, s.bytes?)))
             .collect(),
+        uncounted: sockets
+            .iter()
+            .filter(|s| s.protocol == Protocol::Tcp && s.inode != 0 && s.bytes.is_none())
+            .map(|s| s.inode)
+            .collect(),
     };
     if counters.by_inode.is_empty() {
         return (Reading::Unsupported, None);
@@ -515,7 +525,8 @@ pub(crate) fn traffic(
     let mut at: HashMap<ProcessId, usize> = HashMap::new();
     for s in sockets {
         let (SocketHolder::Pid(pid), Some(bytes)) = (s.holder, s.bytes) else { continue };
-        if s.remote.ip().to_canonical().is_loopback() {
+        let remote = s.remote.ip().to_canonical();
+        if remote.is_loopback() || remote == s.local.ip().to_canonical() {
             continue;
         }
         let Some(&(id, name)) = by_pid.get(&pid) else { continue };
@@ -524,6 +535,8 @@ pub(crate) fn traffic(
                 received: bytes.received - before.received,
                 sent: bytes.sent - before.sent,
             },
+            // Uncounted then: its bytes since are unknown, and all of them would be a spike.
+            None if prev.uncounted.contains(&s.inode) => continue,
             // New since the previous reading, or a new socket under a reused inode.
             _ => bytes,
         };
