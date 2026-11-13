@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Network
+- **Traffic per process** on Network (Linux): each of your own processes holding a TCP connection, with what it receives and sends per second and what it moved in the last hour, the most first, under the line "TCP only, your processes". Read every two seconds from the kernel's per-socket byte counts, which any user may read: nothing asks for administrator rights. A connection that closes never makes a rate go back, and one handed to another process counts for the new one from then. Click a process to inspect it. [More](docs/guide/network.md#traffic-per-process)
+
 ## v0.3.0-rc.1
 
 First release candidate of v0.3.0. Linux is the target for the new Modules (Performance, Network, Apps, Launcher, agent access); on Windows and macOS they show what they support. Self-updates skip pre-releases: install this one by hand.

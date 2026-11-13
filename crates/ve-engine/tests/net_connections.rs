@@ -281,6 +281,8 @@ impl Backend for Busy {
             remote: SocketAddr::from(([10, 0, 0, 9], 443)),
             state: State::Established,
             holder: SocketHolder::Unknown,
+            inode: 0,
+            bytes: None,
         };
         // Long-lived ones, then the newest of a stream of short ones, which sort first: every
         // kept table differs from the one before.

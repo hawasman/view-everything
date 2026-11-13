@@ -835,6 +835,7 @@ mod tests {
                 last_seen: 0,
             }],
             connections: None,
+            processes: None,
         }
     }
 
