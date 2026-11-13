@@ -4,6 +4,7 @@
 
 pub mod agents;
 pub mod apps;
+mod busy;
 pub mod format;
 pub mod launch;
 mod live;
@@ -12,7 +13,6 @@ pub mod perf;
 pub mod permissions;
 pub mod socket;
 pub mod tasks;
-mod throttle;
 pub mod timeline;
 pub mod view;
 
@@ -293,7 +293,7 @@ impl Engine {
         let _ = queries.send(String::new());
         let perf = perf(shared.repaint.clone());
         // App-started Tasks pause while the samples say the machine is busy.
-        throttle::start(&perf.store(), shared.tasks.clone());
+        busy::start(&perf.store(), shared.tasks.clone());
         Engine {
             net: net::Net::new(&perf),
             perf,
@@ -361,10 +361,19 @@ impl Engine {
     /// Sync now: every online Volume (not the Remotes) is read again in full, even one Live
     /// updates cover; an NTFS Volume's whole Master File Table is read.
     pub fn sync_now(&self) {
-        // A Sync cannot be started twice: one running or already queued covers this request,
-        // and runs anyway if the app started it and it is Paused.
-        self.shared.tasks.run_anyway_kinds(&[TaskKind::Sync, TaskKind::CatchUp]);
-        if self.shared.is_syncing() || self.shared.sync_queued.swap(true, Ordering::Relaxed) {
+        // A Sync the app started gives way: it is cancelled, and this one follows at full speed.
+        let tasks = &self.shared.tasks;
+        let app_syncs: Vec<u64> = tasks
+            .running()
+            .into_iter()
+            .filter(|t| matches!(t.kind, TaskKind::Sync | TaskKind::CatchUp) && t.started_by == StartedBy::App)
+            .map(|t| t.id)
+            .collect();
+        for &id in &app_syncs {
+            tasks.cancel(id);
+        }
+        // One the user started, running or already queued, covers this request.
+        if (app_syncs.is_empty() && self.shared.is_syncing()) || self.shared.sync_queued.swap(true, Ordering::Relaxed) {
             return;
         }
         let _ = self.commands.send(Command::SyncNow);
@@ -641,8 +650,10 @@ fn run_indexer(
                     if !pending.contains(&id) {
                         pending.push(id);
                     }
-                    cancelled_at.remove(&id);
                 }
+                // Sync now may have cancelled the app's own Sync to take its place: the Remotes
+                // that one left unread are due again, not held back to their next interval.
+                cancelled_at.clear();
                 forced.extend(all.iter().copied());
                 let count = shared.live_lost.load(Ordering::Relaxed);
                 if all.is_empty() {

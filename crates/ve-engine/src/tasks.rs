@@ -3,7 +3,7 @@
 //!
 //! Every Task records who started it. One the app started on its own (Catch-up, a periodic
 //! Sync, a Duplicate or Cleaner search) runs at the operating system's background priority and
-//! is Paused while the machine is busy (see `throttle`); one the user started runs at full
+//! is Paused while the machine is busy (see `busy`); one the user started runs at full
 //! speed and is never Paused.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -350,10 +350,6 @@ impl TaskHandle {
     /// with no lock held, so a Paused Task holds up nothing else.
     pub fn wait_while_paused(&self) {
         ve_scan::wait_while_paused(&self.pause, &self.cancel);
-    }
-
-    pub fn started_by(&self) -> StartedBy {
-        self.started_by
     }
 
     /// Called first on each thread spawned to do this Task's work: a Task the app started

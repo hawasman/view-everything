@@ -11,11 +11,13 @@ thread_local! {
     static LOWERED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Lowers the calling thread to background priority for the rest of its life: on Linux the idle
-/// scheduling class (`SCHED_IDLE`, nice 19) and the idle I/O class; on Windows background
-/// processing mode; on macOS the Darwin background band (`PRIO_DARWIN_BG`), which throttles
-/// both CPU and disk.
+/// Lowers the calling thread to background priority for the rest of its life: on Linux the
+/// lowest nice value (19) and the idle I/O class; on Windows background processing mode; on
+/// macOS the Darwin background band (`PRIO_DARWIN_BG`), which throttles both CPU and disk.
 pub fn lower_current_thread() -> io::Result<()> {
+    // Threads made from a lowered one start lowered on Linux, so rayon's global pool, made on
+    // first use, must not be made here: it serves the View and every client.
+    let _ = rayon::current_num_threads();
     lower()?;
     LOWERED.with(|l| l.set(true));
     Ok(())
@@ -44,9 +46,9 @@ fn lower() -> io::Result<()> {
     // SAFETY: plain syscalls on the calling thread, with arguments built here.
     unsafe {
         let tid = libc::syscall(libc::SYS_gettid);
-        let param = libc::sched_param { sched_priority: 0 };
-        // On Linux both act on the one thread `tid` (0: the caller), not the whole process.
-        check(libc::sched_setscheduler(0, libc::SCHED_IDLE, &param).into())?;
+        // On Linux a nice value belongs to one thread, `tid`, not the whole process. Nice 19
+        // rather than SCHED_IDLE: a walker holds the Index's write lock for a moment per folder,
+        // and an idle-class thread can be starved for seconds inside it while a frame waits.
         check(libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, 19).into())?;
         check(libc::syscall(
             libc::SYS_ioprio_set,
@@ -82,21 +84,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_lowered_thread_runs_at_idle_cpu_and_disk_priority() {
+    fn a_lowered_thread_runs_at_the_lowest_cpu_and_idle_disk_priority() {
         std::thread::spawn(|| {
             assert!(!current_thread_lowered());
             lower_current_thread().unwrap();
             assert!(current_thread_lowered());
             // SAFETY: reads of the calling thread's own scheduling state.
-            let (policy, nice, ioprio) = unsafe {
+            let (nice, ioprio) = unsafe {
                 let tid = libc::syscall(libc::SYS_gettid);
                 (
-                    libc::sched_getscheduler(0),
                     libc::getpriority(libc::PRIO_PROCESS, tid as libc::id_t),
                     libc::syscall(libc::SYS_ioprio_get, 1, tid),
                 )
             };
-            assert_eq!((policy, nice, ioprio >> 13), (libc::SCHED_IDLE, 19, 3));
+            assert_eq!((nice, ioprio >> 13), (19, 3));
         })
         .join()
         .unwrap();

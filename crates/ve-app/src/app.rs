@@ -2847,7 +2847,7 @@ impl Shell {
         };
         let fact = |l: &'static str, v: Option<String>| (SharedString::from(l), SharedString::from(v.unwrap_or_else(|| "—".into())));
         let mut actions = Vec::new();
-        if t.outcome.is_none() && t.paused {
+        if t.paused {
             let tasks = self.engine.shared.tasks.clone();
             actions.push(Item::new("inspector-run-anyway", "Run anyway", move |_, _, _| tasks.run_anyway(id)));
         }
@@ -2868,7 +2868,7 @@ impl Shell {
             kind: "Task",
             tag: Some((tag_label.into(), tone)),
             title: t.label.clone().into(),
-            subtitle: (t.outcome.is_none() && t.paused).then(|| ve_engine::tasks::PAUSED.into()),
+            subtitle: t.paused.then(|| ve_engine::tasks::PAUSED.into()),
             facts: vec![
                 fact("Kind", Some(t.kind.name().to_owned())),
                 fact("Started by", Some(t.started_by.who().to_owned())),

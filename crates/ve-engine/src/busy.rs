@@ -76,7 +76,7 @@ impl Watch {
 pub(crate) fn start(store: &Arc<Store>, tasks: Tasks) {
     let store: Weak<Store> = Arc::downgrade(store);
     let own_pid = std::process::id();
-    let _ = thread::Builder::new().name("ve-throttle".into()).spawn(move || {
+    let _ = thread::Builder::new().name("ve-busy".into()).spawn(move || {
         let mut watch = Watch::default();
         let mut seen = i64::MIN;
         loop {

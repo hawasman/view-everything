@@ -39,6 +39,7 @@ pub(crate) fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -
         index,
         progress,
         device: device(&metadata),
+        pausable: true,
     };
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get() * 2).min(32);
     // The walkers run at the priority of the thread that asked for the walk.
@@ -67,6 +68,7 @@ pub(crate) fn sync_folder(index: &SharedIndex, dir: EntryId, path: &Path, progre
         index,
         progress,
         device: device(&metadata),
+        pausable: false,
     };
     rayon::scope(|scope| walk.visit(scope, dir, path.to_path_buf()));
     Ok(())
@@ -82,6 +84,7 @@ pub(crate) fn sync_dir(index: &SharedIndex, dir: EntryId, path: &Path, progress:
         index,
         progress,
         device: device(&metadata),
+        pausable: false,
     };
     let Some(listing) = walk.list(path) else {
         return Ok(());
@@ -100,6 +103,9 @@ struct Walk<'a> {
     progress: &'a Progress,
     /// Entries on another device belong to another Volume and are skipped.
     device: u64,
+    /// A whole-Volume walk, which waits while its Task is Paused. A folder's walk (Live
+    /// updates, Sync this folder, after a Clean) shares the Progress but never pauses.
+    pausable: bool,
 }
 
 struct Listed {
@@ -112,7 +118,9 @@ struct Listed {
 
 impl<'a> Walk<'a> {
     fn visit<'s>(&'s self, scope: &rayon::Scope<'s>, dir: EntryId, path: PathBuf) {
-        self.progress.wait_while_paused();
+        if self.pausable {
+            self.progress.wait_while_paused();
+        }
         if self.progress.cancelled() {
             return;
         }
