@@ -1,8 +1,8 @@
 //! `/proc/net` on Linux: each interface's cumulative bytes received and sent (`dev`), and
 //! every TCP and UDP socket (`tcp`, `tcp6`, `udp`, `udp6`) with the process holding it, found
-//! through `/proc/<pid>/fd`.
+//! through `/proc/<pid>/fd`, and each TCP socket's byte counts from `sock_diag`.
 
-use super::{InterfaceCounters, Protocol, Socket, SocketHolder, State};
+use super::{InterfaceCounters, Protocol, Socket, SocketHolder, State, diag};
 use crate::perf::Reading;
 use std::collections::HashMap;
 use std::fs;
@@ -50,9 +50,12 @@ const SOCKET_TABLES: [(&str, Protocol, bool); 4] = [
 /// Every TCP and UDP socket (v4 and v6) of `root/proc/net`, each with the process holding it
 /// where the user may read it; unsupported when none of the tables can be read. Only the
 /// user's own processes are searched (`/proc/<pid>/fd` of others' cannot be read), and only
-/// for the user's own sockets: another user's socket is held by a process of theirs.
+/// for the user's own sockets: another user's socket is held by a process of theirs. Each TCP
+/// socket carries the kernel's byte counts when `root` is the live system's `/`: they are
+/// asked of the running kernel, which a fixture root is not.
 pub(crate) fn sockets(root: &Path) -> Reading<Vec<Socket>> {
     let user = current_user();
+    let tcp_bytes = if root == Path::new("/") { diag::tcp_bytes() } else { None };
     let mut sockets = Vec::new();
     // The inode of each socket whose holder is still to be found, by its index in `sockets`.
     let mut wanted: HashMap<u64, Vec<usize>> = HashMap::new();
@@ -84,6 +87,11 @@ pub(crate) fn sockets(root: &Path) -> Reading<Vec<Socket>> {
                 remote: row.remote,
                 state: row.state,
                 holder,
+                inode: row.inode,
+                bytes: match (protocol, &tcp_bytes) {
+                    (Protocol::Tcp, Some(counts)) if row.inode != 0 => counts.get(&row.inode).copied(),
+                    _ => None,
+                },
             });
         }
     }

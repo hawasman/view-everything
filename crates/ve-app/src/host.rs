@@ -129,6 +129,7 @@ impl Host {
             TrayState {
                 tasks: Vec::new(),
                 live_paused: paused,
+                tasks_paused: false,
             },
         );
         let has_tray = tray.is_some();
@@ -185,13 +186,16 @@ impl Host {
                 let mut shown = TrayState {
                     tasks: Vec::new(),
                     live_paused: paused,
+                    tasks_paused: false,
                 };
                 loop {
                     cx.background_executor().timer(TRAY_REFRESH).await;
                     cx.update(|cx| {
                         let host = cx.global::<Host>();
+                        let running = host.engine.shared.tasks.running();
                         let now = TrayState {
-                            tasks: host.engine.shared.tasks.running().into_iter().map(|t| t.label).collect(),
+                            tasks_paused: running.iter().any(|t| t.paused),
+                            tasks: running.into_iter().map(|t| t.label).collect(),
                             live_paused: host.live_paused,
                         };
                         if now != shown {
@@ -296,6 +300,7 @@ impl Host {
             TrayAction::SyncNow => cx.global::<Host>().engine.sync_now(),
             TrayAction::StartLive => Self::start_live(cx),
             TrayAction::Launcher => launcher::toggle(cx),
+            TrayAction::RunAnyway => cx.global::<Host>().engine.shared.tasks.run_anyway_all(),
             TrayAction::Quit => Host::quit(cx),
         }
     }

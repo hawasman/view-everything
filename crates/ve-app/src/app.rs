@@ -2839,6 +2839,7 @@ impl Shell {
             (None, unit) => Some(format!("{} {unit}", format::count(t.done))),
         };
         let (tag_label, tone, result) = match &t.outcome {
+            None if t.paused => ("Paused", Tone::Warning, None),
             None => ("Running", Tone::Accent, None),
             Some(Outcome::Done(m)) => ("Done", Tone::Neutral, Some(m.clone()).filter(|m| !m.is_empty())),
             Some(Outcome::Cancelled) => ("Cancelled", Tone::Neutral, None),
@@ -2846,6 +2847,10 @@ impl Shell {
         };
         let fact = |l: &'static str, v: Option<String>| (SharedString::from(l), SharedString::from(v.unwrap_or_else(|| "—".into())));
         let mut actions = Vec::new();
+        if t.paused {
+            let tasks = self.engine.shared.tasks.clone();
+            actions.push(Item::new("inspector-run-anyway", "Run anyway", move |_, _, _| tasks.run_anyway(id)));
+        }
         if t.outcome.is_none() && t.cancellable {
             let tasks = self.engine.shared.tasks.clone();
             actions.push(
@@ -2863,9 +2868,11 @@ impl Shell {
             kind: "Task",
             tag: Some((tag_label.into(), tone)),
             title: t.label.clone().into(),
-            subtitle: None,
+            subtitle: t.paused.then(|| ve_engine::tasks::PAUSED.into()),
             facts: vec![
                 fact("Kind", Some(t.kind.name().to_owned())),
+                fact("Started by", Some(t.started_by.who().to_owned())),
+                fact("Priority", Some(if t.background { "Background" } else { "Normal" }.to_owned())),
                 fact("Progress", progress),
                 fact("Elapsed", Some(crate::tasks::duration_text(t.elapsed))),
                 fact("Result", result),

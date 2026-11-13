@@ -12,7 +12,16 @@ The Network Module shows what each network interface is receiving and sending, a
 
 An interface that goes away (a VPN that disconnects, a USB tether unplugged) keeps its row for the rest of the hour, marked "gone" with the last second it was seen (at a past Moment, "not there at this Moment"); scrub back to see its rates then. A new interface shows "—" for its first second, since a rate needs two readings; so does a counter that went back (the interface was reset), and the hour's totals leave those seconds out. A counter of a 32-bit kernel that wraps past its limit is still read as the bytes moved.
 
-The page says, in one line, that per-app traffic needs administrator rights and is not available yet. There is no button and nothing asks for them.
+## Traffic per process
+
+**Traffic per process** lists each of your own processes holding a TCP connection, with its PID, what it receives and sends per second at the Moment, and what it moved in the last hour; the most bytes first. Its title carries the line **TCP only, your processes**: that is all it can read without administrator rights. UDP, other users' processes (and the system's) and connections too short to be seen between two readings are not counted. Nothing asks for administrator rights.
+
+- The kernel counts each TCP connection's bytes, received and sent (acknowledged by the other end), and tells any user, the way `ss -ti` shows them. Every two seconds, with the connections, the app reads those counts and finds which of your processes holds each connection; a process's rate is what its connections moved since the reading before, over the seconds between.
+- A connection that closes counts no more; it never makes a rate go back. A new one counts every byte it moved since it opened. A connection handed to another process (a server passing it to a worker) counts for the process holding it now, from then on.
+- A process that cannot be read, or that ended between the two readings, counts for no one.
+- A connection to the machine itself (loopback, `127.0.0.1` or `::1`, or the machine's own address at both ends) is no network traffic and is left out, as `lo` is left out of the interfaces.
+- Click a process to open it in the Inspector.
+- Live lists every process holding a TCP connection, idle ones too; each past second keeps the 200 that moved the most bytes then, so scrubbing the Timeline dock to a past Moment shows that second's traffic, with the rates of the two-second reading it falls in.
 
 ## Connections
 
@@ -23,12 +32,12 @@ The page says, in one line, that per-app traffic needs administrator rights and 
 - Click a connection to open its process in the Inspector (command line, user, start time, parent, CPU time); **Show on Performance** there opens Performance → System with that process selected in the table. Its row stays in view as the table re-sorts, until you scroll the table yourself.
 - The list shows about a dozen rows at a time and scrolls; only the rows in view are drawn, so thousands of connections cost no more than a few.
 
-The Overview's "Talking on the network" answer counts the distinct connections the hour's kept seconds hold and names the process holding the most open connections with a remote end now; clicking it opens Network with that process inspected and its first connection at the top of the list.
+The Overview's "Talking on the network" answer counts the distinct connections the hour's kept seconds hold and names the process that moved the most bytes over TCP in the hour (where traffic per process cannot be read, the process holding the most open connections with a remote end now); clicking it opens Network with that process inspected and its first connection at the top of the list.
 
-Connections are read every two seconds, with the process table. Live lists every one; each past second keeps the 200 most worth keeping by state (open conversations first), since how many bytes each connection moves cannot be read without administrator rights.
+Connections are read every two seconds, with the process table. Live lists every one; each past second keeps the 200 most worth keeping by state (open conversations first): a UDP socket's bytes, and those of other users' connections, cannot be read without administrator rights, so bytes cannot rank them all.
 
 ## The Timeline
 
 Network is recorded with Performance, in the same samples: once a second, kept for the last hour, in memory only ([When it records](performance.md#when-it-records)). On the Network page the **Timeline dock** shows that hour as bars of the busiest second in each column, received plus sent, scaled to the hour's peak (the caption gives it). Press or drag on it to move the **Moment** there; **Back to Live** returns. Seconds with no sample are gaps, drawn blank.
 
-It reads `/proc/net/dev` once a second, alongside the Performance counters, and `/proc/net/tcp`, `tcp6`, `udp` and `udp6` every two seconds; it finds each socket's process through the `/proc/<pid>/fd` of your own processes only.
+It reads `/proc/net/dev` once a second, alongside the Performance counters, and `/proc/net/tcp`, `tcp6`, `udp` and `udp6` every two seconds, with each TCP socket's byte counts from the kernel's socket diagnostics (`sock_diag`, as `ss -ti` does); it finds each socket's process through the `/proc/<pid>/fd` of your own processes only.

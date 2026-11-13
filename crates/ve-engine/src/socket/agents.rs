@@ -1,11 +1,14 @@
 //! The socket's agent methods: `agents.pending` (result: the pending [`Request`]s),
-//! `agents.approve` (`{"code"}`; result: `{"agent", "module", "granted_at"}`), and `files`
-//! (`{"agent": {"name", "key"}, "tool", "arguments"}`; result: `{"answer"}` or `{"refusal"}`,
-//! see [`crate::agents::files`]).
+//! `agents.approve` (`{"code"}`; result: `{"agent", "module", "granted_at"}`), and one method
+//! per [`Module`] agents read, named for it (`files`, `performance`, `network`, `apps`):
+//! `{"agent": {"name", "key"}, "tool", "arguments"}`; result: `{"answer"}` or `{"refusal"}`,
+//! see [`crate::agents`].
+//!
+//! [`Request`]: crate::agents::Request
 
 use super::send;
 use crate::Engine;
-use crate::agents::Agent;
+use crate::agents::{Agent, Module};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{self, Write};
@@ -16,11 +19,16 @@ struct Approve {
 }
 
 #[derive(Deserialize)]
-struct FilesCall {
+struct ToolCall {
     agent: Agent,
     tool: String,
     #[serde(default)]
     arguments: Value,
+}
+
+/// Whether `method` is one of the agent methods.
+pub(super) fn answers(method: &str) -> bool {
+    matches!(method, "agents.pending" | "agents.approve") || Module::from_method(method).is_some()
 }
 
 /// Answers one of the agent methods.
@@ -32,15 +40,17 @@ pub(super) fn answer(out: &mut impl Write, id: &Value, method: &str, params: Val
             .map_err(|e| format!("bad agents.approve: {e}"))
             .and_then(|Approve { code }| engine.agents().approve(&code, now))
             .map(|p| json!({ "agent": p.subject, "module": p.module, "granted_at": p.granted_at })),
-        "files" => serde_json::from_value::<FilesCall>(params)
-            .map_err(|e| format!("bad files call: {e}"))
-            .map(
-                |FilesCall { agent, tool, arguments }| match engine.agents().files(&agent, &tool, arguments, now) {
-                    Ok(answer) => json!({ "answer": answer }),
-                    Err(refusal) => json!({ "refusal": refusal }),
-                },
-            ),
-        other => Err(format!("unknown method `{other}`")),
+        method => match Module::from_method(method) {
+            Some(module) => serde_json::from_value::<ToolCall>(params)
+                .map_err(|e| format!("bad {method} call: {e}"))
+                .map(
+                    |ToolCall { agent, tool, arguments }| match engine.agents().read(module, &agent, &tool, arguments, now) {
+                        Ok(answer) => json!({ "answer": answer }),
+                        Err(refusal) => json!({ "refusal": refusal }),
+                    },
+                ),
+            None => Err(format!("unknown method `{method}`")),
+        },
     };
     match reply {
         Ok(result) => send(out, &json!({ "id": id, "result": result })),

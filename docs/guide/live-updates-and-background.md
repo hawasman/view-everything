@@ -11,6 +11,16 @@ The Index is saved between runs, so search and sizes never wait on a scan. Four 
 
 Sync now re-reads in full, even a Volume Live updates is following. Every Sync shows up as a Task and can be cancelled. A cancelled Sync leaves the Location's earlier Entries in place.
 
+## Who started a Task
+
+Each Task on the Work page says who started it. The ones the app starts on its own (Catch-up, a periodic Sync, a Duplicate search, a Cleaner search) run at the operating system's lowest CPU and disk priority, whether the window is open or not, so they give way to whatever else the machine is doing: on Linux the lowest nice value (19) and the idle I/O class, on Windows background processing mode, on macOS the background band. The ones you start (Sync now, Sync this folder, Rescan, Clean, Trash) run at full speed; Sync now during the app's own Sync cancels that one and reads everything again at full speed. The Inspector shows a Task's priority.
+
+## Paused while the machine is busy
+
+A Task the app started on its own also pauses when the machine is busy: after about 30 seconds of heavy CPU load (85% or more, the app's own share left out) or memory load (90% or more in use), it stops reading the disk, keeps its progress and waits. After about 2 quiet minutes it resumes. GPU load does not count. The load is read from the Performance samples, which are taken while the window is open or the app stays in the tray.
+
+The Work page, the Inspector and the tray menu then say **Paused: the machine is busy**, with **Run anyway**, which resumes it at once; it is not paused again. Syncing one Location during a paused Catch-up or periodic Sync, or Rescan during a paused Duplicate search, runs that Task anyway too (at its background priority), so your request does not wait behind it. A Task you started never pauses.
+
 ## Live updates by platform
 
 | Platform | Live updates | Catch-up at launch |

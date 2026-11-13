@@ -16,6 +16,8 @@ pub enum TrayAction {
     StartLive,
     /// Open the Launcher (or close it when open).
     Launcher,
+    /// Run anyway: every Paused Task resumes at once.
+    RunAnyway,
     Quit,
 }
 
@@ -26,6 +28,8 @@ pub struct TrayState {
     pub tasks: Vec<String>,
     /// Live updates are paused: the menu offers Start.
     pub live_paused: bool,
+    /// A Task the app started is Paused because the machine is busy: the menu offers Run anyway.
+    pub tasks_paused: bool,
 }
 
 /// A running tray icon. Dropping it removes the icon.
@@ -141,6 +145,17 @@ mod platform {
                         .into(),
                     );
                 }
+                if self.state.tasks_paused {
+                    menu.push(
+                        StandardItem {
+                            label: ve_engine::tasks::PAUSED.into(),
+                            enabled: false,
+                            ..Default::default()
+                        }
+                        .into(),
+                    );
+                    menu.push(self.action("Run anyway", "media-playback-start", TrayAction::RunAnyway));
+                }
             }
             menu.push(ksni::MenuItem::Separator);
             menu.push(self.action("Quit", "application-exit", TrayAction::Quit));
@@ -198,6 +213,7 @@ mod platform {
     const ID_LIVE: usize = 3;
     const ID_QUIT: usize = 4;
     const ID_LAUNCHER: usize = 5;
+    const ID_RUN_ANYWAY: usize = 6;
 
     /// What the window procedure reads; it has no other way to reach the app.
     struct Shared {
@@ -418,6 +434,10 @@ mod platform {
                 for task in &state.tasks {
                     add(MF_STRING | MF_GRAYED, 0, &task_text(task).replace('&', "&&"));
                 }
+                if state.tasks_paused {
+                    add(MF_STRING | MF_GRAYED, 0, ve_engine::tasks::PAUSED);
+                    add(MF_STRING, ID_RUN_ANYWAY, "Run anyway");
+                }
             }
             AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
             add(MF_STRING, ID_QUIT, "Quit");
@@ -442,6 +462,7 @@ mod platform {
                 ID_SYNC => TrayAction::SyncNow,
                 ID_LIVE => TrayAction::StartLive,
                 ID_LAUNCHER => TrayAction::Launcher,
+                ID_RUN_ANYWAY => TrayAction::RunAnyway,
                 ID_QUIT => TrayAction::Quit,
                 _ => return,
             };
@@ -492,6 +513,11 @@ mod platform {
             #[unsafe(method(launcher:))]
             fn launcher(&self, _sender: Option<&AnyObject>) {
                 let _ = self.ivars().actions.send_blocking(TrayAction::Launcher);
+            }
+
+            #[unsafe(method(run_anyway:))]
+            fn run_anyway(&self, _sender: Option<&AnyObject>) {
+                let _ = self.ivars().actions.send_blocking(TrayAction::RunAnyway);
             }
 
             #[unsafe(method(quit:))]
@@ -571,6 +597,10 @@ mod platform {
                 menu.addItem(&NSMenuItem::separatorItem(self.mtm));
                 for task in &state.tasks {
                     add(&task_text(task), None);
+                }
+                if state.tasks_paused {
+                    add(ve_engine::tasks::PAUSED, None);
+                    add("Run anyway", Some(sel!(run_anyway:)));
                 }
             }
             menu.addItem(&NSMenuItem::separatorItem(self.mtm));

@@ -518,8 +518,9 @@ pub fn talker(table: &ve_engine::net::Connections) -> Option<Talker> {
 }
 
 /// What is talking, from the Network Module's last hour: the busiest interface, how many
-/// connections were open in that hour, and `talker`, the process holding the most open now,
-/// which the line inspects. Its severity is that interface's average throughput against
+/// connections were open in that hour, and the Process that moved the most bytes over TCP in
+/// it, which the line inspects; where traffic per Process was not read, `talker`, the process
+/// holding the most open now. Its severity is that interface's average throughput against
 /// [`REFERENCE_RATE`].
 pub fn talking_answer(net: &ve_engine::net::Summary, talker: Option<Talker>) -> Answer {
     if net.seconds == 0 {
@@ -556,18 +557,28 @@ pub fn talking_answer(net: &ve_engine::net::Summary, talker: Option<Talker>) -> 
         None => (0., "nothing moved in the last hour".to_owned()),
     };
     let mut text = format!("{busiest} · {connections}");
-    if let Some(t) = &talker {
+    let inspect = if let Some(top) = net.top_process() {
+        text.push_str(&format!(
+            " · {} moved the most over TCP, {}",
+            top.name,
+            crate::format::size(top.moved())
+        ));
+        Some(top.id)
+    } else if let Some(t) = &talker {
         text.push_str(&format!(
             " · {} holds the most open, {}",
             t.name,
             crate::format::count(t.connections as u64)
         ));
-    }
+        Some(t.id)
+    } else {
+        None
+    };
     Answer {
         question: Question::Talking,
         severity: Some(severity),
         text,
-        inspect: talker.map(|t| crate::inspector::Inspected::Process(t.id)),
+        inspect: inspect.map(crate::inspector::Inspected::Process),
     }
 }
 
@@ -835,6 +846,7 @@ mod tests {
                 last_seen: 0,
             }],
             connections: None,
+            processes: None,
         }
     }
 
@@ -932,6 +944,33 @@ mod tests {
             answers[0].text
         );
         assert_eq!(answers[0].inspect, Some(crate::inspector::Inspected::Process(browser)));
+    }
+
+    #[test]
+    fn the_talking_answer_names_and_opens_the_process_that_moved_the_most_bytes() {
+        use ve_engine::net::ProcessTraffic;
+        let rsync = ve_engine::perf::ProcessId { pid: 30, start: 4 };
+        let traffic = |pid, name: &str, received, sent| ProcessTraffic {
+            id: ve_engine::perf::ProcessId { pid, start: 4 },
+            name: name.into(),
+            received,
+            sent,
+        };
+        let mut hour = net(10, 1_000);
+        hour.processes = Some(vec![traffic(30, "rsync", 0, 3 * 1024 * 1024), traffic(9, "firefox", 2_000, 0)]);
+        // The process holding the most connections is not the one moving the most bytes.
+        let holder = Talker {
+            id: ve_engine::perf::ProcessId { pid: 9, start: 4 },
+            name: "firefox".into(),
+            connections: 12,
+        };
+        let answer = talking_answer(&hour, Some(holder.clone()));
+        assert!(answer.text.ends_with("· rsync moved the most over TCP, 3.00 MB"), "{}", answer.text);
+        assert_eq!(answer.inspect, Some(crate::inspector::Inspected::Process(rsync)));
+
+        // Where nothing moved over TCP, the holder of the most connections is named instead.
+        hour.processes = Some(vec![traffic(30, "rsync", 0, 0)]);
+        assert!(talking_answer(&hour, Some(holder)).text.ends_with("· firefox holds the most open, 12"));
     }
 
     #[test]

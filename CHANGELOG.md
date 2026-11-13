@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Windows: the app icon is embedded in `view-everything.exe` and set on the Start menu shortcut and in Add/Remove Programs.
+
+### Tasks
+- Every Task records who started it, shown on the Work page and in the Inspector. Tasks the app starts on its own (Catch-up, a periodic Sync, a Duplicate search, a Cleaner search) run at the operating system's lowest CPU and disk priority, window open or not; Sync now, Rescan, Clean and Trash run at full speed. [More](docs/guide/live-updates-and-background.md#who-started-a-task)
+- A Task the app started on its own pauses after about 30 s of heavy CPU or memory load (read from the Performance samples) and resumes after about 2 quiet minutes. The Work page, the Inspector and the tray say "Paused: the machine is busy" with **Run anyway**, which resumes it at once. Tasks you start never pause. [More](docs/guide/live-updates-and-background.md#paused-while-the-machine-is-busy)
+
+### Network
+- **Traffic per process** on Network (Linux): each of your own processes holding a TCP connection, with what it receives and sends per second and what it moved in the last hour, the most first, under the line "TCP only, your processes". Read every two seconds from the kernel's per-socket byte counts, which any user may read: nothing asks for administrator rights. A connection that closes never makes a rate go back, and one handed to another process counts for the new one from then. Click a process to inspect it. [More](docs/guide/network.md#traffic-per-process)
+- Traffic per process is kept on the Timeline: scrub to a past Moment to see each process's traffic that second (the 200 that moved the most bytes). The Overview's "Talking on the network" answer now names the process that moved the most bytes over TCP in the last hour, and opens it.
+
+### Agents
+- Agents read **Performance**: `performance.summary` (the mean CPU and memory use over a stretch of the last hour, and the process that took the most CPU) and `performance.processes` (the process table at a second, or Live, busiest or largest first, capped and paged like the Files tools). Each Module needs its own approval; Performance answers only while the app runs. [More](docs/guide/agents.md#performance)
+- Agents read **Network**: `network.interfaces` (what each interface received and sent over a stretch of the last hour, busiest first) and `network.connections` (the open connections at a second, or Live, with the process holding each), capped and paged. Per-process traffic is not read yet. [More](docs/guide/agents.md#network)
+- Agents read **Apps**: `apps.programs` (the installed programs, largest first by On-disk Size, optionally by name) and `apps.startup` (the Startup items), capped and paged. [More](docs/guide/agents.md#apps)
+
 ## v0.3.0-rc.1
 
 First release candidate of v0.3.0. Linux is the target for the new Modules (Performance, Network, Apps, Launcher, agent access); on Windows and macOS they show what they support. Self-updates skip pre-releases: install this one by hand.

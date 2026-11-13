@@ -1,7 +1,8 @@
 //! The Performance recorder (#37): once a second it reads the system's counters through a
 //! [`Backend`], turns two readings into a [`Sample`] and keeps the last hour of them on a
-//! [`Timeline`]. Every two seconds it also reads the process table (#50) and the open network
-//! connections (#52). Readings a backend cannot take are [`Reading::Unsupported`], never zero.
+//! [`Timeline`]. Every two seconds it also reads the process table (#50), the open network
+//! connections (#52) and the TCP traffic per Process (#71) from them. Readings a backend
+//! cannot take are [`Reading::Unsupported`], never zero.
 //! Recording runs only while a client asks for it (the window is open, or keep-in-tray is on);
 //! the seconds it did not run are gaps.
 
@@ -15,7 +16,7 @@ pub use process::{Details, Io, Process, ProcessCounters, ProcessCountersTable, P
 pub use summary::{Summary, TopProcess};
 
 use crate::Repaint;
-use crate::net::{Connections, Interface, InterfaceCounters, Socket};
+use crate::net::{Connections, Interface, InterfaceCounters, Socket, TcpCounters, Traffic};
 use crate::timeline::{Moment, Timeline};
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
@@ -143,7 +144,8 @@ pub trait Backend: Send + 'static {
         None
     }
 
-    /// Every open TCP and UDP socket, with the process holding it where that can be read.
+    /// Every open TCP and UDP socket, with the process holding it where that can be read, and
+    /// each TCP socket's byte counts where the kernel's can be read.
     fn connections(&mut self) -> Reading<Vec<Socket>> {
         Reading::Unsupported
     }
@@ -202,6 +204,9 @@ pub struct Sample {
     /// The open connections as of this second (read every two seconds), the top
     /// [`net::RETAINED`](crate::net::RETAINED).
     pub connections: Reading<Arc<Connections>>,
+    /// The TCP traffic per Process as of this second (read with the connections), the top
+    /// [`net::RETAINED`](crate::net::RETAINED) that moved bytes.
+    pub traffic: Reading<Arc<Traffic>>,
 }
 
 impl Sample {
@@ -245,6 +250,7 @@ fn sample(
     now: &Counters,
     processes: Reading<Arc<Processes>>,
     connections: Reading<Arc<Connections>>,
+    traffic: Reading<Arc<Traffic>>,
 ) -> Sample {
     let kind_of = |id: u32| match now.core_kinds.binary_search_by_key(&id, |&(i, _)| i) {
         Ok(i) => now.core_kinds[i].1,
@@ -304,6 +310,7 @@ fn sample(
         processes,
         network,
         connections,
+        traffic,
     }
 }
 
@@ -322,6 +329,10 @@ struct Reader {
     /// whole of them: the next reading reuses either when nothing changed.
     connections: Reading<Arc<Connections>>,
     live_connections: Option<Arc<Connections>>,
+    /// The kept part of the newest traffic per Process, which the seconds until the next show,
+    /// and the TCP counters it was counted to, which the next counts from.
+    traffic: Reading<Arc<Traffic>>,
+    tcp: Option<TcpCounters>,
 }
 
 impl Reader {
@@ -331,6 +342,8 @@ impl Reader {
         self.retained = Reading::Unsupported;
         self.connections = Reading::Unsupported;
         self.live_connections = None;
+        self.traffic = Reading::Unsupported;
+        self.tcp = None;
     }
 }
 
@@ -338,6 +351,7 @@ impl Reader {
 struct Live {
     processes: Option<Arc<Processes>>,
     connections: Option<Arc<Connections>>,
+    traffic: Option<Arc<Traffic>>,
 }
 
 struct State {
@@ -346,6 +360,8 @@ struct State {
     live_processes: Option<Arc<Processes>>,
     /// The newest connections, every one of them.
     live_connections: Option<Arc<Connections>>,
+    /// The newest traffic per Process, every Process of it.
+    live_traffic: Option<Arc<Traffic>>,
     recording: bool,
     stopping: bool,
 }
@@ -380,11 +396,14 @@ impl Perf {
                     retained: Reading::Unsupported,
                     connections: Reading::Unsupported,
                     live_connections: None,
+                    traffic: Reading::Unsupported,
+                    tcp: None,
                 }),
                 state: Mutex::new(State {
                     timeline: Timeline::new(SPAN),
                     live_processes: None,
                     live_connections: None,
+                    live_traffic: None,
                     recording: false,
                     stopping: false,
                 }),
@@ -502,12 +521,13 @@ impl Perf {
         self.inner.state.lock().timeline.gaps(from, to)
     }
 
-    /// Bytes the kept samples take in memory, each process and connection table counted once,
-    /// the live full tables included.
+    /// Bytes the kept samples take in memory, each process, connection and traffic table
+    /// counted once, the live full tables included.
     pub fn memory_bytes(&self) -> usize {
         let state = self.inner.state.lock();
         let mut last: Option<&Arc<Processes>> = None;
         let mut last_connections: Option<&Arc<Connections>> = None;
+        let mut last_traffic: Option<&Arc<Traffic>> = None;
         let mut counted = std::collections::HashSet::new();
         let mut bytes = 0;
         for (_, s) in state.timeline.range(i64::MIN, i64::MAX) {
@@ -524,6 +544,12 @@ impl Perf {
                 bytes += table.heap_size(&mut counted) + 2 * size_of::<usize>();
                 last_connections = Some(table);
             }
+            if let Reading::Value(table) = &s.traffic
+                && last_traffic.is_none_or(|l| !Arc::ptr_eq(l, table))
+            {
+                bytes += table.heap_size() + 2 * size_of::<usize>();
+                last_traffic = Some(table);
+            }
         }
         if let Some(live) = &state.live_processes
             && last.is_none_or(|l| !Arc::ptr_eq(l, live))
@@ -534,6 +560,11 @@ impl Perf {
             && last_connections.is_none_or(|l| !Arc::ptr_eq(l, live))
         {
             bytes += live.heap_size(&mut counted);
+        }
+        if let Some(live) = &state.live_traffic
+            && last_traffic.is_none_or(|l| !Arc::ptr_eq(l, live))
+        {
+            bytes += live.heap_size();
         }
         bytes
     }
@@ -587,10 +618,14 @@ impl Store {
         f(&self.state.lock().timeline)
     }
 
-    /// Runs `f` on the Timeline and the newest connections (all of them), under one lock.
-    pub(crate) fn timeline_live<R>(&self, f: impl FnOnce(&Timeline<Sample>, Option<&Arc<Connections>>) -> R) -> R {
+    /// Runs `f` on the Timeline, the newest connections (all of them) and the newest traffic
+    /// per Process (every Process), under one lock.
+    pub(crate) fn timeline_live<R>(
+        &self,
+        f: impl FnOnce(&Timeline<Sample>, Option<&Arc<Connections>>, Option<&Arc<Traffic>>) -> R,
+    ) -> R {
         let state = self.state.lock();
-        f(&state.timeline, state.live_connections.as_ref())
+        f(&state.timeline, state.live_connections.as_ref(), state.live_traffic.as_ref())
     }
 
     /// `from` to `to` (inclusive) cut into `buckets` equal slices, each with the highest
@@ -629,6 +664,7 @@ impl Store {
                     &counters,
                     reader.retained.clone(),
                     reader.connections.clone(),
+                    reader.traffic.clone(),
                 )),
                 _ => None,
             };
@@ -641,6 +677,7 @@ impl Store {
             if let Some(live) = live {
                 state.live_processes = live.processes;
                 state.live_connections = live.connections;
+                state.live_traffic = live.traffic;
             }
             let Some(sample) = sample else { return };
             let first = state.timeline.is_empty();
@@ -652,10 +689,11 @@ impl Store {
         }
     }
 
-    /// Reads the process table and the connections when they are due (none yet, or the last
-    /// are two seconds old), keeps their top parts in `reader` for the samples and returns the
-    /// full tables for the live view: a table is `None` when there is none (it cannot be read,
-    /// or this process reading only primes the next). `None` when no reading was due.
+    /// Reads the process table, the connections and the traffic per Process when they are due
+    /// (none yet, or the last are two seconds old), keeps their top parts in `reader` for the
+    /// samples and returns the full tables for the live view: a table is `None` when there is
+    /// none (it cannot be read, or this process reading only primes the next). `None` when no
+    /// reading was due.
     fn read_tables(&self, reader: &mut Reader, now: i64, counters: &Counters) -> Option<Live> {
         let due = match &reader.prev_processes {
             Some(p) => now - p.time >= PROCESS_STEP || now <= p.time,
@@ -667,39 +705,62 @@ impl Store {
         let io = self.process_io.load(Ordering::Relaxed);
         let machine_ticks = counters.cpu.value().map(|c| c.total.total);
         let read = reader.backend.processes(io);
-        let connections = read_connections(reader, read.value());
+        let (connections, traffic) = read_connections(reader, now, read.value());
         let prev = reader.prev_processes.take().filter(|p| now > p.time && now - p.time <= MAX_STEP);
         reader.retained = Reading::Unsupported;
-        let none = |connections| {
+        let none = |connections, traffic| {
             Some(Live {
                 processes: None,
                 connections,
+                traffic,
             })
         };
         let Reading::Value(read) = read else {
-            return none(connections);
+            return none(connections, traffic);
         };
         reader.prev_processes = Some(PrevProcesses::of(now, &read, machine_ticks));
         // The first reading of a run only primes the next: it has no CPU shares.
         let Some(prev) = prev else {
-            return none(connections);
+            return none(connections, traffic);
         };
         let full = Arc::new(process::table(now, &read, machine_ticks, &prev));
         reader.retained = Reading::Value(full.retained());
         Some(Live {
             processes: Some(full),
             connections,
+            traffic,
         })
     }
 }
 
-/// Reads the connections, each holder found in the process table `table` read with them;
-/// keeps their top part in `reader` and returns them all, or `None` when they cannot be read.
-fn read_connections(reader: &mut Reader, table: Option<&ProcessCountersTable>) -> Option<Arc<Connections>> {
+/// Reads the connections and the TCP traffic per Process at second `now`, each holder found in
+/// the process table `table` read with them; keeps their top parts in `reader` and returns
+/// them all, each `None` when it cannot be read (traffic also at a run's first reading).
+fn read_connections(
+    reader: &mut Reader,
+    now: i64,
+    table: Option<&ProcessCountersTable>,
+) -> (Option<Arc<Connections>>, Option<Arc<Traffic>>) {
     let Reading::Value(sockets) = reader.backend.connections() else {
         reader.connections = Reading::Unsupported;
         reader.live_connections = None;
-        return None;
+        reader.traffic = Reading::Unsupported;
+        reader.tcp = None;
+        return (None, None);
+    };
+    let prev_tcp = reader.tcp.take().filter(|p| now - p.time <= MAX_STEP);
+    let (traffic, tcp) = crate::net::traffic(now, &sockets, table, prev_tcp.as_ref());
+    reader.tcp = tcp;
+    let live_traffic = match traffic {
+        Reading::Value(traffic) => {
+            let (live, kept) = crate::net::keep_traffic(traffic);
+            reader.traffic = Reading::Value(kept);
+            Some(live)
+        }
+        Reading::Unsupported => {
+            reader.traffic = Reading::Unsupported;
+            None
+        }
     };
     let (live, kept) = crate::net::keep(
         crate::net::connections(sockets, table, reader.live_connections.as_deref()),
@@ -708,7 +769,7 @@ fn read_connections(reader: &mut Reader, table: Option<&ProcessCountersTable>) -
     );
     reader.connections = Reading::Value(kept);
     reader.live_connections = Some(live.clone());
-    Some(live)
+    (Some(live), live_traffic)
 }
 
 /// A platform with no reader: nothing is ever recorded.

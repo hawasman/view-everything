@@ -4,6 +4,7 @@
 
 pub mod agents;
 pub mod apps;
+mod busy;
 pub mod format;
 pub mod launch;
 mod live;
@@ -25,7 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use tasks::{Outcome, TaskKind, Tasks};
+use tasks::{Outcome, StartedBy, TaskHandle, TaskKind, Tasks};
 use ve_core::owners::{self, LocalDisk, Platform};
 use ve_core::snapshot::{self, Snapshot};
 use ve_core::{BitSet, CategoryMap, EntryId, Filter, Index, Query, QueryContext, Remote, SyncState, Volume, VolumeId};
@@ -213,6 +214,16 @@ impl Engine {
     /// Starts loading the saved Index, then Catch-up or a first scan of the Volumes to index.
     /// `repaint` is called from the engine's threads whenever something a client shows changed.
     pub fn start(config: Config, repaint: Repaint) -> Engine {
+        Self::launch(config, repaint, |repaint| perf::Perf::start(perf::platform_backend(), repaint))
+    }
+
+    /// [`Engine::start`] with Performance samples read from `backend`, taken only by
+    /// `perf.tick`: for driving the engine with fixture samples.
+    pub fn start_with_perf(config: Config, repaint: Repaint, backend: Box<dyn perf::Backend>) -> Engine {
+        Self::launch(config, repaint, |repaint| perf::Perf::manual(backend, repaint))
+    }
+
+    fn launch(config: Config, repaint: Repaint, perf: impl FnOnce(Repaint) -> perf::Perf) -> Engine {
         let Config {
             index_path,
             mounted,
@@ -280,7 +291,9 @@ impl Engine {
         }
         let _ = commands.send(Command::SetLiveHelper(live_helper));
         let _ = queries.send(String::new());
-        let perf = perf::Perf::start(perf::platform_backend(), shared.repaint.clone());
+        let perf = perf(shared.repaint.clone());
+        // App-started Tasks pause while the samples say the machine is busy.
+        busy::start(&perf.store(), shared.tasks.clone());
         Engine {
             net: net::Net::new(&perf),
             perf,
@@ -317,10 +330,15 @@ impl Engine {
     /// Brings one Location (by identity) up to date now, whatever its refresh interval, and
     /// leaves the others alone.
     pub fn sync_location(&self, identity: String) {
+        // A Sync the app started and that is Paused would hold this one up: it runs anyway.
+        self.shared.tasks.run_anyway_kinds(&[TaskKind::Sync, TaskKind::CatchUp]);
         let _ = self.commands.send(Command::SyncLocation(identity));
     }
 
     pub fn forget(&self, identity: String) {
+        // The indexer takes it once the running Sync ends: a Paused one the app started would
+        // hold it until the machine is quiet, so it runs anyway.
+        self.shared.tasks.run_anyway_kinds(&[TaskKind::Sync, TaskKind::CatchUp]);
         let _ = self.commands.send(Command::Forget(identity));
     }
 
@@ -346,8 +364,19 @@ impl Engine {
     /// Sync now: every online Volume (not the Remotes) is read again in full, even one Live
     /// updates cover; an NTFS Volume's whole Master File Table is read.
     pub fn sync_now(&self) {
-        // A Sync cannot be started twice: one running or already queued covers this request.
-        if self.shared.is_syncing() || self.shared.sync_queued.swap(true, Ordering::Relaxed) {
+        // A Sync the app started gives way: it is cancelled, and this one follows at full speed.
+        let tasks = &self.shared.tasks;
+        let app_syncs: Vec<u64> = tasks
+            .running()
+            .into_iter()
+            .filter(|t| matches!(t.kind, TaskKind::Sync | TaskKind::CatchUp) && t.started_by == StartedBy::App)
+            .map(|t| t.id)
+            .collect();
+        for &id in &app_syncs {
+            tasks.cancel(id);
+        }
+        // One the user started, running or already queued, covers this request.
+        if (app_syncs.is_empty() && self.shared.is_syncing()) || self.shared.sync_queued.swap(true, Ordering::Relaxed) {
             return;
         }
         let _ = self.commands.send(Command::SyncNow);
@@ -624,8 +653,10 @@ fn run_indexer(
                     if !pending.contains(&id) {
                         pending.push(id);
                     }
-                    cancelled_at.remove(&id);
                 }
+                // Sync now may have cancelled the app's own Sync to take its place: the Remotes
+                // that one left unread are due again, not held back to their next interval.
+                cancelled_at.clear();
                 forced.extend(all.iter().copied());
                 let count = shared.live_lost.load(Ordering::Relaxed);
                 if all.is_empty() {
@@ -945,7 +976,8 @@ fn sync_volumes(
     let done = AtomicBool::new(false);
     let failed: Mutex<Vec<String>> = Mutex::new(Vec::new());
     shared.progress.cancel.store(false, Ordering::Relaxed);
-    // A quiet journal poll is not a Task: it neither shows as busy nor takes long.
+    // A quiet journal poll is not a Task: it neither shows as busy nor takes long. A Sync of a
+    // Location the user asked for runs at full speed; Catch-up and periodic Syncs in the background.
     let task = (!quiet).then(|| {
         let kind = if catching_up { TaskKind::CatchUp } else { TaskKind::Sync };
         let label = match mounts.as_slice() {
@@ -955,11 +987,21 @@ fn sync_volumes(
             }
             all => format!("{} {} Locations", kind.name(), all.len()),
         };
-        shared.tasks.begin(kind, label, true)
+        let started_by = if volumes.iter().any(|id| forced.contains(id)) {
+            StartedBy::User
+        } else {
+            StartedBy::App
+        };
+        shared.tasks.begin_as(kind, label, true, started_by)
     });
+    // Paused from the start when begun while the machine is busy.
+    shared
+        .progress
+        .paused
+        .store(task.as_ref().is_some_and(TaskHandle::is_paused), Ordering::Relaxed);
     thread::scope(|outer| {
         // The entry count moves without a notice, so clients are nudged while a sync runs; the
-        // same loop carries a cancel from the Task to the walk.
+        // same loop carries a cancel, and the Paused state, from the Task to the walk.
         if let Some(task) = &task {
             outer.spawn(|| {
                 while !done.load(Ordering::Relaxed) {
@@ -967,14 +1009,20 @@ fn sync_volumes(
                     if task.is_cancelled() {
                         shared.progress.cancel.store(true, Ordering::Relaxed);
                     }
+                    shared.progress.paused.store(task.is_paused(), Ordering::Relaxed);
                     thread::sleep(PROGRESS_NUDGE);
                 }
             });
         }
         thread::scope(|scope| {
             for (id, mount) in &mounts {
-                let failed = &failed;
+                let (failed, task) = (&failed, &task);
                 scope.spawn(move || {
+                    if let Some(task) = task {
+                        task.enter_thread();
+                        // A Paused Sync does not start reading a Location.
+                        task.wait_while_paused();
+                    }
                     let cause = format!("volume {}", mount.display());
                     let remote = shared.index.read().volume(*id).is_some_and(|v| v.is_remote());
                     // Stamped before the walk: changes made while it runs are not covered.
@@ -1044,6 +1092,7 @@ fn sync_volumes(
     }
     let cancelled = shared.progress.cancelled();
     shared.progress.cancel.store(false, Ordering::Relaxed);
+    shared.progress.paused.store(false, Ordering::Relaxed);
     cancelled
 }
 
@@ -1167,7 +1216,7 @@ pub fn refresh_duplicates(shared: &Arc<Shared>) {
         || (state.cancelled_under.as_ref() == Some(&exclusions) && fresh);
     drop(state);
     if !current && matches!(shared.status.lock().phase, Phase::Idle) {
-        start_hashing(shared);
+        start_search(shared, StartedBy::App);
     }
 }
 
@@ -1204,22 +1253,33 @@ impl Drop for HashingDone {
         self.0.hash_progress.done.store(0, Ordering::Relaxed);
         self.0.hash_progress.total.store(0, Ordering::Relaxed);
         self.0.hash_progress.stage.store(0, Ordering::Relaxed);
+        self.0.hash_progress.paused.store(false, Ordering::Relaxed);
         self.0.hashing.store(false, Ordering::Relaxed);
     }
 }
 
+/// Starts a search for Duplicates the user asked for (Rescan), at full speed. One the app
+/// started is already running: it runs anyway.
 pub fn start_hashing(shared: &Arc<Shared>) {
+    shared.tasks.run_anyway_kinds(&[TaskKind::DuplicateSearch]);
+    start_search(shared, StartedBy::User);
+}
+
+fn start_search(shared: &Arc<Shared>, started_by: StartedBy) {
     if shared.hashing.swap(true, Ordering::Relaxed) {
         return;
     }
     let generation = shared.index.read().generation();
     let shared = shared.clone();
-    let task = Arc::new(Mutex::new(Some(shared.tasks.begin(
+    let task = Arc::new(Mutex::new(Some(shared.tasks.begin_as(
         TaskKind::DuplicateSearch,
         "Duplicate search".into(),
         true,
+        started_by,
     ))));
     let cancel = task.lock().as_ref().expect("just begun").cancel_flag();
+    let paused = task.lock().as_ref().is_some_and(TaskHandle::is_paused);
+    shared.hash_progress.paused.store(paused, Ordering::Relaxed);
     // Redraws the progress while files are hashed, and reports it to the Task.
     {
         let shared = shared.clone();
@@ -1230,6 +1290,7 @@ pub fn start_hashing(shared: &Arc<Shared>) {
                 let total = shared.hash_progress.total.load(Ordering::Relaxed);
                 if let Some(task) = task.lock().as_ref() {
                     task.set_progress(shared.hash_progress.done.load(Ordering::Relaxed), (total > 0).then_some(total));
+                    shared.hash_progress.paused.store(task.is_paused(), Ordering::Relaxed);
                 }
                 (shared.repaint)();
             }
@@ -1238,6 +1299,9 @@ pub fn start_hashing(shared: &Arc<Shared>) {
     let spawned = thread::Builder::new().name("ve-hasher".into()).spawn({
         let shared = shared.clone();
         move || {
+            if let Some(task) = task.lock().as_ref() {
+                task.enter_thread();
+            }
             // Clears `hashing` even if the search panics, so Rescan and `dupe:` keep working.
             let done = HashingDone(shared.clone());
             let exclusions = shared.duplicate_exclusions.lock().clone();
