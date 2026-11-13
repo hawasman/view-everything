@@ -4,8 +4,7 @@
 use parking_lot::Mutex;
 use std::sync::Arc;
 use ve_core::CategoryMap;
-use ve_engine::agents::files::Reason;
-use ve_engine::agents::{Access, Agent, CODE_LIFETIME, FILES, Request};
+use ve_engine::agents::{Access, Agent, CODE_LIFETIME, FILES, Reason, Request};
 use ve_engine::permissions::{Hooks, Kind, Permission};
 use ve_engine::{Config, Engine};
 

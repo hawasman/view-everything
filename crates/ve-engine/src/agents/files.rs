@@ -1,21 +1,17 @@
 //! The Files Module's tools for agents: `files.find`, `files.top`, `files.locations` and
 //! `files.summary`. Each reads the Index and nothing else, answers aggregates with at most
-//! [`MAX_LIMIT`] rows, and hands back a cursor for the next rows. The same code answers on the
-//! engine's live Index (the socket's `files` method) and on a saved Index file (`ve mcp serve`
-//! with no app running). A call that cannot be answered is a [`Refusal`] the agent can act on.
+//! [`MAX_LIMIT`](super::MAX_LIMIT) rows, and hands back a cursor for the next rows. The same
+//! code answers on the engine's live Index (the socket's `files` method) and on a saved Index
+//! file (`ve mcp serve` with no app running). A call that cannot be answered is a [`Refusal`]
+//! the agent can act on.
 
-use super::{Agent, Agents, Request};
+use super::{Agent, Agents, Page, Reason, Refusal, cursor_schema, limit_schema};
 use crate::socket::search::{self, LastSynced, Row, Select};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::Path;
 use ve_core::{CategoryMap, EntryId, Filter, Index, Query};
-
-/// Rows an answer holds unless the call asks for another number.
-pub const DEFAULT_LIMIT: usize = 50;
-/// The most rows one answer holds, whatever the call asks for.
-pub const MAX_LIMIT: usize = 200;
 
 /// One of the Files tools.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,11 +70,7 @@ impl Tool {
             "description": "A Query in the app's Query language: words, ext:pdf, size:>1GB, dm:2024, since:7d, kind:folder, owner:steam, ..."
         });
         let path = json!({ "type": "string", "description": "Only Entries under this absolute path, which must be in the Index." });
-        let limit = json!({
-            "type": "integer", "minimum": 1, "maximum": MAX_LIMIT,
-            "description": format!("Rows per answer (default {DEFAULT_LIMIT}, at most {MAX_LIMIT}).")
-        });
-        let cursor = json!({ "type": "string", "description": "The next_cursor of the previous answer, for its next rows." });
+        let (limit, cursor) = (limit_schema(), cursor_schema());
         let properties = match self {
             Tool::Find => json!({ "query": query, "path": path, "limit": limit, "cursor": cursor }),
             Tool::Top => json!({
@@ -112,27 +104,14 @@ pub struct Args {
 pub struct Call {
     pub tool: Tool,
     pub args: Args,
-    /// Where the page starts (from the cursor).
-    offset: usize,
-    /// Rows per page, capped.
-    limit: usize,
+    page: Page,
 }
 
 impl Call {
     /// Checks `arguments` (an object, or null for none) for the tool named `name`.
     pub fn parse(name: &str, arguments: Value) -> Result<Call, Refusal> {
-        let tool = Tool::from_name(name).ok_or_else(|| {
-            let names: Vec<_> = Tool::ALL.iter().map(|t| t.name()).collect();
-            Refusal::new(
-                Reason::UnknownTool,
-                format!("unknown tool `{name}`; the tools are {}", names.join(", ")),
-            )
-        })?;
-        let args: Args = match arguments {
-            Value::Null => Args::default(),
-            arguments => serde_json::from_value(arguments)
-                .map_err(|e| Refusal::new(Reason::BadArguments, format!("bad arguments for {name}: {e}")))?,
-        };
+        let tool = Tool::from_name(name).ok_or_else(|| Refusal::unknown_tool(name))?;
+        let args: Args = super::arguments(name, arguments)?;
         let bad = |what: &str| Err(Refusal::new(Reason::BadArguments, format!("{name} {what}")));
         match tool {
             Tool::Find if args.query.trim().is_empty() => return bad("needs a query"),
@@ -140,24 +119,13 @@ impl Call {
             Tool::Find | Tool::Locations | Tool::Summary if args.files => return bad("takes no `files`; it is for files.top"),
             _ => {}
         }
-        let limit = match args.limit {
-            None => DEFAULT_LIMIT,
-            Some(0) => return bad("needs a limit of at least 1"),
-            Some(n) => usize::try_from(n).unwrap_or(usize::MAX).min(MAX_LIMIT),
-        };
-        let offset = match &args.cursor {
-            None => 0,
-            Some(cursor) => match cursor.parse() {
-                Ok(offset) => offset,
-                Err(_) => return bad("got a cursor it did not hand out; pass next_cursor as it came"),
-            },
-        };
+        let page = Page::parse(name, args.limit, args.cursor.as_deref())?;
         if let Some(path) = &args.path
             && !Path::new(path).is_absolute()
         {
             return Err(Refusal::new(Reason::BadPath, format!("{path} is not an absolute path")));
         }
-        Ok(Call { tool, args, offset, limit })
+        Ok(Call { tool, args, page })
     }
 
     /// The Query text the call reads under.
@@ -167,80 +135,7 @@ impl Call {
 
     /// Cuts this call's page out of `items`: the rows, and the cursor for the ones after them.
     fn page<T>(&self, items: Vec<T>) -> (Vec<T>, Option<String>) {
-        let total = items.len();
-        let end = self.offset.saturating_add(self.limit).min(total);
-        let page = items.into_iter().skip(self.offset).take(end.saturating_sub(self.offset)).collect();
-        (page, (end < total).then(|| end.to_string()))
-    }
-}
-
-/// Why a call was not answered.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Reason {
-    /// The agent has no Permission yet; the user approves the request's code.
-    ApprovalPending,
-    /// The agent has no Permission, and no app runs to ask the user.
-    NotApproved,
-    UnknownTool,
-    BadArguments,
-    BadQuery,
-    BadPath,
-    /// The app is still reading its Index.
-    Loading,
-    /// No saved Index to read (no app running, and none built yet).
-    NoIndex,
-    /// Not the agent's doing: the app answered what `ve mcp` could not read, or the agent's key
-    /// could not be kept. Calling again may work.
-    Failed,
-}
-
-/// A call the agent can correct or wait on, and why.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Refusal {
-    pub reason: Reason,
-    pub message: String,
-    /// The approval code, for [`Reason::ApprovalPending`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code: Option<String>,
-    /// When that code expires, in Unix seconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<i64>,
-}
-
-impl Refusal {
-    pub fn new(reason: Reason, message: impl Into<String>) -> Refusal {
-        Refusal {
-            reason,
-            message: message.into(),
-            code: None,
-            expires_at: None,
-        }
-    }
-
-    /// The refusal of an agent waiting for the user to approve `request`.
-    pub fn pending(request: &Request, now: i64) -> Refusal {
-        let Request { code, module, .. } = request;
-        let minutes = request.minutes_left(now);
-        Refusal {
-            reason: Reason::ApprovalPending,
-            message: format!(
-                "approval pending, code {code}: this agent may not read {module} yet. Ask the user to approve code {code} \
-                 in view-everything (Settings → Permissions) or by running `ve mcp --approve {code}`, then call again. \
-                 The code expires in {minutes} minute{}.",
-                if minutes == 1 { "" } else { "s" }
-            ),
-            code: Some(code.clone()),
-            expires_at: Some(request.expires_at),
-        }
-    }
-
-    /// A Query that does not parse, as the parser said.
-    pub fn bad_query(why: impl std::fmt::Display) -> Refusal {
-        Refusal::new(
-            Reason::BadQuery,
-            format!("bad Query: {why} (see the Query language in docs/guide/query-language.md)"),
-        )
+        self.page.cut(items)
     }
 }
 
@@ -355,7 +250,7 @@ pub fn answer(index: &Index, categories: &CategoryMap, query: Option<&Query>, ca
         }
     };
     let mut answer = answer;
-    answer["limit"] = json!(call.limit);
+    answer["limit"] = json!(call.page.limit());
     answer["last_synced"] = json!(last_synced);
     Ok(answer)
 }
@@ -365,9 +260,7 @@ impl Agents<'_> {
     /// no Permission yet (with the request's code, before anything else is looked at), a bad
     /// call, or the Index still loading.
     pub fn files(&self, agent: &Agent, tool: &str, arguments: Value, now: i64) -> Result<Value, Refusal> {
-        if let super::Access::Pending(request) = self.access(agent, super::FILES, now) {
-            return Err(Refusal::pending(&request, now));
-        }
+        self.check(agent, super::FILES, now)?;
         let call = Call::parse(tool, arguments)?;
         let engine = self.engine;
         if engine.is_loading_index() {

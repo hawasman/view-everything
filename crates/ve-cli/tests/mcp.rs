@@ -1,17 +1,22 @@
 //! `ve mcp serve` run as a subprocess and driven with JSON-RPC lines: an agent is refused with an
-//! approval code until approved, answers are capped and continue by cursor, bad calls are
-//! structured refusals, and with no app running it reads the saved Index for an approved agent.
+//! approval code until approved for a Module, answers are capped and continue by cursor, bad
+//! calls are structured refusals, and with no app running it reads the saved Index for an
+//! approved agent.
 #![cfg(target_os = "linux")]
 
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use ve_core::{CategoryMap, EntryMeta, Index, SyncState};
+use ve_engine::net::{InterfaceCounters, Net};
+use ve_engine::perf::{
+    Backend, Counters, CpuCounters, CpuTimes, Memory, Perf, ProcessCounters, ProcessCountersTable, ProcessId, Reading,
+};
 use ve_engine::socket::{self, Claim};
 use ve_engine::{Config, Engine, Phase};
 use ve_scan::VolumeInfo;
@@ -120,6 +125,108 @@ fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
     }
 }
 
+/// An engine with no Locations, its recorder reading `backend` only when the test ticks it.
+fn engine_reading(backend: impl Backend) -> Engine {
+    let mut engine = Engine::start(
+        Config {
+            index_path: None,
+            mounted: Vec::new(),
+            volumes: Vec::new(),
+            remotes: Vec::new(),
+            intervals: Default::default(),
+            categories: CategoryMap::builtin(),
+            live_helper: false,
+        },
+        Arc::new(|| {}),
+    );
+    engine.perf = Perf::manual(Box::new(backend), Arc::new(|| {}));
+    engine.net = Net::new(&engine.perf);
+    engine
+}
+
+/// Serves `engine` on a socket in `home`, as the running app does.
+fn host(engine: Engine, home: &Path) -> (Arc<Engine>, PathBuf) {
+    let engine = Arc::new(engine);
+    let path = home.join("run").join("engine.sock");
+    let Claim::Host(listener) = socket::claim(&path).unwrap() else {
+        panic!("nothing else listens there")
+    };
+    socket::serve(listener, engine.clone(), Arc::new(|_| {}));
+    (engine, path)
+}
+
+/// Calls `tool`, which is refused with an approval code for `module`, and approves that code
+/// as the user would from a shell.
+fn approve(mcp: &mut Mcp, tool: &str, module: &str, socket: &Path, home: &Path) {
+    let refused = mcp.call(tool, json!({}));
+    assert_eq!(refusal(&refused)["reason"], "approval_pending", "{refused}");
+    let code = refusal(&refused)["code"].as_str().unwrap().to_owned();
+    let listed = ve(&["mcp", "--list-requests"], socket, home);
+    let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+    assert!(listed.contains(&format!("{code}\t{module}\t")), "{listed}");
+    let approved = ve(&["mcp", "--approve", &code], socket, home);
+    assert!(approved.status.success(), "{}", String::from_utf8_lossy(&approved.stderr));
+}
+
+/// A machine of 250 processes, process `pid` taking `pid` times process 1's CPU and the
+/// lowest PIDs the most memory; the whole machine half busy, a quarter of its memory used.
+#[derive(Default)]
+struct Machine {
+    step: u64,
+}
+
+impl Backend for Machine {
+    fn read(&mut self) -> Counters {
+        self.step += 1;
+        Counters {
+            cpu: Reading::Value(CpuCounters {
+                total: CpuTimes {
+                    busy: self.step * 500_000,
+                    total: self.step * 1_000_000,
+                },
+                cores: Vec::new(),
+            }),
+            core_kinds: Arc::from([]),
+            memory: Reading::Value(Memory {
+                total: 4000,
+                used: 1000,
+                cache: 1000,
+                free: 2000,
+                available: Reading::Unsupported,
+                swap: Reading::Unsupported,
+            }),
+            disks: Reading::Unsupported,
+            network: Reading::Value(vec![InterfaceCounters {
+                name: "eth0".into(),
+                received: self.step * 1000,
+                sent: self.step * 100,
+            }]),
+        }
+    }
+
+    fn processes(&mut self, _io: bool) -> Reading<ProcessCountersTable> {
+        Reading::Value(ProcessCountersTable {
+            processes: (1..=250u32)
+                .map(|pid| ProcessCounters {
+                    id: ProcessId { pid, start: 100 },
+                    ppid: 1,
+                    name: format!("proc-{pid:03}").into(),
+                    cpu_ticks: u64::from(pid) * self.step * 10,
+                    rss: Some(u64::from(251 - pid) * 4096),
+                    io: None,
+                })
+                .collect(),
+            boot_time: Some(1_700_000_000),
+            ticks_per_second: 100,
+        })
+    }
+}
+
+/// The PIDs of an answer's rows.
+fn pids(answer: &Value) -> Vec<u64> {
+    answer["rows"].as_array().unwrap().iter().map(|r| r["pid"].as_u64().unwrap()).collect()
+}
+
 #[test]
 fn an_agent_is_refused_until_approved_then_answered_in_capped_pages() {
     let (engine_data, fixture, home) = (
@@ -165,7 +272,17 @@ fn an_agent_is_refused_until_approved_then_answered_in_capped_pages() {
 
     let tools = mcp.request("tools/list", json!({}))["result"]["tools"].clone();
     let names: Vec<_> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["files.find", "files.top", "files.locations", "files.summary"]);
+    assert_eq!(
+        names,
+        [
+            "files.find",
+            "files.top",
+            "files.locations",
+            "files.summary",
+            "performance.summary",
+            "performance.processes"
+        ]
+    );
     assert!(tools.as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
 
     // First contact: refused with a code, before the call itself is looked at.
@@ -277,6 +394,8 @@ fn with_no_app_running_an_approved_agent_reads_the_saved_index() {
         refusal(&mcp.call("files.find", json!({ "query": "is:offline" })))["reason"],
         "bad_query"
     );
+    let unread = mcp.call("performance.summary", json!({}));
+    assert_eq!(refusal(&unread)["reason"], "not_running", "the recorder runs in the app");
 
     // Same name, no key on file for it here: a new key, which the settings do not approve.
     fs::remove_file(data.join("agent-keys.json")).unwrap();
@@ -284,4 +403,64 @@ fn with_no_app_running_an_approved_agent_reads_the_saved_index() {
     let refused = stranger.call("files.find", json!({ "query": "pdf" }));
     assert_eq!(refusal(&refused)["reason"], "not_approved");
     assert!(text(&refused).contains("not running"), "{}", text(&refused));
+}
+
+#[test]
+fn performance_is_refused_until_approved_then_answered_from_the_recorder() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = engine_reading(Machine::default());
+    let t0 = chrono::Utc::now().timestamp() - 10;
+    for t in t0..=t0 + 3 {
+        engine.perf.tick(t);
+    }
+    let (engine, socket_path) = host(engine, home.path());
+    let mut mcp = Mcp::start(&socket_path, home.path(), "perf-agent");
+
+    approve(&mut mcp, "performance.summary", "Performance", &socket_path, home.path());
+    let summary = mcp.call("performance.summary", json!({ "from": t0, "to": t0 + 3 }));
+    let summary = answer(&summary);
+    assert_eq!(summary["source"], "running app");
+    // The first reading only primes the next: three seconds recorded.
+    assert_eq!((summary["seconds"].as_u64(), summary["cpu"].as_f64()), (Some(3), Some(0.5)));
+    assert_eq!(summary["memory"].as_f64(), Some(0.25));
+    assert_eq!(
+        (&summary["top_process"]["pid"], &summary["top_process"]["name"]),
+        (&json!(250), &json!("proc-250"))
+    );
+
+    // Live lists every process: 200 rows at most, busiest first, then the rest by cursor.
+    let first = mcp.call("performance.processes", json!({ "limit": 500 }));
+    let first = answer(&first).clone();
+    assert_eq!((first["total"].as_u64(), first["limit"].as_u64()), (Some(250), Some(200)));
+    assert_eq!(pids(&first)[..3], [250, 249, 248]);
+    let rest = mcp.call(
+        "performance.processes",
+        json!({ "limit": 500, "cursor": first["next_cursor"] }),
+    );
+    let rest = answer(&rest).clone();
+    assert_eq!(rest["next_cursor"], Value::Null);
+    let all: HashSet<u64> = pids(&first).into_iter().chain(pids(&rest)).collect();
+    assert_eq!(all.len(), 250, "pages neither overlap nor skip");
+    let by_memory = mcp.call("performance.processes", json!({ "sort": "memory", "limit": 1 }));
+    assert_eq!(pids(answer(&by_memory)), [1]);
+    assert_eq!(answer(&by_memory)["rows"][0]["memory"], 250 * 4096);
+    // A past second keeps the top 200.
+    let past = mcp.call("performance.processes", json!({ "at": t0 + 3 }));
+    assert_eq!(answer(&past)["total"], 200);
+
+    let gap = mcp.call("performance.processes", json!({ "at": t0 - 100 }));
+    assert_eq!(refusal(&gap)["reason"], "no_sample");
+    let backwards = mcp.call("performance.summary", json!({ "from": t0 + 3, "to": t0 }));
+    assert_eq!(refusal(&backwards)["reason"], "bad_arguments");
+    let unknown = mcp.call("performance.processes", json!({ "kill": true }));
+    assert_eq!(refusal(&unknown)["reason"], "bad_arguments");
+
+    // Approving Performance granted nothing else, and revoking it refuses again.
+    assert_eq!(refusal(&mcp.call("files.locations", json!({})))["reason"], "approval_pending");
+    engine.agents().revoke("perf-agent", "Performance").unwrap();
+    assert_eq!(
+        refusal(&mcp.call("performance.summary", json!({})))["reason"],
+        "approval_pending"
+    );
+    engine.shutdown();
 }

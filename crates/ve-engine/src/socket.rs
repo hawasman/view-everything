@@ -15,7 +15,8 @@
 //! [`search::Search`]; end: `{"count", "last_synced"}`), `launch.match` (streams the Launcher's
 //! [`crate::launch::Match`]es for `{"text"}`; end: `{"count"}`), `tasks` (streams running Tasks'
 //! progress; with `{"follow": true}` until none runs; end: `{}`), and the agent methods
-//! `agents.pending`, `agents.approve` and `files` (see [`agents`]).
+//! `agents.pending`, `agents.approve` and one per Module agents read, `files` and
+//! `performance` (see [`agents`]).
 
 mod agents;
 pub mod search;
@@ -468,7 +469,7 @@ fn serve_lines(reader: &mut impl BufRead, out: &mut BufWriter<impl Write>, engin
             "launch.match" => answer_launch_match(out, &id, &params, engine)?,
             "search" => answer_search(out, &id, params, engine)?,
             "tasks" => answer_tasks(out, &id, &params, engine)?,
-            method @ ("agents.pending" | "agents.approve" | "files") => agents::answer(out, &id, method, params, engine)?,
+            method if agents::answers(method) => agents::answer(out, &id, method, params, engine)?,
             other => send(out, &json!({ "id": id, "error": format!("unknown method `{other}`") }))?,
         }
         out.flush()?;

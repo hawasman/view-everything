@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Agents
+- Agents read **Performance**: `performance.summary` (the mean CPU and memory use over a stretch of the last hour, and the process that took the most CPU) and `performance.processes` (the process table at a second, or Live, busiest or largest first, capped and paged like the Files tools). Each Module needs its own approval; Performance answers only while the app runs. [More](docs/guide/agents.md#performance)
+
 ## v0.3.0-rc.1
 
 First release candidate of v0.3.0. Linux is the target for the new Modules (Performance, Network, Apps, Launcher, agent access); on Windows and macOS they show what they support. Self-updates skip pre-releases: install this one by hand.

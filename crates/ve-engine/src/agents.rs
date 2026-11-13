@@ -4,17 +4,270 @@
 //! approval request: a 4-character code, held here (never saved) for ten minutes, that the user
 //! approves in Settings → Permissions or with `ve mcp --approve CODE`. The host is told of each
 //! new request so the tray can say who asked for what.
+//!
+//! Each Module's tools are in its own module here ([`files`], [`performance`]). They share
+//! what this one defines: row caps and cursors ([`Page`]) and the [`Refusal`] of a call that
+//! cannot be answered.
 
 pub mod files;
+pub mod performance;
 
 use crate::Engine;
 use crate::permissions::{Kind, Permission};
+use crate::timeline::Moment;
 use parking_lot::Mutex;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// The one Module agents can read in this version.
+/// The Modules agents can read, each a Permission of its own.
 pub const FILES: &str = "Files";
+pub const PERFORMANCE: &str = "Performance";
+
+/// Rows an answer holds unless the call asks for another number.
+pub const DEFAULT_LIMIT: usize = 50;
+/// The most rows one answer holds, whatever the call asks for.
+pub const MAX_LIMIT: usize = 200;
+
+/// A tool an agent can call, as `tools/list` describes it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolInfo {
+    /// The Module whose Permission it needs.
+    pub module: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    /// The JSON Schema of its arguments.
+    pub input_schema: Value,
+}
+
+/// Every tool agents can call, by Module.
+pub fn tools() -> Vec<ToolInfo> {
+    let files = files::Tool::ALL.map(|t| ToolInfo {
+        module: FILES,
+        name: t.name(),
+        description: t.description(),
+        input_schema: t.input_schema(),
+    });
+    let performance = performance::Tool::ALL.map(|t| ToolInfo {
+        module: PERFORMANCE,
+        name: t.name(),
+        description: t.description(),
+        input_schema: t.input_schema(),
+    });
+    files.into_iter().chain(performance).collect()
+}
+
+/// The Module of the tool called `name`, if there is such a tool.
+pub fn module_of(name: &str) -> Option<&'static str> {
+    tools().into_iter().find(|t| t.name == name).map(|t| t.module)
+}
+
+/// Why a call was not answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reason {
+    /// The agent has no Permission yet; the user approves the request's code.
+    ApprovalPending,
+    /// The agent has no Permission, and no app runs to ask the user.
+    NotApproved,
+    /// The Module is only read by the running app (its recorder, its program list), and none
+    /// runs.
+    NotRunning,
+    UnknownTool,
+    BadArguments,
+    BadQuery,
+    BadPath,
+    /// Nothing was recorded at the Moment asked for (a gap, older than an hour, or a system
+    /// whose counters cannot be read).
+    NoSample,
+    /// The app is still reading its Index.
+    Loading,
+    /// No saved Index to read (no app running, and none built yet).
+    NoIndex,
+    /// Not the agent's doing: the app answered what `ve mcp` could not read, or the agent's key
+    /// could not be kept. Calling again may work.
+    Failed,
+}
+
+/// A call the agent can correct or wait on, and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refusal {
+    pub reason: Reason,
+    pub message: String,
+    /// The approval code, for [`Reason::ApprovalPending`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// When that code expires, in Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+}
+
+impl Refusal {
+    pub fn new(reason: Reason, message: impl Into<String>) -> Refusal {
+        Refusal {
+            reason,
+            message: message.into(),
+            code: None,
+            expires_at: None,
+        }
+    }
+
+    /// The refusal of an agent waiting for the user to approve `request`.
+    pub fn pending(request: &Request, now: i64) -> Refusal {
+        let Request { code, module, .. } = request;
+        let minutes = request.minutes_left(now);
+        Refusal {
+            reason: Reason::ApprovalPending,
+            message: format!(
+                "approval pending, code {code}: this agent may not read {module} yet. Ask the user to approve code {code} \
+                 in view-everything (Settings → Permissions) or by running `ve mcp --approve {code}`, then call again. \
+                 The code expires in {minutes} minute{}.",
+                if minutes == 1 { "" } else { "s" }
+            ),
+            code: Some(code.clone()),
+            expires_at: Some(request.expires_at),
+        }
+    }
+
+    /// A Query that does not parse, as the parser said.
+    pub fn bad_query(why: impl std::fmt::Display) -> Refusal {
+        Refusal::new(
+            Reason::BadQuery,
+            format!("bad Query: {why} (see the Query language in docs/guide/query-language.md)"),
+        )
+    }
+
+    /// A tool name no Module has.
+    pub fn unknown_tool(name: &str) -> Refusal {
+        let names: Vec<_> = tools().iter().map(|t| t.name).collect();
+        Refusal::new(
+            Reason::UnknownTool,
+            format!("unknown tool `{name}`; the tools are {}", names.join(", ")),
+        )
+    }
+}
+
+/// The arguments `arguments` (an object, or null for none) of the tool `name`, or why not.
+fn arguments<T: DeserializeOwned + Default>(name: &str, arguments: Value) -> Result<T, Refusal> {
+    match arguments {
+        Value::Null => Ok(T::default()),
+        arguments => serde_json::from_value(arguments)
+            .map_err(|e| Refusal::new(Reason::BadArguments, format!("bad arguments for {name}: {e}"))),
+    }
+}
+
+/// Which rows of an answer a call asks for: where they start (from its cursor) and how many,
+/// capped at [`MAX_LIMIT`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Page {
+    offset: usize,
+    limit: usize,
+}
+
+impl Page {
+    /// The page of the tool `name`'s call with `limit` and `cursor`.
+    pub fn parse(name: &str, limit: Option<u64>, cursor: Option<&str>) -> Result<Page, Refusal> {
+        let bad = |what: &str| Err(Refusal::new(Reason::BadArguments, format!("{name} {what}")));
+        let limit = match limit {
+            None => DEFAULT_LIMIT,
+            Some(0) => return bad("needs a limit of at least 1"),
+            Some(n) => usize::try_from(n).unwrap_or(usize::MAX).min(MAX_LIMIT),
+        };
+        let offset = match cursor {
+            None => 0,
+            Some(cursor) => match cursor.parse() {
+                Ok(offset) => offset,
+                Err(_) => return bad("got a cursor it did not hand out; pass next_cursor as it came"),
+            },
+        };
+        Ok(Page { offset, limit })
+    }
+
+    /// Rows per page.
+    pub fn limit(self) -> usize {
+        self.limit
+    }
+
+    /// Cuts this page out of `items`: the rows, and the cursor for the ones after them.
+    pub fn cut<T>(self, items: Vec<T>) -> (Vec<T>, Option<String>) {
+        let total = items.len();
+        let end = self.offset.saturating_add(self.limit).min(total);
+        let page = items.into_iter().skip(self.offset).take(end.saturating_sub(self.offset)).collect();
+        (page, (end < total).then(|| end.to_string()))
+    }
+
+    /// `fields` with `rows` paged beside them: `total`, the page's `rows`, `next_cursor` and
+    /// `limit`.
+    fn answer<T>(self, rows: Vec<T>, row: impl Fn(T) -> Value, fields: Value) -> Value {
+        let total = rows.len();
+        let (page, next) = self.cut(rows);
+        let mut answer = fields;
+        answer["total"] = json!(total);
+        answer["rows"] = Value::Array(page.into_iter().map(row).collect());
+        answer["next_cursor"] = json!(next);
+        answer["limit"] = json!(self.limit);
+        answer
+    }
+}
+
+/// The schema of `limit`.
+fn limit_schema() -> Value {
+    json!({
+        "type": "integer", "minimum": 1, "maximum": MAX_LIMIT,
+        "description": format!("Rows per answer (default {DEFAULT_LIMIT}, at most {MAX_LIMIT}).")
+    })
+}
+
+/// The schema of `cursor`.
+fn cursor_schema() -> Value {
+    json!({ "type": "string", "description": "The next_cursor of the previous answer, for its next rows." })
+}
+
+/// The schema of `at`, a Moment.
+fn at_schema() -> Value {
+    json!({
+        "type": "integer",
+        "description": "A second of the last hour, in Unix seconds; omitted for Live (the newest reading)."
+    })
+}
+
+/// The schemas of `from` and `to`, a stretch of the recorded hour.
+fn range_schema() -> (Value, Value) {
+    (
+        json!({ "type": "integer", "description": "First second, in Unix seconds (default: an hour before `to`)." }),
+        json!({ "type": "integer", "description": "Last second, in Unix seconds (default: now)." }),
+    )
+}
+
+/// The Moment `at` stands for: a time, or Live when omitted.
+fn moment(at: Option<i64>) -> Moment {
+    at.map_or(Moment::Live, Moment::At)
+}
+
+/// The stretch `from` to `to` (inclusive) of the tool `name`'s call at `now`: by default the
+/// hour the recorder keeps, up to now.
+fn range(name: &str, from: Option<i64>, to: Option<i64>, now: i64) -> Result<(i64, i64), Refusal> {
+    let to = to.unwrap_or(now);
+    let from = from.unwrap_or(to - crate::perf::SPAN + 1);
+    if from > to {
+        return Err(Refusal::new(
+            Reason::BadArguments,
+            format!("{name} needs `from` no later than `to`"),
+        ));
+    }
+    Ok((from, to))
+}
+
+/// Orders two measures that can be unknown: largest first, unknown last.
+fn largest_first<T: PartialOrd>(a: Option<T>, b: Option<T>) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => b.partial_cmp(&a).unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
 
 /// How long an approval code can be approved, in seconds.
 pub const CODE_LIFETIME: i64 = 10 * 60;
@@ -208,5 +461,13 @@ impl Agents<'_> {
         let revoked = self.engine.shared.permissions.revoke_agent(name, module);
         (self.engine.shared.repaint)();
         revoked
+    }
+
+    /// Refuses `agent` with its approval request until it may read `module` at `now`.
+    fn check(&self, agent: &Agent, module: &str, now: i64) -> Result<(), Refusal> {
+        match self.access(agent, module, now) {
+            Access::Allowed => Ok(()),
+            Access::Pending(request) => Err(Refusal::pending(&request, now)),
+        }
     }
 }
