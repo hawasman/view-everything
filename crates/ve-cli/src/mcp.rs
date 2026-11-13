@@ -1,10 +1,10 @@
-//! `ve mcp`: the MCP server agents read the app's Modules through, and the shell's way to
-//! approve them. `ve mcp serve` speaks MCP (JSON-RPC 2.0, one message per line) on stdin and
-//! stdout and offers the read-only tools of [`ve_engine::agents`]. It asks the running app over
-//! its socket; with none running it reads the saved Index file for the Files tools, for an agent
-//! the saved settings hold a Permission for. The other Modules are read by the running app
-//! only. Agent identity is the client's name plus a key issued here on first contact and kept in
-//! the data folder.
+//! `ve mcp`: the MCP server agents read the app's Modules and make Proposals through, and the
+//! shell's way to approve them. `ve mcp serve` speaks MCP (JSON-RPC 2.0, one message per line)
+//! on stdin and stdout and offers the tools of [`ve_engine::agents`]. It asks the running app
+//! over its socket; with none running it reads the saved Index file for the Files tools, for an
+//! agent the saved settings hold a Permission for. The other Modules are read by the running
+//! app only, and Proposals are held by it. Agent identity is the client's name plus a key
+//! issued here on first contact and kept in the data folder.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -17,19 +17,20 @@ use ve_core::paths::APP_DIR;
 use ve_core::{Index, Query, QueryContext};
 use ve_engine::agents::files::{self, Call};
 use ve_engine::agents::{self, Agent, FILES, Module, Reason, Refusal, Request, ToolInfo};
-use ve_engine::permissions::Permission;
+use ve_engine::permissions::{Kind, Permission};
 use ve_engine::socket::{self, Client};
 
 pub const USAGE: &str = "\
 Usage:
-  ve mcp serve              Serve MCP on stdin/stdout: read-only tools for an agent
+  ve mcp serve              Serve MCP on stdin/stdout: tools for an agent to read, and to propose
   ve mcp --list-requests    Agents' approval requests waiting for the user
-  ve mcp --approve <CODE>   Approve a request: that agent may read the Module it asked for
+  ve mcp --approve <CODE>   Approve a request: that agent may read (or propose in) the Module it asked for
 
 An agent's first call to a Module is refused with a 4-character code; approve it here or in
-the app's Settings → Permissions within 10 minutes. Requests are held by the running app. With
-the app closed, `ve mcp serve` answers the Files tools from the saved Index file for agents
-already approved; the other Modules need the app running.";
+the app's Settings → Permissions within 10 minutes. Proposing in a Module is approved apart
+from reading it. Requests are held by the running app. With the app closed, `ve mcp serve`
+answers the Files tools from the saved Index file for agents already approved; the other
+Modules, and Proposals, need the app running. The user answers Proposals with `ve proposals`.";
 
 /// The protocol versions this server speaks, newest last.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
@@ -82,10 +83,10 @@ fn list_requests(out: &mut impl Write) -> Result<(), String> {
         if pending.is_empty() {
             return writeln!(out, "No approval requests are pending.");
         }
-        writeln!(out, "CODE\tMODULE\tEXPIRES\tAGENT")?;
+        writeln!(out, "CODE\tMODULE\tEXPIRES\tAGENT\tPERMISSION")?;
         for r in &pending {
             let minutes = r.minutes_left(now);
-            writeln!(out, "{}\t{}\tin {minutes} min\t{}", r.code, r.module, r.agent)?;
+            writeln!(out, "{}\t{}\tin {minutes} min\t{}\t{}", r.code, r.module, r.agent, r.kind.label())?;
         }
         out.flush()
     };
@@ -97,7 +98,11 @@ fn approve(code: &str, out: &mut impl Write) -> Result<(), String> {
         .call("agents.approve", json!({ "code": code }))
         .map_err(|e| e.to_string())?;
     let field = |key: &str| granted[key].as_str().unwrap_or("?").to_owned();
-    writeln!(out, "Approved: {} may read {}", field("agent"), field("module")).map_err(|e| e.to_string())
+    let may = match serde_json::from_value(granted["kind"].clone()) {
+        Ok(Kind::AgentProposals) => "may make Proposals in",
+        _ => "may read",
+    };
+    writeln!(out, "Approved: {} {may} {}", field("agent"), field("module")).map_err(|e| e.to_string())
 }
 
 /// Serves MCP until the client closes stdin.
@@ -196,11 +201,13 @@ impl Server {
             "protocolVersion": version,
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "view-everything", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "Read-only access to view-everything's Modules: Files (the user's file Index), Performance \
+            "instructions": "Read access to view-everything's Modules: Files (the user's file Index), Performance \
                 (the last hour of CPU, memory and processes), Network (the last hour of interface traffic, and open \
-                connections) and Apps (installed programs with their size, and the Startup items). Each Module needs \
-                its own approval: the first call to one \
-                is refused with an approval code until the user approves this agent; tell the user the code. \
+                connections) and Apps (installed programs with their size, and the Startup \
+                items). Each Module needs its own approval: the first call to one is refused with an approval code \
+                until the user approves this agent; tell the user the code. Nothing here changes a file: \
+                files.propose_trash submits a Proposal (Entries to move to the Trash, with a reason) that the user \
+                applies or dismisses, and proposing needs an approval of its own. \
                 Every answer is capped in rows; pass next_cursor back as cursor for the next rows.",
         })
     }
@@ -224,9 +231,12 @@ impl Server {
     /// Answers a tool call from the running app, else (Files only) from the saved Index file;
     /// the second value says which.
     fn answer(&mut self, name: &str, arguments: Value) -> Result<(Value, &'static str), Refusal> {
+        if agents::proposals::Tool::from_name(name).is_some() {
+            return self.propose(name, arguments);
+        }
         let module = Module::of_tool(name).ok_or_else(|| Refusal::unknown_tool(name))?;
         let agent = self.agent()?;
-        let app = self.ask_app(&agent, module, name, &arguments);
+        let app = self.ask_app(&agent, module.method(), name, &arguments);
         let module_name = module.name();
         match app {
             App::Answered(answered) => answered.map(|answer| (answer, "running app")),
@@ -250,6 +260,24 @@ impl Server {
         }
     }
 
+    /// Answers a call of a Proposal tool: Proposals are held by the running app alone.
+    fn propose(&mut self, name: &str, arguments: Value) -> Result<(Value, &'static str), Refusal> {
+        let agent = self.agent()?;
+        match self.ask_app(&agent, "propose", name, &arguments) {
+            App::Answered(answered) => answered.map(|answer| (answer, "running app")),
+            App::Absent => Err(Refusal::new(
+                Reason::NotRunning,
+                "Proposals are held by the running app, and view-everything is not running. \
+                 Ask the user to start view-everything, then call again.",
+            )),
+            App::Incompatible => Err(Refusal::new(
+                Reason::Failed,
+                "the running view-everything is another version, which does not take Proposals. \
+                 Ask the user to update view-everything and run it again.",
+            )),
+        }
+    }
+
     /// This client as an agent: its name and its key, issued now if it has none yet.
     fn agent(&mut self) -> Result<Agent, Refusal> {
         if let Some(agent) = &self.agent {
@@ -267,8 +295,8 @@ impl Server {
         Ok(agent)
     }
 
-    /// Asks the running app to answer the tool `name` of `module`.
-    fn ask_app(&mut self, agent: &Agent, module: Module, name: &str, arguments: &Value) -> App {
+    /// Asks the running app to answer the tool `name` through the socket method `method`.
+    fn ask_app(&mut self, agent: &Agent, method: &str, name: &str, arguments: &Value) -> App {
         let params = json!({ "agent": agent, "tool": name, "arguments": arguments });
         // A connection the app closed (it restarted) is opened again once.
         for _ in 0..2 {
@@ -278,7 +306,7 @@ impl Server {
             let Some(engine) = self.engine.as_mut() else {
                 return App::Absent;
             };
-            let reply = match engine.call(module.method(), params.clone()) {
+            let reply = match engine.call(method, params.clone()) {
                 Ok(reply) => reply,
                 Err(socket::Error::Refused(_)) => {
                     self.engine = None;
@@ -303,7 +331,7 @@ impl Server {
     fn read_file(&mut self, agent: &Agent, name: &str, arguments: Value) -> Result<Value, Refusal> {
         let not_approved = |why: String| Refusal::new(Reason::NotApproved, why);
         let permissions = saved_permissions().map_err(|e| not_approved(format!("cannot read the settings: {e}")))?;
-        if !agents::allowed(&permissions, agent, FILES) {
+        if !agents::allowed(&permissions, agent, Kind::Agent, FILES) {
             return Err(not_approved(format!(
                 "this agent may not read {FILES}, and view-everything is not running to ask the user. \
                  Ask the user to start view-everything, then call again for an approval code."
@@ -349,7 +377,7 @@ fn tool(tool: ToolInfo) -> Value {
         "name": tool.name,
         "description": tool.description,
         "inputSchema": tool.input_schema,
-        "annotations": { "readOnlyHint": true, "destructiveHint": false, "openWorldHint": false },
+        "annotations": { "readOnlyHint": tool.read_only, "destructiveHint": false, "openWorldHint": false },
     })
 }
 

@@ -1238,7 +1238,7 @@ impl SettingsPage {
             // Another key under a name already approved: approving moves the Permission to it.
             let replaces = list
                 .iter()
-                .any(|p| p.kind == Kind::Agent && p.subject == request.agent && p.module.as_deref() == Some(request.module.as_str()));
+                .any(|p| p.kind == request.kind && p.subject == request.agent && p.module.as_deref() == Some(request.module.as_str()));
             let how = if replaces {
                 format!(
                     "Already approved under this name with another key; approving replaces it. Approve here or run ve mcp --approve {}",
@@ -1259,10 +1259,10 @@ impl SettingsPage {
                         .child(
                             div()
                                 .font_weight(FontWeight::MEDIUM)
-                                .child(format!("{} asks to read {}", request.agent, request.module)),
+                                .child(format!("{} asks to {}", request.agent, request.what())),
                         )
                         .child(caption(
-                            format!("Agent access · Code {} · Expires in {minutes} min", request.code),
+                            format!("{} · Code {} · Expires in {minutes} min", request.kind.label(), request.code),
                             cx,
                         ))
                         .child(caption(how, cx)),
@@ -1306,7 +1306,7 @@ impl SettingsPage {
                             }
                             match &module {
                                 Some(module) => {
-                                    let revoked = this.engine.agents().revoke(&subject, module);
+                                    let revoked = this.engine.agents().revoke(&subject, kind, module);
                                     this.permission_changed(revoked, cx);
                                 }
                                 None => this.set_permission(kind, subject.clone(), false, cx),

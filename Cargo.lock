@@ -7569,6 +7569,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "trash",
  "ve-core",
  "ve-scan",
  "windows-sys 0.61.2",

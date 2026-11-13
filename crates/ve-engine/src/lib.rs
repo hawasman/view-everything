@@ -11,9 +11,11 @@ mod live;
 pub mod net;
 pub mod perf;
 pub mod permissions;
+pub mod proposals;
 pub mod socket;
 pub mod tasks;
 pub mod timeline;
+pub mod trash;
 pub mod view;
 
 use chrono::{Local, Utc};
@@ -121,6 +123,10 @@ pub struct Shared {
     pub permissions: permissions::Store,
     /// Agents' pending approval requests, read through [`Engine::agents`].
     pub agents: agents::Store,
+    /// Agents' Proposals, read and answered through [`Engine::proposals`].
+    pub proposals: proposals::Store,
+    /// How the Trash moves an item; `None` for the operating system's trash.
+    trash_mover: Mutex<Option<trash::Mover>>,
     /// Called from the background threads whenever something a client shows has changed.
     pub repaint: Repaint,
 }
@@ -238,6 +244,7 @@ impl Engine {
             let repaint = repaint.clone();
             tasks.set_repaint(move || repaint());
         }
+        let proposals = proposals::Store::load(index_path.as_deref());
         let shared = Arc::new(Shared {
             index_path,
             index: SharedIndex::new(Index::new()),
@@ -268,6 +275,8 @@ impl Engine {
             tasks,
             permissions: permissions::Store::default(),
             agents: agents::Store::default(),
+            proposals,
+            trash_mover: Mutex::new(None),
             repaint,
         });
         let (commands, command_rx) = mpsc::channel();
@@ -1486,6 +1495,8 @@ mod tests {
             tasks: Tasks::new(),
             permissions: Default::default(),
             agents: Default::default(),
+            proposals: proposals::Store::load(None),
+            trash_mover: Mutex::new(None),
             repaint: Arc::new(|| {}),
         }
     }
