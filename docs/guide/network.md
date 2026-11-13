@@ -19,6 +19,7 @@ An interface that goes away (a VPN that disconnects, a USB tether unplugged) kee
 - The kernel counts each TCP connection's bytes, received and sent (acknowledged by the other end), and tells any user, the way `ss -ti` shows them. Every two seconds, with the connections, the app reads those counts and finds which of your processes holds each connection; a process's rate is what its connections moved since the reading before, over the seconds between.
 - A connection that closes counts no more; it never makes a rate go back. A new one counts every byte it moved since it opened. A connection handed to another process (a server passing it to a worker) counts for the process holding it now, from then on.
 - A process that cannot be read, or that ended between the two readings, counts for no one.
+- A connection to the machine itself (loopback, `127.0.0.1` or `::1`) is no network traffic and is left out, as `lo` is among the interfaces.
 - Click a process to open it in the Inspector.
 - Live lists every process holding a TCP connection, idle ones too; each past second keeps the 200 that moved the most bytes then, so scrubbing the Timeline dock to a past Moment shows that second's traffic, with the rates of the two-second reading it falls in.
 

@@ -487,8 +487,9 @@ pub(crate) struct TcpCounters {
 /// socket's bytes since `prev`, summed per Process holding it now. A socket that opened since
 /// counts all its bytes; one that closed counts none, so no rate ever goes back. A socket
 /// whose holder is unknown (another user's, or a Process that cannot be read) counts for no
-/// one. Unsupported when no socket has a count, or at a run's first reading; returns the
-/// counters for the next reading as well.
+/// one, and one to the machine itself (loopback) is no network traffic, as loopback is no
+/// interface (see [`interface_counters`]). Unsupported when no socket has a count, or at a
+/// run's first reading; returns the counters for the next reading as well.
 pub(crate) fn traffic(
     now: i64,
     sockets: &[Socket],
@@ -514,6 +515,9 @@ pub(crate) fn traffic(
     let mut at: HashMap<ProcessId, usize> = HashMap::new();
     for s in sockets {
         let (SocketHolder::Pid(pid), Some(bytes)) = (s.holder, s.bytes) else { continue };
+        if s.remote.ip().to_canonical().is_loopback() {
+            continue;
+        }
         let Some(&(id, name)) = by_pid.get(&pid) else { continue };
         let moved = match prev.by_inode.get(&s.inode) {
             Some(before) if bytes.received >= before.received && bytes.sent >= before.sent => TcpBytes {

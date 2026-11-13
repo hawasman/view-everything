@@ -238,3 +238,30 @@ fn the_stretch_names_the_process_that_moved_the_most_bytes() {
     // A past Moment shows that second's traffic.
     assert_eq!(rows(&traffic(&net, Moment::At(104))), vec![("rsync", 0, 2_000)], "a sample keeps the Processes that moved bytes");
 }
+
+#[test]
+fn a_connection_to_the_machine_itself_is_no_network_traffic() {
+    let to = |mut socket: Socket, remote: &str| {
+        socket.remote = remote.parse().unwrap();
+        socket
+    };
+    let (perf, net) = recorder(
+        vec![(10, "firefox"), (20, "steam")],
+        vec![
+            vec![
+                tcp(1, pid(10), 0, 0),
+                to(tcp(2, pid(20), 0, 0), "127.0.0.1:4000"),
+                to(tcp(3, pid(20), 0, 0), "[::ffff:127.0.0.1]:4000"),
+            ],
+            vec![
+                tcp(1, pid(10), 300, 30),
+                to(tcp(2, pid(20), 9_000, 9_000), "127.0.0.1:4000"),
+                to(tcp(3, pid(20), 9_000, 9_000), "[::ffff:127.0.0.1]:4000"),
+            ],
+        ],
+    );
+    for t in [100, 101] {
+        perf.tick(t);
+    }
+    assert_eq!(rows(&traffic(&net, Moment::Live)), vec![("firefox", 300, 30)]);
+}
