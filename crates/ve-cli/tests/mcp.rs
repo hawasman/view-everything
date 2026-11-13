@@ -237,6 +237,8 @@ impl Backend for Machine {
                 remote: "93.184.216.34:443".parse().unwrap(),
                 state: State::Established,
                 holder: SocketHolder::Pid(u32::from(pid)),
+                inode: 0,
+                bytes: None,
             })
             .collect();
         sockets.push(Socket {
@@ -245,6 +247,8 @@ impl Backend for Machine {
             remote: "0.0.0.0:0".parse().unwrap(),
             state: State::Listen,
             holder: SocketHolder::Unknown,
+            inode: 0,
+            bytes: None,
         });
         Reading::Value(sockets)
     }
