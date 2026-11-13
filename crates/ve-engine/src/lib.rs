@@ -5,6 +5,7 @@
 pub mod agents;
 pub mod apps;
 mod busy;
+pub mod cleaner;
 pub mod format;
 pub mod launch;
 mod live;
@@ -90,6 +91,8 @@ pub struct Shared {
     pub duplicates: Mutex<DuplicateState>,
     /// Entries the Cleaner last found as Cleanables, for `is:cleanable`.
     pub cleanables: Mutex<CleanableSet>,
+    /// The Cleaner's rules, look and latest Cleanables.
+    pub cleaner: cleaner::Cleaner,
     pub hash_progress: HashProgress,
     /// The Duplicate Exclusions Query text, as set in Settings.
     pub duplicate_exclusions: Mutex<String>,
@@ -252,6 +255,7 @@ impl Engine {
             busy: AtomicBool::new(true),
             duplicates: Mutex::new(DuplicateState::default()),
             cleanables: Mutex::new(CleanableSet::default()),
+            cleaner: cleaner::Cleaner::default(),
             hash_progress: HashProgress::default(),
             duplicate_exclusions: Mutex::new(String::new()),
             remote_names: Mutex::new(HashMap::new()),
@@ -1470,6 +1474,7 @@ mod tests {
             busy: AtomicBool::new(false),
             duplicates: Mutex::new(DuplicateState::default()),
             cleanables: Mutex::new(CleanableSet::default()),
+            cleaner: cleaner::Cleaner::default(),
             hash_progress: HashProgress::default(),
             duplicate_exclusions: Mutex::new(String::new()),
             remote_names: Mutex::new(HashMap::new()),

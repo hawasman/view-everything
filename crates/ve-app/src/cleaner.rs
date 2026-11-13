@@ -1,7 +1,5 @@
-//! The Cleaner: Cleanables found from the Index by Cleanup Rules, reviewed as a Cleanup Plan
-//! and removed permanently by Clean (ADR-0008). The rules themselves are in `rules`.
-
-mod rules;
+//! The Cleaner page: the Cleanables the engine's Cleaner found (`ve_engine::cleaner`), reviewed
+//! as a Cleanup Plan and removed permanently by Clean (ADR-0008).
 
 use crate::categories::CategoryPanel;
 use crate::format;
@@ -16,19 +14,15 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, Size, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use rules::{CAN_ELEVATE, Cleanable, CommandReport, Group, Rule, Rules, admin_clean, admin_command, clean, foreign};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Instant, SystemTime};
-use ve_engine::tasks::{Outcome, TaskKind};
+use ve_core::{Category, CategoryMap, Totals};
+use ve_engine::cleaner::rules::{CAN_ELEVATE, Cleanable, CommandReport, Group, admin_command};
+use ve_engine::cleaner::{self, Ages, Planned};
+use ve_engine::tasks::TaskKind;
 use ve_engine::view::{CategoryRow, EXTENSIONS_PER_CATEGORY};
 use ve_engine::{Repaint, Shared};
-
-/// Least time between two looks that only follow the Index moving on.
-const RELOOK_THROTTLE: std::time::Duration = std::time::Duration::from_secs(5);
-use ve_core::{Category, CategoryMap, EntryId, Totals};
 use ve_scan::VolumeInfo;
 
 type Key = (String, PathBuf);
@@ -65,39 +59,18 @@ impl EventEmitter<ShowInBrowse> for CleanerPage {}
 pub struct CleanerPage {
     shared: Arc<Shared>,
     repaint: Repaint,
-    volumes: Vec<VolumeInfo>,
-    rules: Rules,
-    /// When `cleanup.toml` was last read, as its modification time (None: no such file).
-    rules_stamp: Option<SystemTime>,
-    /// Age limits in days for pre-ticking temporary files and build artefacts.
-    temp_days: u64,
-    build_days: u64,
-    /// Index generation `cleanables` was found in.
-    seen: Option<u64>,
-    /// When the last look started, for the throttle on looking again as the Index moves.
-    last_look: Instant,
-    relook_scheduled: bool,
-    /// A look for Cleanables is running on a background thread. Nothing it has not told apart
-    /// into yours and admin-only is offered, so a Cleanable never shows up as cleanable early.
-    looking: bool,
-    /// The user cancelled the look: none starts until they ask again or something changes.
-    paused: bool,
-    /// The running look is measuring what it found, not yet checking Entries.
-    sizing: Arc<AtomicBool>,
-    /// Cancel flag of the running look, so Cancel works for a look with no Task too.
-    look_cancel: Arc<AtomicBool>,
+    /// The engine's Cleanables as last taken (`Found::version`).
+    version: u64,
     /// The Clean running (or last run) is the admin step, so its button is the one that spins.
     cleaning_admin: bool,
-    /// Counts the changes (rules, Volumes, age limits) that make a running look's answer stale.
-    epoch: u64,
-    cleanables: Vec<Cleanable>,
+    cleanables: Arc<Vec<Cleanable>>,
     /// Cleanables already shown, so one that appears later is pre-ticked once and a choice of the
     /// user's stays.
     known: HashSet<Key>,
     ticked: HashSet<Key>,
     /// Cleanables the user does not own (or anything inside them): never in the normal Clean,
     /// only in the admin step, and never pre-ticked.
-    admin: Vec<Cleanable>,
+    admin: Arc<Vec<Cleanable>>,
     admin_ticked: HashSet<Key>,
     /// Why each Cleanable of the last admin step was not removed.
     admin_report: Vec<(PathBuf, String)>,
@@ -145,32 +118,11 @@ fn breakdown<'a>(items: impl Iterator<Item = &'a Cleanable>, map: &CategoryMap) 
     (rows, whole)
 }
 
-/// Whatever left the disk leaves the Index, skipped-because-vanished included. One look-up per
-/// folder: a Clean of many files in one folder would otherwise search its children once per file.
-fn drop_from_index(shared: &Shared, outcome: &rules::Outcome) {
-    let vanished = outcome
-        .skipped
-        .iter()
-        .filter(|(p, _)| std::fs::symlink_metadata(p).is_err())
-        .map(|(p, _)| p);
-    let mut by_folder: HashMap<&std::path::Path, HashSet<&str>> = HashMap::new();
-    for path in outcome.removed.iter().chain(vanished) {
-        if let (Some(folder), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) {
-            by_folder.entry(folder).or_default().insert(name);
-        }
+fn ages(settings: &Settings) -> Ages {
+    Ages {
+        temp_days: settings.cleaner_temp_days,
+        build_days: settings.cleaner_build_days,
     }
-    let mut index = shared.index.write();
-    for (folder, names) in by_folder {
-        let Some(dir) = index.find_path(folder) else {
-            continue;
-        };
-        let gone: Vec<EntryId> = index.children(dir).filter(|&c| names.contains(index.name(c))).collect();
-        index.remove_children(dir, &gone);
-    }
-}
-
-fn rules_stamp() -> Option<SystemTime> {
-    std::fs::metadata(cleanup_path()?).ok()?.modified().ok()
 }
 
 /// Where `group` sits in `Group::ALL`.
@@ -187,27 +139,16 @@ impl CleanerPage {
         settings: &Settings,
         cx: &mut Context<Self>,
     ) -> Self {
+        shared.cleaner.configure(cleanup_path(), volumes, ages(settings));
         Self {
             shared,
             repaint,
-            volumes,
-            rules: rules::load(cleanup_path().as_deref()),
-            rules_stamp: rules_stamp(),
-            temp_days: settings.cleaner_temp_days,
-            build_days: settings.cleaner_build_days,
-            seen: None,
-            last_look: Instant::now(),
-            relook_scheduled: false,
-            looking: false,
-            paused: false,
-            sizing: Arc::new(AtomicBool::new(false)),
-            look_cancel: Arc::new(AtomicBool::new(false)),
+            version: 0,
             cleaning_admin: false,
-            epoch: 0,
-            cleanables: Vec::new(),
+            cleanables: Arc::default(),
             known: HashSet::new(),
             ticked: HashSet::new(),
-            admin: Vec::new(),
+            admin: Arc::default(),
             admin_ticked: HashSet::new(),
             admin_report: Vec::new(),
             report: Vec::new(),
@@ -232,7 +173,7 @@ impl CleanerPage {
     /// Counts the groups and the plans, and picks the tab the list shows with its Cleanables.
     fn recount(&mut self) {
         let mut per_group = [0; 3];
-        for c in &self.cleanables {
+        for c in self.cleanables.iter() {
             per_group[group_ix(c.rule.group)] += 1;
         }
         let sum = |plan: Vec<&Cleanable>| (plan.len(), plan.iter().map(|c| c.on_disk).sum());
@@ -270,7 +211,7 @@ impl CleanerPage {
     /// Sums the Category breakdown again for what it covers. The Entries inside each Cleanable
     /// were read off the UI thread with the look; this only adds up their per-extension totals.
     fn rebuild_breakdown(&self, cx: &mut Context<Self>) {
-        let all = self.cleanables.iter().chain(&self.admin);
+        let all = self.cleanables.iter().chain(self.admin.iter());
         let plan = self.plan().into_iter().chain(self.admin_plan());
         let (rows, whole) = if self.breakdown_plan {
             breakdown(plan, &self.categories)
@@ -286,170 +227,45 @@ impl CleanerPage {
     }
 
     pub fn set_volumes(&mut self, volumes: Vec<VolumeInfo>, cx: &mut Context<Self>) {
-        self.volumes = volumes;
-        self.invalidate();
+        self.shared.cleaner.set_volumes(volumes);
         cx.notify();
     }
 
     /// Takes the age limits; new ones start the Cleanup Plan over with the new pre-ticking.
     pub fn set_settings(&mut self, settings: &Settings, cx: &mut Context<Self>) {
-        if (self.temp_days, self.build_days) != (settings.cleaner_temp_days, settings.cleaner_build_days) {
-            self.temp_days = settings.cleaner_temp_days;
-            self.build_days = settings.cleaner_build_days;
+        if self.shared.cleaner.set_ages(ages(settings)) {
             self.known.clear();
             self.ticked.clear();
-            self.invalidate();
             self.changed(cx);
             cx.notify();
         }
     }
 
-    /// The next `refresh` looks again, and a look already running is forgotten.
-    fn invalidate(&mut self) {
-        self.seen = None;
-        self.paused = false;
-        self.epoch += 1;
-    }
-
     /// Whether the first look for Cleanables is still running.
     pub fn looking(&self) -> bool {
-        self.looking && self.seen.is_none()
+        self.shared.cleaner.looking()
     }
 
-    /// Starts looking for Cleanables again when the Index or `cleanup.toml` changed since the
-    /// last look. The look, with the ownership walk over every Cleanable, runs on a background
-    /// thread; what the page shows meanwhile is the last look's answer.
+    /// Has the engine look for Cleanables again when the Index or `cleanup.toml` changed, and
+    /// takes the answer of a look that finished since.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        let stamp = rules_stamp();
-        if stamp != self.rules_stamp {
-            self.rules_stamp = stamp;
-            self.rules = rules::load(cleanup_path().as_deref());
-            self.invalidate();
+        cleaner::refresh(&self.shared);
+        let found = self.shared.cleaner.found();
+        if found.version != self.version {
+            self.version = found.version;
+            self.apply(found.own, found.admin);
+            self.changed(cx);
+            cx.notify();
         }
-        if self.looking || self.paused {
-            return;
-        }
-        let generation = self.shared.index.read().generation();
-        if self.seen == Some(generation) {
-            return;
-        }
-        // Looking again only because the Index moved (Live updates) waits out the throttle, so a
-        // busy volume does not re-walk every Cleanable on every generation.
-        if self.seen.is_some() {
-            let since = self.last_look.elapsed();
-            if since < RELOOK_THROTTLE {
-                if !self.relook_scheduled {
-                    self.relook_scheduled = true;
-                    let wait = RELOOK_THROTTLE - since;
-                    cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(wait).await;
-                        this.update(cx, |this, cx| {
-                            this.relook_scheduled = false;
-                            cx.notify();
-                        })
-                        .ok();
-                    })
-                    .detach();
-                }
-                return;
-            }
-        }
-        self.last_look = Instant::now();
-        self.looking = true;
-        let epoch = self.epoch;
-        let (shared, volumes, rules) = (self.shared.clone(), self.volumes.clone(), self.rules.rules.clone());
-        let sizing = self.sizing.clone();
-        // Only a look the page waits on (the first, or after a change of rules or Volumes) is a
-        // Task; looking again as the Index moves on is quiet, or every sync would fill the list.
-        let task = self.seen.is_none().then(|| {
-            shared
-                .tasks
-                .begin_by_app(TaskKind::CleanerSearch, "Look for Cleanables".into(), true)
-        });
-        let cancel = task.as_ref().map_or_else(|| Arc::new(AtomicBool::new(false)), |t| t.cancel_flag());
-        self.look_cancel = cancel.clone();
-        cx.spawn(async move |this, cx| {
-            let found = cx
-                .background_spawn(async move {
-                    // On a thread of its own, which the app-started Task drops to background priority.
-                    let look = move || {
-                        // Paused, it waits before taking the Index: a Sync must not wait on it.
-                        if let Some(task) = &task {
-                            task.enter_thread();
-                            task.wait_while_paused();
-                        }
-                        let index = shared.index.read();
-                        let generation = index.generation();
-                        let progress = |phase: rules::Phase, done: u64, total: u64| {
-                            sizing.store(phase == rules::Phase::Sizing, Ordering::Relaxed);
-                            if let Some(task) = &task {
-                                task.set_progress(done, Some(total));
-                            }
-                        };
-                        let found = rules::find(&index, &volumes, &rules, &cancel, &progress);
-                        drop(index);
-                        // Fail closed: a Cleanable is the user's only if the whole walk says so.
-                        // These walks read the disk: a Paused search stops between them.
-                        let (admin, own): (Vec<_>, Vec<_>) = found.into_iter().partition(|c| {
-                            if let Some(task) = &task {
-                                task.wait_while_paused();
-                            }
-                            !cancel.load(Ordering::Relaxed) && foreign(&c.path, !c.rule.is_command()).is_some()
-                        });
-                        let cancelled = cancel.load(Ordering::Relaxed);
-                        if let Some(task) = task {
-                            task.finish(if cancelled {
-                                Outcome::Cancelled
-                            } else {
-                                Outcome::Done(format!(
-                                    "{} Cleanables found",
-                                    crate::format::count((own.len() + admin.len()) as u64)
-                                ))
-                            });
-                        }
-                        (generation, own, admin, cancelled)
-                    };
-                    std::thread::scope(|scope| scope.spawn(look).join()).unwrap_or_else(|e| std::panic::resume_unwind(e))
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                this.looking = false;
-                match look_verdict(this.epoch, epoch, found.3) {
-                    LookVerdict::Apply => {
-                        this.apply(found.0, found.1, found.2);
-                        this.changed(cx);
-                    }
-                    // Cancelled: no new look until the user asks again or the rules change.
-                    LookVerdict::Pause => this.paused = true,
-                    // Rules or Volumes changed meanwhile: this answer is for something else, so the
-                    // render that follows looks again.
-                    LookVerdict::Stale => {}
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
     }
 
-    /// Hands the Engine the Entries of every Cleanable, for `is:cleanable`.
-    fn publish_entries(&self) {
-        let all = self.cleanables.iter().chain(&self.admin);
-        let mut set = ve_core::BitSet::new(all.clone().map(|c| c.entry.index() + 1).max().unwrap_or(0));
-        all.for_each(|c| set.insert(c.entry.index()));
-        let mut published = self.shared.cleanables.lock();
-        published.set = Arc::new(set);
-        published.version += 1;
-    }
-
-    fn apply(&mut self, generation: u64, own: Vec<Cleanable>, admin: Vec<Cleanable>) {
+    fn apply(&mut self, own: Arc<Vec<Cleanable>>, admin: Arc<Vec<Cleanable>>) {
         self.cleanables = own;
         self.admin = admin;
-        self.seen = Some(generation);
-        self.publish_entries();
+        let ages = self.shared.cleaner.ages();
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
-        for c in &self.cleanables {
-            if self.known.insert(c.key()) && c.pre_ticked(now, self.temp_days, self.build_days) {
+        for c in self.cleanables.iter() {
+            if self.known.insert(c.key()) && c.pre_ticked(now, ages.temp_days, ages.build_days) {
                 self.ticked.insert(c.key());
             }
         }
@@ -462,7 +278,7 @@ impl CleanerPage {
 
     /// What the Cleaner could reclaim, with admin-only Cleanables too: size and count.
     pub fn reclaimable(&self) -> (u64, usize) {
-        let all = self.cleanables.iter().chain(&self.admin);
+        let all = self.cleanables.iter().chain(self.admin.iter());
         (all.clone().map(|c| c.on_disk).sum(), all.count())
     }
 
@@ -496,11 +312,11 @@ impl CleanerPage {
         let paths: Vec<PathBuf> = plan.iter().map(|c| c.path.clone()).collect();
         let total: u64 = plan.iter().map(|c| c.on_disk).sum();
         let command = admin_command(&paths);
-        let items: Vec<(Arc<Rule>, PathBuf, Option<u64>)> = plan.iter().map(|c| (c.rule.clone(), c.path.clone(), None)).collect();
-        let (this, volumes) = (cx.entity(), self.volumes.clone());
+        let items: Vec<Planned> = plan.iter().map(|c| (c.rule.clone(), c.path.clone(), None)).collect();
+        let this = cx.entity();
         window.open_alert_dialog(cx, move |dialog, _, cx| {
             let this = this.clone();
-            let (items, volumes) = (items.clone(), volumes.clone());
+            let items = items.clone();
             dialog
                 .confirm()
                 .title("Clean with admin rights?")
@@ -521,55 +337,24 @@ impl CleanerPage {
                 .ok_text("Clean as admin")
                 .ok_variant(ButtonVariant::Danger)
                 .on_ok(move |_, window, cx| {
-                    this.update(cx, |page, cx| page.start_admin_clean(items.clone(), volumes.clone(), window, cx));
+                    this.update(cx, |page, cx| page.start_admin_clean(items.clone(), window, cx));
                     true
                 })
         });
     }
 
-    fn start_admin_clean(
-        &mut self,
-        plan: Vec<(Arc<Rule>, PathBuf, Option<u64>)>,
-        volumes: Vec<VolumeInfo>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.shared.tasks.is_running(TaskKind::Clean) {
+    fn start_admin_clean(&mut self, plan: Vec<Planned>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(clean) = cleaner::start_admin_clean(&self.shared, plan) else {
             return;
-        }
+        };
         self.cleaning_admin = true;
-        let total = plan.len() as u64;
-        let shared = self.shared.clone();
-        let task = self
-            .shared
-            .tasks
-            .begin(TaskKind::Clean, format!("Clean {total} Cleanables as admin"), false);
-        task.set_progress(0, Some(total));
         cx.notify();
         window
             .spawn(cx, {
                 let this = cx.entity();
                 async move |cx| {
-                    let outcome = cx
-                        .background_executor()
-                        .spawn(async move {
-                            let outcome = admin_clean(&plan, &volumes, &|k| task.set_progress(k as u64, Some(total)), &|| {
-                                // No countable progress while pkexec asks and removes: spin.
-                                task.set_label("Removing as administrator…".into());
-                                task.set_progress(0, None);
-                            });
-                            // Off the UI thread: dropping a large Clean from the Index takes a while.
-                            drop_from_index(&shared, &outcome);
-                            // No set_retry on purpose: a failed Clean is not offered as Retry, since
-                            // re-running a destructive Clean unseen is not what the user asked for.
-                            task.finish(if outcome.skipped.is_empty() {
-                                Outcome::Done(format!("Removed {} item(s)", crate::format::count(outcome.removed.len() as u64)))
-                            } else {
-                                Outcome::Failed(format!("{} item(s) not removed", outcome.skipped.len()))
-                            });
-                            outcome
-                        })
-                        .await;
+                    // Off the UI thread: dropping a large Clean from the Index takes a while.
+                    let outcome = cx.background_executor().spawn(async move { clean.run() }).await;
                     cx.update(|window, cx| {
                         // Wakes the Dashboard and status bar, which read the changed Index.
                         (this.read(cx).repaint)();
@@ -612,23 +397,12 @@ impl CleanerPage {
         let total: u64 = plan.iter().map(|c| c.on_disk).sum();
         let commands = plan.iter().filter(|c| c.rule.is_command()).count();
         let this = cx.entity();
-        let volumes = self.volumes.clone();
-        let (temp_days, build_days) = (self.temp_days, self.build_days);
+        let ages = self.shared.cleaner.ages();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let this = this.clone();
             // Ticked for being old: the age is tested again on disk just before removal.
             let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
-            let items: Vec<(Arc<Rule>, PathBuf, Option<u64>)> = plan
-                .iter()
-                .map(|c| {
-                    let aged = c
-                        .pre_ticked(now, temp_days, build_days)
-                        .then(|| c.age_limit(temp_days, build_days))
-                        .flatten();
-                    (c.rule.clone(), c.path.clone(), aged)
-                })
-                .collect();
-            let volumes = volumes.clone();
+            let items = cleaner::plan(&plan, ages, now);
             let mut what = format!("This permanently removes {} item(s)", plan.len() - commands);
             if commands > 0 {
                 what.push_str(&format!(" and runs {commands} command(s)"));
@@ -643,57 +417,25 @@ impl CleanerPage {
                 .ok_text("Clean")
                 .ok_variant(ButtonVariant::Danger)
                 .on_ok(move |_, window, cx| {
-                    this.update(cx, |page, cx| page.start_clean(items.clone(), volumes.clone(), window, cx));
+                    this.update(cx, |page, cx| page.start_clean(items.clone(), window, cx));
                     true
                 })
         });
     }
 
-    fn start_clean(
-        &mut self,
-        plan: Vec<(Arc<Rule>, PathBuf, Option<u64>)>,
-        volumes: Vec<VolumeInfo>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn start_clean(&mut self, plan: Vec<Planned>, window: &mut Window, cx: &mut Context<Self>) {
         // A Clean cannot run twice, whichever button or dialog started it.
-        if self.shared.tasks.is_running(TaskKind::Clean) {
+        let Some(clean) = cleaner::start_clean(&self.shared, plan) else {
             return;
-        }
+        };
         self.cleaning_admin = false;
-        let shared = self.shared.clone();
-        let total = plan.len() as u64;
-        let task = shared.tasks.begin(TaskKind::Clean, format!("Clean {total} Cleanables"), false);
-        task.set_progress(0, Some(total));
         cx.notify();
         window
             .spawn(cx, {
                 let this = cx.entity();
                 async move |cx| {
-                    let outcome = cx
-                        .background_executor()
-                        .spawn(async move {
-                            let outcome = clean(&plan, &volumes, &|k| task.set_progress(k as u64, Some(total)));
-                            // Whatever a command changed is read back into the Index: only its working
-                            // folder, since a command rule's effect is confined to it (the Volume would
-                            // take minutes to re-walk).
-                            for command in outcome.commands.iter().filter(|c| c.result.is_ok()) {
-                                let folder = shared.index.read().find_path(&command.cwd);
-                                if let Some(folder) = folder {
-                                    let _ = ve_scan::sync_folder(&shared.index, folder, &command.cwd, &shared.progress);
-                                }
-                            }
-                            // Off the UI thread: dropping a large Clean from the Index takes a while.
-                            drop_from_index(&shared, &outcome);
-                            let failed = outcome.commands.iter().filter(|c| !c.succeeded()).count() + outcome.skipped.len();
-                            task.finish(if failed == 0 {
-                                Outcome::Done(format!("Removed {} item(s)", crate::format::count(outcome.removed.len() as u64)))
-                            } else {
-                                Outcome::Failed(format!("{failed} item(s) skipped or failed"))
-                            });
-                            outcome
-                        })
-                        .await;
+                    // Off the UI thread: dropping a large Clean from the Index takes a while.
+                    let outcome = cx.background_executor().spawn(async move { clean.run() }).await;
                     cx.update(|window, cx| {
                         // Wakes the Dashboard and status bar, which read the changed Index.
                         (this.read(cx).repaint)();
@@ -921,12 +663,13 @@ impl Render for CleanerPage {
                 })
                 .when(count + admin_count == 0, |d| d.child(caption("Nothing ticked.", cx)))
         });
-        let problems = (!self.rules.errors.is_empty()).then(|| {
+        let (rules, ages) = (self.shared.cleaner.rules(), self.shared.cleaner.ages());
+        let problems = (!rules.errors.is_empty()).then(|| {
             v_flex()
                 .gap_1()
                 .text_color(warning)
                 .child("Some Cleanup Rules were not read; the others still work:")
-                .children(self.rules.errors.iter().map(|e| div().child(e.clone())))
+                .children(rules.errors.iter().map(|e| div().child(e.clone())))
         });
         let admin_why = if !CAN_ELEVATE {
             Some("This system cannot run the command elevated from here; run it yourself")
@@ -990,14 +733,14 @@ impl Render for CleanerPage {
         // While looking, the empty list says so with a spinner; this row adds only the progress.
         let status = if looking {
             search_task.filter(|t| t.total.is_some_and(|n| n > 0)).map(|t| {
-                let what = if self.sizing.load(Ordering::Relaxed) {
+                let what = if self.shared.cleaner.sizing() {
                     "Cleanables measured"
                 } else {
                     "Entries checked"
                 };
                 task_progress("cleaner-progress", t.done, t.total, what, cx).into_any_element()
             })
-        } else if self.paused {
+        } else if self.shared.cleaner.paused() {
             Some("The search was cancelled.".into_any_element())
         } else {
             Some(
@@ -1017,8 +760,7 @@ impl Render for CleanerPage {
                 row.child(button("cancel-search", "Cancel").small().build(
                     cx,
                     cx.listener(|this, _, _, cx| {
-                        this.look_cancel.store(true, Ordering::Relaxed);
-                        this.shared.tasks.cancel_kind(TaskKind::CleanerSearch);
+                        cleaner::cancel_look(&this.shared);
                         cx.notify();
                     }),
                 ))
@@ -1031,7 +773,7 @@ impl Render for CleanerPage {
                     .build(
                         cx,
                         cx.listener(|this, _, _, cx| {
-                            this.invalidate();
+                            this.shared.cleaner.look_again();
                             cx.notify();
                         }),
                     ),
@@ -1140,7 +882,7 @@ impl Render for CleanerPage {
                 "Cleaner",
                 Some(format!(
                     "Temporary files, caches and build artefacts, found in the Index and confirmed by Cleanup Rules (add your own in cleanup.toml). Pre-ticked: temporary files untouched for {} days and build artefacts whose project is untouched for {} days; the limits are in Settings.",
-                    self.temp_days, self.build_days
+                    ages.temp_days, ages.build_days
                 )),
                 cx,
             ))
@@ -1159,29 +901,11 @@ impl Render for CleanerPage {
     }
 }
 
-/// What a finished look does to the page.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LookVerdict {
-    /// Its answer is current: show it.
-    Apply,
-    /// The user cancelled it and nothing changed since: no new look until asked.
-    Pause,
-    /// Rules or Volumes changed meanwhile: its answer is for something else.
-    Stale,
-}
-
-fn look_verdict(page_epoch: u64, look_epoch: u64, cancelled: bool) -> LookVerdict {
-    match (page_epoch == look_epoch, cancelled) {
-        (false, _) => LookVerdict::Stale,
-        (true, true) => LookVerdict::Pause,
-        (true, false) => LookVerdict::Apply,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the glob would bring gpui's own `test` attribute into scope.
-    use super::{Category, CategoryMap, Cleanable, Totals, breakdown, rules};
+    use super::{Category, CategoryMap, Cleanable, Totals, breakdown};
+    use ve_engine::cleaner::rules;
 
     #[test]
     fn breakdown_sums_extensions_into_categories_largest_first() {
@@ -1206,15 +930,5 @@ mod tests {
         assert_eq!(rows[0].category, Category::Video);
         let code = rows.iter().find(|r| r.category == Category::Code).unwrap();
         assert_eq!((code.totals.on_disk, code.totals.files), (15, 3));
-    }
-
-    #[test]
-    fn a_cancelled_look_pauses_only_while_its_epoch_is_current() {
-        use super::{LookVerdict, look_verdict};
-        assert!(look_verdict(3, 3, false) == LookVerdict::Apply);
-        assert!(look_verdict(3, 3, true) == LookVerdict::Pause);
-        // Rules or Volumes changed meanwhile: neither applied nor latched.
-        assert!(look_verdict(4, 3, true) == LookVerdict::Stale);
-        assert!(look_verdict(4, 3, false) == LookVerdict::Stale);
     }
 }
