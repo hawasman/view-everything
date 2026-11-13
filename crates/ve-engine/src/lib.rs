@@ -12,6 +12,7 @@ pub mod perf;
 pub mod permissions;
 pub mod socket;
 pub mod tasks;
+mod throttle;
 pub mod timeline;
 pub mod view;
 
@@ -25,7 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use tasks::{Outcome, StartedBy, TaskKind, Tasks};
+use tasks::{Outcome, StartedBy, TaskHandle, TaskKind, Tasks};
 use ve_core::owners::{self, LocalDisk, Platform};
 use ve_core::snapshot::{self, Snapshot};
 use ve_core::{BitSet, CategoryMap, EntryId, Filter, Index, Query, QueryContext, Remote, SyncState, Volume, VolumeId};
@@ -213,6 +214,16 @@ impl Engine {
     /// Starts loading the saved Index, then Catch-up or a first scan of the Volumes to index.
     /// `repaint` is called from the engine's threads whenever something a client shows changed.
     pub fn start(config: Config, repaint: Repaint) -> Engine {
+        Self::launch(config, repaint, |repaint| perf::Perf::start(perf::platform_backend(), repaint))
+    }
+
+    /// [`Engine::start`] with Performance samples read from `backend`, taken only by
+    /// `perf.tick`: for driving the engine with fixture samples.
+    pub fn start_with_perf(config: Config, repaint: Repaint, backend: Box<dyn perf::Backend>) -> Engine {
+        Self::launch(config, repaint, |repaint| perf::Perf::manual(backend, repaint))
+    }
+
+    fn launch(config: Config, repaint: Repaint, perf: impl FnOnce(Repaint) -> perf::Perf) -> Engine {
         let Config {
             index_path,
             mounted,
@@ -280,7 +291,9 @@ impl Engine {
         }
         let _ = commands.send(Command::SetLiveHelper(live_helper));
         let _ = queries.send(String::new());
-        let perf = perf::Perf::start(perf::platform_backend(), shared.repaint.clone());
+        let perf = perf(shared.repaint.clone());
+        // App-started Tasks pause while the samples say the machine is busy.
+        throttle::start(&perf.store(), shared.tasks.clone());
         Engine {
             net: net::Net::new(&perf),
             perf,
@@ -317,6 +330,8 @@ impl Engine {
     /// Brings one Location (by identity) up to date now, whatever its refresh interval, and
     /// leaves the others alone.
     pub fn sync_location(&self, identity: String) {
+        // A Sync the app started and that is Paused would hold this one up: it runs anyway.
+        self.shared.tasks.run_anyway_kinds(&[TaskKind::Sync, TaskKind::CatchUp]);
         let _ = self.commands.send(Command::SyncLocation(identity));
     }
 
@@ -346,7 +361,9 @@ impl Engine {
     /// Sync now: every online Volume (not the Remotes) is read again in full, even one Live
     /// updates cover; an NTFS Volume's whole Master File Table is read.
     pub fn sync_now(&self) {
-        // A Sync cannot be started twice: one running or already queued covers this request.
+        // A Sync cannot be started twice: one running or already queued covers this request,
+        // and runs anyway if the app started it and it is Paused.
+        self.shared.tasks.run_anyway_kinds(&[TaskKind::Sync, TaskKind::CatchUp]);
         if self.shared.is_syncing() || self.shared.sync_queued.swap(true, Ordering::Relaxed) {
             return;
         }
@@ -963,9 +980,14 @@ fn sync_volumes(
         };
         shared.tasks.begin_as(kind, label, true, started_by)
     });
+    // Paused from the start when begun while the machine is busy.
+    shared
+        .progress
+        .paused
+        .store(task.as_ref().is_some_and(TaskHandle::is_paused), Ordering::Relaxed);
     thread::scope(|outer| {
         // The entry count moves without a notice, so clients are nudged while a sync runs; the
-        // same loop carries a cancel from the Task to the walk.
+        // same loop carries a cancel, and the Paused state, from the Task to the walk.
         if let Some(task) = &task {
             outer.spawn(|| {
                 while !done.load(Ordering::Relaxed) {
@@ -973,6 +995,7 @@ fn sync_volumes(
                     if task.is_cancelled() {
                         shared.progress.cancel.store(true, Ordering::Relaxed);
                     }
+                    shared.progress.paused.store(task.is_paused(), Ordering::Relaxed);
                     thread::sleep(PROGRESS_NUDGE);
                 }
             });
@@ -983,6 +1006,8 @@ fn sync_volumes(
                 scope.spawn(move || {
                     if let Some(task) = task {
                         task.enter_thread();
+                        // A Paused Sync does not start reading a Location.
+                        task.wait_while_paused();
                     }
                     let cause = format!("volume {}", mount.display());
                     let remote = shared.index.read().volume(*id).is_some_and(|v| v.is_remote());
@@ -1053,6 +1078,7 @@ fn sync_volumes(
     }
     let cancelled = shared.progress.cancelled();
     shared.progress.cancel.store(false, Ordering::Relaxed);
+    shared.progress.paused.store(false, Ordering::Relaxed);
     cancelled
 }
 
@@ -1213,12 +1239,15 @@ impl Drop for HashingDone {
         self.0.hash_progress.done.store(0, Ordering::Relaxed);
         self.0.hash_progress.total.store(0, Ordering::Relaxed);
         self.0.hash_progress.stage.store(0, Ordering::Relaxed);
+        self.0.hash_progress.paused.store(false, Ordering::Relaxed);
         self.0.hashing.store(false, Ordering::Relaxed);
     }
 }
 
-/// Starts a search for Duplicates the user asked for (Rescan), at full speed.
+/// Starts a search for Duplicates the user asked for (Rescan), at full speed. One the app
+/// started is already running: it runs anyway.
 pub fn start_hashing(shared: &Arc<Shared>) {
+    shared.tasks.run_anyway_kinds(&[TaskKind::DuplicateSearch]);
     start_search(shared, StartedBy::User);
 }
 
@@ -1235,6 +1264,8 @@ fn start_search(shared: &Arc<Shared>, started_by: StartedBy) {
         started_by,
     ))));
     let cancel = task.lock().as_ref().expect("just begun").cancel_flag();
+    let paused = task.lock().as_ref().is_some_and(TaskHandle::is_paused);
+    shared.hash_progress.paused.store(paused, Ordering::Relaxed);
     // Redraws the progress while files are hashed, and reports it to the Task.
     {
         let shared = shared.clone();
@@ -1245,6 +1276,7 @@ fn start_search(shared: &Arc<Shared>, started_by: StartedBy) {
                 let total = shared.hash_progress.total.load(Ordering::Relaxed);
                 if let Some(task) = task.lock().as_ref() {
                     task.set_progress(shared.hash_progress.done.load(Ordering::Relaxed), (total > 0).then_some(total));
+                    shared.hash_progress.paused.store(task.is_paused(), Ordering::Relaxed);
                 }
                 (shared.repaint)();
             }

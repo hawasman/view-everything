@@ -373,8 +373,10 @@ impl CleanerPage {
                 .background_spawn(async move {
                     // On a thread of its own, which the app-started Task drops to background priority.
                     let look = move || {
+                        // Paused, it waits before taking the Index: a Sync must not wait on it.
                         if let Some(task) = &task {
                             task.enter_thread();
+                            task.wait_while_paused();
                         }
                         let index = shared.index.read();
                         let generation = index.generation();
@@ -387,9 +389,13 @@ impl CleanerPage {
                         let found = rules::find(&index, &volumes, &rules, &cancel, &progress);
                         drop(index);
                         // Fail closed: a Cleanable is the user's only if the whole walk says so.
-                        let (admin, own): (Vec<_>, Vec<_>) = found
-                            .into_iter()
-                            .partition(|c| !cancel.load(Ordering::Relaxed) && foreign(&c.path, !c.rule.is_command()).is_some());
+                        // These walks read the disk: a Paused search stops between them.
+                        let (admin, own): (Vec<_>, Vec<_>) = found.into_iter().partition(|c| {
+                            if let Some(task) = &task {
+                                task.wait_while_paused();
+                            }
+                            !cancel.load(Ordering::Relaxed) && foreign(&c.path, !c.rule.is_command()).is_some()
+                        });
                         let cancelled = cancel.load(Ordering::Relaxed);
                         if let Some(task) = task {
                             task.finish(if cancelled {

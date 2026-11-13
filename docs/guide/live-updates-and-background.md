@@ -15,6 +15,12 @@ Sync now re-reads in full, even a Volume Live updates is following. Every Sync s
 
 Each Task on the Work page says who started it. The ones the app starts on its own (Catch-up, a periodic Sync, a Duplicate search, a Cleaner search) run at the operating system's lowest CPU and disk priority, whether the window is open or not, so they give way to whatever else the machine is doing: on Linux the idle scheduling class and the idle I/O class, on Windows background processing mode, on macOS the background band. The ones you start (Sync now, Sync this folder, Rescan, Clean, Trash) run at full speed. The Inspector shows a Task's priority.
 
+## Paused while the machine is busy
+
+A Task the app started on its own also pauses when the machine is busy: after about 30 seconds of heavy CPU load (85% or more, the app's own share left out) or memory load (90% or more in use), it stops reading the disk, keeps its progress and waits. After about 2 quiet minutes it resumes. GPU load does not count. The load is read from the Performance samples, which are taken while the window is open or the app stays in the tray.
+
+The Work page, the Inspector and the tray menu then say **Paused: the machine is busy**, with **Run anyway**, which resumes it at once; it is not paused again. Asking for the same work again (Sync now during a paused Catch-up or periodic Sync, Rescan during a paused Duplicate search) runs it anyway too. A Task you started never pauses.
+
 ## Live updates by platform
 
 | Platform | Live updates | Catch-up at launch |

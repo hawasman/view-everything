@@ -2,14 +2,18 @@
 //! Empty Trash, Compare) that clients list. Cheap to clone; usable from any thread.
 //!
 //! Every Task records who started it. One the app started on its own (Catch-up, a periodic
-//! Sync, a Duplicate or Cleaner search) runs at the operating system's background priority;
-//! one the user started runs at full speed.
+//! Sync, a Duplicate or Cleaner search) runs at the operating system's background priority and
+//! is Paused while the machine is busy (see `throttle`); one the user started runs at full
+//! speed and is never Paused.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const KEEP_FINISHED: usize = 10;
+
+/// What every client says of a Paused Task, beside Run anyway.
+pub const PAUSED: &str = "Paused: the machine is busy";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskKind {
@@ -90,12 +94,17 @@ pub struct TaskInfo {
     pub started_by: StartedBy,
     /// A thread of the Task runs at background priority (see [`TaskHandle::enter_thread`]).
     pub background: bool,
+    /// Paused while the machine is busy: an app-started Task's threads read nothing meanwhile.
+    pub paused: bool,
 }
 
 struct Entry {
     info: TaskInfo,
     started: Instant,
     cancel: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
+    /// The user chose Run anyway: never Paused again.
+    run_anyway: bool,
 }
 
 #[derive(Default)]
@@ -104,6 +113,8 @@ struct Inner {
     running: Vec<Entry>,
     finished: Vec<TaskInfo>, // newest first
     repaint: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// The machine is busy: app-started Tasks are Paused.
+    machine_busy: bool,
 }
 
 #[derive(Clone, Default)]
@@ -139,10 +150,14 @@ impl Tasks {
 
     pub fn begin_as(&self, kind: TaskKind, label: String, cancellable: bool, started_by: StartedBy) -> TaskHandle {
         let cancel = Arc::new(AtomicBool::new(false));
+        let pause = Arc::new(AtomicBool::new(false));
         let id = {
             let mut g = self.0.lock().unwrap();
             g.next_id += 1;
             let id = g.next_id;
+            // Begun while the machine is busy, it waits for quiet before reading anything.
+            let paused = started_by == StartedBy::App && g.machine_busy;
+            pause.store(paused, Ordering::Relaxed);
             g.running.push(Entry {
                 info: TaskInfo {
                     id,
@@ -157,9 +172,12 @@ impl Tasks {
                     retry: None,
                     started_by,
                     background: false,
+                    paused,
                 },
                 started: Instant::now(),
                 cancel: cancel.clone(),
+                pause: pause.clone(),
+                run_anyway: false,
             });
             id
         };
@@ -168,6 +186,7 @@ impl Tasks {
             tasks: self.clone(),
             id,
             cancel,
+            pause,
             finished: false,
             started_by,
         }
@@ -227,12 +246,66 @@ impl Tasks {
             self.cancel(id);
         }
     }
+
+    /// Whether the machine is busy, as the Performance samples last said.
+    pub fn machine_busy(&self) -> bool {
+        self.0.lock().unwrap().machine_busy
+    }
+
+    /// The machine became busy, or quiet again: every running app-started Task is Paused, or
+    /// resumes. One the user chose Run anyway for stays running; user-started Tasks never pause.
+    pub fn set_machine_busy(&self, busy: bool) {
+        {
+            let mut g = self.0.lock().unwrap();
+            if g.machine_busy == busy {
+                return;
+            }
+            g.machine_busy = busy;
+            for e in g
+                .running
+                .iter_mut()
+                .filter(|e| e.info.started_by == StartedBy::App && !e.run_anyway)
+            {
+                e.pause.store(busy, Ordering::Relaxed);
+                e.info.paused = busy;
+            }
+        }
+        self.notify();
+    }
+
+    /// Run anyway: a Paused Task resumes at once and is not Paused again.
+    pub fn run_anyway(&self, id: u64) {
+        self.run_anyway_where(|e| e.info.id == id);
+    }
+
+    /// Run anyway for every running Task of `kinds`, as asking for one again does.
+    pub fn run_anyway_kinds(&self, kinds: &[TaskKind]) {
+        self.run_anyway_where(|e| kinds.contains(&e.info.kind));
+    }
+
+    /// Run anyway for every Paused Task (the tray's).
+    pub fn run_anyway_all(&self) {
+        self.run_anyway_where(|e| e.info.paused);
+    }
+
+    fn run_anyway_where(&self, chosen: impl Fn(&Entry) -> bool) {
+        {
+            let mut g = self.0.lock().unwrap();
+            for e in g.running.iter_mut().filter(|e| chosen(e)) {
+                e.run_anyway = true;
+                e.pause.store(false, Ordering::Relaxed);
+                e.info.paused = false;
+            }
+        }
+        self.notify();
+    }
 }
 
 pub struct TaskHandle {
     tasks: Tasks,
     id: u64,
     cancel: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
     finished: bool,
     started_by: StartedBy,
 }
@@ -266,6 +339,17 @@ impl TaskHandle {
 
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         self.cancel.clone()
+    }
+
+    /// Whether the Task is Paused because the machine is busy.
+    pub fn is_paused(&self) -> bool {
+        self.pause.load(Ordering::Relaxed)
+    }
+
+    /// Waits while the Task is Paused, or until it is cancelled. Called between units of work,
+    /// with no lock held, so a Paused Task holds up nothing else.
+    pub fn wait_while_paused(&self) {
+        ve_scan::wait_while_paused(&self.pause, &self.cancel);
     }
 
     pub fn started_by(&self) -> StartedBy {
@@ -314,6 +398,7 @@ impl TaskHandle {
                 let e = g.running.remove(pos);
                 let mut info = e.info;
                 info.elapsed = e.started.elapsed();
+                info.paused = false;
                 if !matches!(outcome, Outcome::Failed(_)) {
                     info.retry = None;
                 }

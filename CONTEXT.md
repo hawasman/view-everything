@@ -51,8 +51,12 @@ One full re-walk that brings a Location, or one folder in it, up to date. A Sync
 _Avoid_: rescan, reindex, refresh, resync
 
 **Task**:
-One piece of work the app does in the background: a Sync, a Catch-up, a Duplicate search, a Cleaner search, a Clean, a Trash, an Empty Trash or a Compare. A Task the app started on its own is Paused while the machine is busy; a Task the user started never is.
+One piece of work the app does in the background: a Sync, a Catch-up, a Duplicate search, a Cleaner search, a Clean, a Trash, an Empty Trash or a Compare. Each records who started it. A Task the app started on its own runs at the operating system's background priority and is Paused while the machine is busy; a Task the user started runs at full speed and never is.
 _Avoid_: job, operation, process, activity
+
+**Paused**:
+The state of a Task the app started on its own while the machine is busy: after about 30 s of heavy CPU or memory load (read from the Performance samples; GPU load does not count) it stops reading the disk and keeps its progress, and it resumes after about 2 quiet minutes. The app says "Paused: the machine is busy" with **Run anyway**, which resumes it at once and for good. A Task the user started is never Paused.
+_Avoid_: throttled, suspended, waiting
 
 **Live updates**:
 Following changes to a local Volume while the app runs, from FSEvents on macOS or the opt-in `fanotify` helper on Linux, instead of waiting for a re-walk. On macOS the same source also provides Catch-up, by replaying the changes since the last saved event id.

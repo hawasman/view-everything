@@ -8,7 +8,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::rc::Rc;
 use std::time::Duration;
-use ve_engine::tasks::{Outcome, Tasks};
+use ve_engine::tasks::{Outcome, PAUSED, Tasks};
 
 pub fn duration_text(d: Duration) -> String {
     let secs = d.as_secs();
@@ -54,6 +54,8 @@ pub fn list<T: 'static>(tasks: &Tasks, selected: Option<u64>, inspect: Inspect, 
         let unit = t.kind.unit();
         let progress = if t.total.is_some() || !unit.is_empty() {
             task_progress(("task-progress", id as usize), t.done, t.total, unit, cx)
+        } else if t.paused {
+            div()
         } else {
             h_flex()
                 .gap(px(10.))
@@ -62,6 +64,19 @@ pub fn list<T: 'static>(tasks: &Tasks, selected: Option<u64>, inspect: Inspect, 
                 .child(caption("Working…", cx))
         };
         let tasks = tasks.clone();
+        // Paused: the bar keeps its place, with why and the way out under it.
+        let paused = t.paused.then(|| {
+            let tasks = tasks.clone();
+            h_flex()
+                .gap(px(8.))
+                .items_center()
+                .child(div().flex_1().text_color(warning).child(PAUSED))
+                .child(
+                    button(("task-run-anyway", id as usize), "Run anyway")
+                        .small()
+                        .build(cx, cx.listener(move |_, _, _, _| tasks.run_anyway(id))),
+                )
+        });
         body = body.child(
             row(id)
                 .child(
@@ -80,7 +95,8 @@ pub fn list<T: 'static>(tasks: &Tasks, selected: Option<u64>, inspect: Inspect, 
                             )
                         }),
                 )
-                .child(progress),
+                .child(progress)
+                .children(paused),
         );
     }
     if !finished.is_empty() {
