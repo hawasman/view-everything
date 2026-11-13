@@ -85,6 +85,7 @@ fn read_changes(handle: &File, journal: &Journal, start: i64, progress: &Progres
     let mut next = start;
     let mut buf = vec![0u8; JOURNAL_BUFFER];
     while next < journal.next_usn {
+        progress.wait_while_paused();
         if progress.cancelled() {
             return Err(crate::cancelled_error());
         }

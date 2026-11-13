@@ -35,6 +35,8 @@ impl From<&Record> for EntryMeta {
 
 /// Replaces the contents of `volume` with the tree found in the MFT read from `reader`.
 pub fn load<R: Read + Seek>(index: &SharedIndex, volume: VolumeId, mut reader: R, progress: &Progress) -> io::Result<()> {
+    // A Paused Sync does not start reading the Master File Table; once begun, the read finishes.
+    progress.wait_while_paused();
     let records = mft::read_all(&mut reader, &progress.cancel)?;
     let root = index
         .read()

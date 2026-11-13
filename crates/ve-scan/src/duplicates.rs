@@ -29,6 +29,8 @@ pub struct HashProgress {
     pub stage: AtomicU64,
     pub done: AtomicU64,
     pub total: AtomicU64,
+    /// Set while the search's Task is Paused: no further file is read until it clears.
+    pub paused: AtomicBool,
 }
 
 /// Files with identical content.
@@ -264,11 +266,15 @@ fn hash_stage(
     for (file, slot) in files.iter_mut().zip(results.iter_mut()) {
         by_volume.entry(file.volume).or_default().push((file, slot));
     }
+    // One thread per Volume, at the priority of the thread running the search.
+    let background = crate::priority::current_thread_lowered();
     std::thread::scope(|scope| {
         for (_, batch) in by_volume {
             let (hashed, hits) = (&hashed, &hits);
             scope.spawn(move || {
+                crate::priority::inherit(background);
                 for (file, slot) in batch {
+                    crate::wait_while_paused(&progress.paused, cancel);
                     if cancel.load(Ordering::Relaxed) {
                         return;
                     }
