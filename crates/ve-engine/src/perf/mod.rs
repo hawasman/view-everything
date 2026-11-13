@@ -620,10 +620,7 @@ impl Store {
 
     /// Runs `f` on the Timeline, the newest connections (all of them) and the newest traffic
     /// per Process (every Process), under one lock.
-    pub(crate) fn timeline_live<R>(
-        &self,
-        f: impl FnOnce(&Timeline<Sample>, Option<&Arc<Connections>>, Option<&Arc<Traffic>>) -> R,
-    ) -> R {
+    pub(crate) fn timeline_live<R>(&self, f: impl FnOnce(&Timeline<Sample>, Option<&Arc<Connections>>, Option<&Arc<Traffic>>) -> R) -> R {
         let state = self.state.lock();
         f(&state.timeline, state.live_connections.as_ref(), state.live_traffic.as_ref())
     }

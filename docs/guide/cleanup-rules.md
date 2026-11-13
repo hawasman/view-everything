@@ -55,7 +55,7 @@ Command rules are never run with admin rights.
 
 ## Write your own rules
 
-Rules are written in TOML. The built-in ones ([`builtin.toml`](../../crates/ve-app/src/cleaner/builtin.toml)) use the same format as yours. Yours go in `cleanup.toml` next to `settings.toml`:
+Rules are written in TOML. The built-in ones ([`builtin.toml`](../../crates/ve-engine/src/cleaner/builtin.toml)) use the same format as yours. Yours go in `cleanup.toml` next to `settings.toml`:
 
 | Platform | Folder |
 | --- | --- |

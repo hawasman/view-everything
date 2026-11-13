@@ -5,15 +5,18 @@
 pub mod agents;
 pub mod apps;
 mod busy;
+pub mod cleaner;
 pub mod format;
 pub mod launch;
 mod live;
 pub mod net;
 pub mod perf;
 pub mod permissions;
+pub mod proposals;
 pub mod socket;
 pub mod tasks;
 pub mod timeline;
+pub mod trash;
 pub mod view;
 
 use chrono::{Local, Utc};
@@ -55,6 +58,20 @@ pub type Intervals = HashMap<PathBuf, Duration>;
 /// Tells whichever client is showing the Engine that it should draw again.
 pub type Repaint = Arc<dyn Fn() + Send + Sync>;
 
+/// Why nothing on `volume` can be changed right now, if so: a Remote, an Offline Volume or a
+/// read-only mount.
+pub fn volume_blocker(volume: &ve_core::Volume, volumes: &[VolumeInfo]) -> Option<String> {
+    if volume.is_remote() {
+        return Some("Remote Locations are read-only".into());
+    }
+    if !volume.online {
+        return Some("Offline Volume: it is not mounted, so nothing on it can be changed.".into());
+    }
+    let info = volumes.iter().find(|v| v.mount == volume.mount)?;
+    info.read_only
+        .then(|| format!("{} is mounted read-only, so nothing on it can be changed.", info.mount.display()))
+}
+
 /// What an Engine starts with.
 pub struct Config {
     /// Where the Index is saved, with the Snapshots, the hash cache and the macOS event id
@@ -90,6 +107,8 @@ pub struct Shared {
     pub duplicates: Mutex<DuplicateState>,
     /// Entries the Cleaner last found as Cleanables, for `is:cleanable`.
     pub cleanables: Mutex<CleanableSet>,
+    /// The Cleaner's rules, look and latest Cleanables.
+    pub cleaner: cleaner::Cleaner,
     pub hash_progress: HashProgress,
     /// The Duplicate Exclusions Query text, as set in Settings.
     pub duplicate_exclusions: Mutex<String>,
@@ -121,6 +140,13 @@ pub struct Shared {
     pub permissions: permissions::Store,
     /// Agents' pending approval requests, read through [`Engine::agents`].
     pub agents: agents::Store,
+    /// Agents' Proposals, read and answered through [`Engine::proposals`].
+    pub proposals: proposals::Store,
+    /// How the Trash moves an item; `None` for the operating system's trash.
+    trash_mover: Mutex<Option<trash::Mover>>,
+    /// Counts the Trash Tasks that finished, whichever client started them, so a client that
+    /// shows how much the Trash holds knows to measure it again.
+    pub trash_moves: AtomicU64,
     /// Called from the background threads whenever something a client shows has changed.
     pub repaint: Repaint,
 }
@@ -238,6 +264,7 @@ impl Engine {
             let repaint = repaint.clone();
             tasks.set_repaint(move || repaint());
         }
+        let proposals = proposals::Store::load(index_path.as_deref());
         let shared = Arc::new(Shared {
             index_path,
             index: SharedIndex::new(Index::new()),
@@ -252,6 +279,7 @@ impl Engine {
             busy: AtomicBool::new(true),
             duplicates: Mutex::new(DuplicateState::default()),
             cleanables: Mutex::new(CleanableSet::default()),
+            cleaner: cleaner::Cleaner::default(),
             hash_progress: HashProgress::default(),
             duplicate_exclusions: Mutex::new(String::new()),
             remote_names: Mutex::new(HashMap::new()),
@@ -268,6 +296,9 @@ impl Engine {
             tasks,
             permissions: permissions::Store::default(),
             agents: agents::Store::default(),
+            proposals,
+            trash_mover: Mutex::new(None),
+            trash_moves: AtomicU64::new(0),
             repaint,
         });
         let (commands, command_rx) = mpsc::channel();
@@ -1470,6 +1501,7 @@ mod tests {
             busy: AtomicBool::new(false),
             duplicates: Mutex::new(DuplicateState::default()),
             cleanables: Mutex::new(CleanableSet::default()),
+            cleaner: cleaner::Cleaner::default(),
             hash_progress: HashProgress::default(),
             duplicate_exclusions: Mutex::new(String::new()),
             remote_names: Mutex::new(HashMap::new()),
@@ -1486,6 +1518,9 @@ mod tests {
             tasks: Tasks::new(),
             permissions: Default::default(),
             agents: Default::default(),
+            proposals: proposals::Store::load(None),
+            trash_mover: Mutex::new(None),
+            trash_moves: AtomicU64::new(0),
             repaint: Arc::new(|| {}),
         }
     }

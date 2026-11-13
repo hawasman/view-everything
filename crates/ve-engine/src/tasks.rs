@@ -148,12 +148,29 @@ impl Tasks {
         self.begin_as(kind, label, cancellable, StartedBy::App)
     }
 
+    /// Begins a Task the user started, unless one of `kind` runs already: the check and the
+    /// start are one step, so two clients asking at once never both start it.
+    pub fn begin_alone(&self, kind: TaskKind, label: String, cancellable: bool) -> Option<TaskHandle> {
+        self.start(kind, label, cancellable, StartedBy::User, true)
+    }
+
     /// Begins a Task started by `started_by`, for a caller that decides it at run time.
     pub(crate) fn begin_as(&self, kind: TaskKind, label: String, cancellable: bool, started_by: StartedBy) -> TaskHandle {
+        let Some(task) = self.start(kind, label, cancellable, started_by, false) else {
+            unreachable!("only a Task begun alone is refused");
+        };
+        task
+    }
+
+    /// Begins a Task; with `alone`, none while one of `kind` runs.
+    fn start(&self, kind: TaskKind, label: String, cancellable: bool, started_by: StartedBy, alone: bool) -> Option<TaskHandle> {
         let cancel = Arc::new(AtomicBool::new(false));
         let pause = Arc::new(AtomicBool::new(false));
         let id = {
             let mut g = self.0.lock().unwrap();
+            if alone && g.running.iter().any(|e| e.info.kind == kind) {
+                return None;
+            }
             g.next_id += 1;
             let id = g.next_id;
             // Begun while the machine is busy, it waits for quiet before reading anything.
@@ -183,14 +200,14 @@ impl Tasks {
             id
         };
         self.notify();
-        TaskHandle {
+        Some(TaskHandle {
             tasks: self.clone(),
             id,
             cancel,
             pause,
             finished: false,
             started_by,
-        }
+        })
     }
 
     pub fn running(&self) -> Vec<TaskInfo> {
@@ -467,5 +484,15 @@ mod tests {
         let tasks = Tasks::new();
         drop(tasks.begin(TaskKind::Sync, "x".into(), true));
         assert_eq!(tasks.finished()[0].outcome, Some(Outcome::Failed("stopped".into())));
+    }
+
+    #[::core::prelude::v1::test]
+    fn a_task_begun_alone_is_refused_while_one_of_its_kind_runs() {
+        let tasks = Tasks::new();
+        let first = tasks.begin_alone(TaskKind::Clean, "x".into(), false).unwrap();
+        assert!(tasks.begin_alone(TaskKind::Clean, "y".into(), false).is_none());
+        assert!(tasks.begin_alone(TaskKind::Sync, "z".into(), false).is_some());
+        first.finish(Outcome::Done("done".into()));
+        assert!(tasks.begin_alone(TaskKind::Clean, "y".into(), false).is_some());
     }
 }

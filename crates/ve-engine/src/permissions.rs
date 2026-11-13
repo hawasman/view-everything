@@ -3,7 +3,7 @@
 //! see [`crate::agents`]); the Live updates helper is asked for once granted, and a refused
 //! authentication forgets it again. Revoking can come from any client of the handle, so a revoke
 //! undoes the Permission fully here: it stops the Live updates helper, has the host remove the
-//! login entry, or refuses the agent from its next request on.
+//! login entry, or refuses the agent from its next request on (a read, or a Proposal).
 
 use crate::Engine;
 use parking_lot::Mutex;
@@ -20,16 +20,23 @@ pub enum Kind {
     StartAtLogin,
     /// An agent (an MCP client of `ve mcp serve`) may read one Module.
     Agent,
+    /// An agent may make Proposals in one Module: a Permission of its own, apart from reading.
+    AgentProposals,
 }
 
 impl Kind {
+    /// Whether it is granted to an agent, on one Module, by approving the agent's code.
+    pub fn is_agent(self) -> bool {
+        matches!(self, Kind::Agent | Kind::AgentProposals)
+    }
+
     /// The subject a Permission of this kind is granted on. An agent's Permission names the
-    /// agent instead, so its kind has only the generic word.
+    /// agent instead, so its kinds have only the generic word.
     pub fn subject(self) -> &'static str {
         match self {
             Kind::LiveHelper => "ve-fanotify",
             Kind::StartAtLogin => "view-everything",
-            Kind::Agent => "agent",
+            Kind::Agent | Kind::AgentProposals => "agent",
         }
     }
 
@@ -39,6 +46,7 @@ impl Kind {
             Kind::LiveHelper => "Live updates helper",
             Kind::StartAtLogin => "Start at login",
             Kind::Agent => "Agent access",
+            Kind::AgentProposals => "Agent proposals",
         }
     }
 
@@ -48,6 +56,7 @@ impl Kind {
             Kind::LiveHelper => "Revoking stops the helper; it is not started again until granted again",
             Kind::StartAtLogin => "Revoking removes the login entry",
             Kind::Agent => "Revoking refuses the agent's next request; it has to be approved again",
+            Kind::AgentProposals => "Revoking refuses the agent's next Proposal; it has to be approved again",
         }
     }
 }
@@ -62,7 +71,8 @@ pub struct Permission {
     /// kept no time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granted_at: Option<i64>,
-    /// The Module an agent may read (`Files`, `Performance`, ...); `None` for the other kinds.
+    /// The Module an agent may read or propose in (`Files`, `Performance`, ...); `None` for the
+    /// other kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     /// The key `ve mcp serve` issued the agent on first contact: a client presenting another key
@@ -126,25 +136,25 @@ impl Store {
         (hooks.save)(&list).map_err(|e| format!("Could not save the Permissions: {e}"))
     }
 
-    /// Records an agent's Permission, replacing the one the same agent name held on the same
-    /// Module (an older key), and stores the list.
+    /// Records an agent's Permission, replacing the one of the same kind the same agent name
+    /// held on the same Module (an older key), and stores the list.
     pub(crate) fn grant_agent(&self, permission: Permission) -> Result<(), String> {
         {
             let mut list = self.list.lock();
-            list.retain(|p| !(p.kind == Kind::Agent && p.subject == permission.subject && p.module == permission.module));
+            list.retain(|p| !(p.kind == permission.kind && p.subject == permission.subject && p.module == permission.module));
             list.push(permission);
         }
         self.save()
     }
 
-    /// Forgets the agent `name`'s Permission on `module`, or says there is none.
-    pub(crate) fn revoke_agent(&self, name: &str, module: &str) -> Result<(), String> {
+    /// Forgets the agent `name`'s Permission of `kind` on `module`, or says there is none.
+    pub(crate) fn revoke_agent(&self, name: &str, kind: Kind, module: &str) -> Result<(), String> {
         {
             let mut list = self.list.lock();
             let before = list.len();
-            list.retain(|p| !(p.kind == Kind::Agent && p.subject == name && p.module.as_deref() == Some(module)));
+            list.retain(|p| !(p.kind == kind && p.subject == name && p.module.as_deref() == Some(module)));
             if list.len() == before {
-                return Err(format!("No Agent access Permission for {name} on {module}"));
+                return Err(format!("No {} Permission for {name} on {module}", kind.label()));
             }
         }
         self.save()
@@ -192,7 +202,7 @@ impl Permissions<'_> {
     /// first grant's time. An agent is granted by approving its code instead
     /// ([`crate::agents::Agents::approve`]).
     pub fn grant(&self, kind: Kind, at: i64) -> Result<(), String> {
-        if kind == Kind::Agent {
+        if kind.is_agent() {
             return Err("An agent is granted access by approving its code".into());
         }
         {
@@ -205,10 +215,10 @@ impl Permissions<'_> {
         self.store().save()
     }
 
-    /// Undoes the Permission of `kind` on `subject` and forgets it (for an agent: its access to
-    /// every Module). When the undoing fails the Permission stays, and the error says why; when
-    /// only storing the shorter list fails, the Permission is revoked and the error says the
-    /// list was not saved.
+    /// Undoes the Permission of `kind` on `subject` and forgets it (for an agent: its Permission
+    /// of that kind on every Module). When the undoing fails the Permission stays, and the error
+    /// says why; when only storing the shorter list fails, the Permission is revoked and the
+    /// error says the list was not saved.
     pub fn revoke(&self, kind: Kind, subject: &str) -> Result<(), String> {
         let held = |p: &Permission| p.kind == kind && p.subject == subject;
         if !self.store().list.lock().iter().any(held) {
@@ -222,7 +232,7 @@ impl Permissions<'_> {
                 (hooks.remove_login_entry)()?;
             }
             // Every request checks the list, so the agent's next one is refused.
-            Kind::Agent => {}
+            Kind::Agent | Kind::AgentProposals => {}
         }
         self.store().list.lock().retain(|p| !held(p));
         self.store().save()

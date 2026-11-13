@@ -2,7 +2,7 @@
 //! `cleanup.toml`, finding Cleanables from the Index, checking them again on disk and removing
 //! them (ADR-0008).
 
-use crate::trash::volume_blocker;
+use crate::volume_blocker;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};

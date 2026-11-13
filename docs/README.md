@@ -27,4 +27,5 @@
 | [Product requirements](prd.md) | where the app is going, Module by Module |
 | [Architecture decisions](adr/) | why things are built the way they are |
 | [Releasing](releasing.md) | cutting a release and the signing key, for maintainers |
+| [Measuring memory](measuring-memory.md) | taking the Index and cache memory numbers again: a large synthetic Index, `mem_report`, the app in the sandbox |
 | [Changelog](../CHANGELOG.md) | what changed in each version |

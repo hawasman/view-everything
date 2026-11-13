@@ -1,18 +1,21 @@
-//! Agents: MCP clients of `ve mcp serve` asking to read a Module. An agent is its client name
-//! plus a key `ve mcp serve` issued it on first contact; it reads a Module only under an Agent
-//! access [`Permission`] carrying that name, Module and key. Anything else is refused with an
-//! approval request: a 4-character code, held here (never saved) for ten minutes, that the user
-//! approves in Settings → Permissions or with `ve mcp --approve CODE`. The host is told of each
-//! new request so the tray can say who asked for what.
+//! Agents: MCP clients of `ve mcp serve` asking to read a Module, or to make Proposals in it. An
+//! agent is its client name plus a key `ve mcp serve` issued it on first contact; it reads a
+//! Module only under an Agent access [`Permission`] carrying that name, Module and key, and
+//! proposes only under an Agent proposals one: two Permissions, approved apart. Anything else is
+//! refused with an approval request: a 4-character code, held here (never saved) for ten
+//! minutes, that the user approves in Settings → Permissions or with `ve mcp --approve CODE`. The
+//! host is told of each new request so the tray can say who asked for what.
 //!
 //! Each Module's tools are in its own module here ([`files`], [`performance`], [`network`],
-//! [`apps`]). They share what this one defines: row caps and cursors ([`Page`]) and the
-//! [`Refusal`] of a call that cannot be answered.
+//! [`apps`]), and the tools that make and follow Proposals in [`proposals`]. They share what this
+//! one defines: row caps and cursors ([`Page`]) and the [`Refusal`] of a call that cannot be
+//! answered.
 
 pub mod apps;
 pub mod files;
 pub mod network;
 pub mod performance;
+pub mod proposals;
 
 use crate::Engine;
 use crate::permissions::{Kind, Permission};
@@ -93,6 +96,8 @@ impl Module {
                     .into_iter()
                     .map(|t| ToolInfo {
                         module: self,
+                        permission: Kind::Agent,
+                        read_only: true,
                         name: t.name(),
                         description: t.description(),
                         input_schema: t.input_schema(),
@@ -112,17 +117,22 @@ impl Module {
 /// A tool an agent can call, as `tools/list` describes it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolInfo {
-    /// The Module whose Permission it needs.
+    /// The Module it reads or proposes in.
     pub module: Module,
+    /// The kind of Permission it needs on that Module: [`Kind::Agent`] to read,
+    /// [`Kind::AgentProposals`] to propose.
+    pub permission: Kind,
+    /// It changes nothing, not even by submitting a Proposal.
+    pub read_only: bool,
     pub name: &'static str,
     pub description: &'static str,
     /// The JSON Schema of its arguments.
     pub input_schema: Value,
 }
 
-/// Every tool agents can call, by Module.
+/// Every tool agents can call: each Module's reading tools, then the Proposal tools.
 pub fn tools() -> Vec<ToolInfo> {
-    Module::ALL.into_iter().flat_map(Module::tools).collect()
+    Module::ALL.into_iter().flat_map(Module::tools).chain(proposals::tools()).collect()
 }
 
 /// Why a call was not answered.
@@ -133,8 +143,8 @@ pub enum Reason {
     ApprovalPending,
     /// The agent has no Permission, and no app runs to ask the user.
     NotApproved,
-    /// The Module is only read by the running app (its recorder, its program list), and none
-    /// runs.
+    /// The Module is only read by the running app (its recorder, its program list), or the
+    /// call makes or follows a Proposal, which the running app holds; and none runs.
     NotRunning,
     UnknownTool,
     BadArguments,
@@ -147,6 +157,17 @@ pub enum Reason {
     Loading,
     /// No saved Index to read (no app running, and none built yet).
     NoIndex,
+    /// A Proposal names Entries of a Remote, which is read-only and has no Trash; `paths` says
+    /// which.
+    Remote,
+    /// A Proposal names Entries of an Offline Volume, which cannot be changed until it is
+    /// mounted again; `paths` says which.
+    Offline,
+    /// The agent has as many Proposals waiting for the user as it may.
+    TooManyPending,
+    /// No Proposal of this agent has that id (never made, made by another agent, or answered
+    /// so long ago it was forgotten).
+    NoProposal,
     /// Not the agent's doing: the app answered what `ve mcp` could not read, or the agent's key
     /// could not be kept. Calling again may work.
     Failed,
@@ -163,6 +184,10 @@ pub struct Refusal {
     /// When that code expires, in Unix seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
+    /// The paths the refusal is about, for [`Reason::Remote`], [`Reason::Offline`] and a
+    /// Proposal's [`Reason::BadPath`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
 }
 
 impl Refusal {
@@ -172,23 +197,26 @@ impl Refusal {
             message: message.into(),
             code: None,
             expires_at: None,
+            paths: Vec::new(),
         }
     }
 
     /// The refusal of an agent waiting for the user to approve `request`.
     pub fn pending(request: &Request, now: i64) -> Refusal {
-        let Request { code, module, .. } = request;
+        let code = &request.code;
         let minutes = request.minutes_left(now);
+        let what = request.what();
         Refusal {
             reason: Reason::ApprovalPending,
             message: format!(
-                "approval pending, code {code}: this agent may not read {module} yet. Ask the user to approve code {code} \
+                "approval pending, code {code}: this agent may not {what} yet. Ask the user to approve code {code} \
                  in view-everything (Settings → Permissions) or by running `ve mcp --approve {code}`, then call again. \
                  The code expires in {minutes} minute{}.",
                 if minutes == 1 { "" } else { "s" }
             ),
             code: Some(code.clone()),
             expires_at: Some(request.expires_at),
+            paths: Vec::new(),
         }
     }
 
@@ -207,6 +235,12 @@ impl Refusal {
             Reason::UnknownTool,
             format!("unknown tool `{name}`; the tools are {}", names.join(", ")),
         )
+    }
+
+    /// This refusal, about `paths`.
+    pub fn with_paths(mut self, paths: Vec<String>) -> Refusal {
+        self.paths = paths;
+        self
     }
 }
 
@@ -351,13 +385,18 @@ pub struct Agent {
     pub key: String,
 }
 
-/// An agent's request for a Module, waiting for the user to approve its code.
+/// An agent's request to read a Module, or to make Proposals in it, waiting for the user to
+/// approve its code.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
     pub code: String,
     /// The agent's name.
     pub agent: String,
     pub module: String,
+    /// The Permission approving grants: [`Kind::Agent`] to read the Module,
+    /// [`Kind::AgentProposals`] to propose in it.
+    #[serde(default = "read_kind")]
+    pub kind: Kind,
     /// Unix seconds.
     pub requested_at: i64,
     /// Unix seconds; the code cannot be approved from then on.
@@ -367,10 +406,23 @@ pub struct Request {
     key: String,
 }
 
+/// The kind of a request from an engine that only had reading requests.
+fn read_kind() -> Kind {
+    Kind::Agent
+}
+
 impl Request {
     /// Whole minutes, rounded up, until the code expires at `now` (Unix seconds); 0 once it has.
     pub fn minutes_left(&self, now: i64) -> u64 {
         (self.expires_at - now).max(0).unsigned_abs().div_ceil(60)
+    }
+
+    /// "read Files", "make Proposals in Files": what approving lets the agent do.
+    pub fn what(&self) -> String {
+        match self.kind {
+            Kind::AgentProposals => format!("make Proposals in {}", self.module),
+            _ => format!("read {}", self.module),
+        }
     }
 }
 
@@ -404,14 +456,11 @@ impl Engine {
     }
 }
 
-/// Whether `list` holds a Permission for `agent` (name and key) on `module`. Shared with
-/// `ve mcp serve` reading the saved settings when no app runs.
-pub fn allowed(list: &[Permission], agent: &Agent, module: &str) -> bool {
+/// Whether `list` holds a Permission of `kind` for `agent` (name and key) on `module`. Shared
+/// with `ve mcp serve` reading the saved settings when no app runs.
+pub fn allowed(list: &[Permission], agent: &Agent, kind: Kind, module: &str) -> bool {
     list.iter().any(|p| {
-        p.kind == Kind::Agent
-            && p.subject == agent.name
-            && p.module.as_deref() == Some(module)
-            && p.key.as_deref() == Some(agent.key.as_str())
+        p.kind == kind && p.subject == agent.name && p.module.as_deref() == Some(module) && p.key.as_deref() == Some(agent.key.as_str())
     })
 }
 
@@ -453,11 +502,13 @@ impl Agents<'_> {
         *self.store().on_request.lock() = Some(Arc::new(on_request));
     }
 
-    /// Whether `agent` may read `module` at `now` (Unix seconds). A first contact, a revoked
-    /// agent or a known name with another key is refused with a request: the one already
-    /// pending for the same agent, key and Module, else a new one the host is told of.
-    pub fn access(&self, agent: &Agent, module: &str, now: i64) -> Access {
-        if allowed(&self.engine.permissions().list(), agent, module) {
+    /// Whether `agent` holds the Permission of `kind` on `module` at `now` (Unix seconds): to
+    /// read it ([`Kind::Agent`]) or to propose in it ([`Kind::AgentProposals`]). A first
+    /// contact, a revoked agent or a known name with another key is refused with a request: the
+    /// one already pending for the same agent, key, kind and Module, else a new one the host is
+    /// told of.
+    pub fn access(&self, agent: &Agent, kind: Kind, module: &str, now: i64) -> Access {
+        if allowed(&self.engine.permissions().list(), agent, kind, module) {
             return Access::Allowed;
         }
         let request = {
@@ -465,7 +516,7 @@ impl Agents<'_> {
             pending.retain(|r| r.expires_at > now);
             if let Some(held) = pending
                 .iter()
-                .find(|r| r.agent == agent.name && r.key == agent.key && r.module == module)
+                .find(|r| r.agent == agent.name && r.key == agent.key && r.kind == kind && r.module == module)
             {
                 return Access::Pending(held.clone());
             }
@@ -473,6 +524,7 @@ impl Agents<'_> {
                 code: new_code(&pending),
                 agent: agent.name.clone(),
                 module: module.to_owned(),
+                kind,
                 requested_at: now,
                 expires_at: now + CODE_LIFETIME,
                 key: agent.key.clone(),
@@ -496,8 +548,8 @@ impl Agents<'_> {
     }
 
     /// Approves the request with `code` (any letter case) at `now`: the agent's key may read
-    /// the Module from now on, replacing an older key under the same name. Returns the
-    /// Permission granted; an unknown or expired code grants nothing.
+    /// the Module (or propose in it) from now on, replacing an older key under the same name.
+    /// Returns the Permission granted; an unknown or expired code grants nothing.
     pub fn approve(&self, code: &str, now: i64) -> Result<Permission, String> {
         let code = code.trim().to_ascii_uppercase();
         let request = {
@@ -514,7 +566,7 @@ impl Agents<'_> {
             request
         };
         let permission = Permission {
-            kind: Kind::Agent,
+            kind: request.kind,
             subject: request.agent,
             granted_at: Some(now),
             module: Some(request.module),
@@ -525,9 +577,10 @@ impl Agents<'_> {
         saved.map(|()| permission)
     }
 
-    /// Revokes the agent `name`'s access to `module`: its next request is refused.
-    pub fn revoke(&self, name: &str, module: &str) -> Result<(), String> {
-        let revoked = self.engine.shared.permissions.revoke_agent(name, module);
+    /// Revokes the agent `name`'s Permission of `kind` on `module`: its next request of that
+    /// kind is refused.
+    pub fn revoke(&self, name: &str, kind: Kind, module: &str) -> Result<(), String> {
+        let revoked = self.engine.shared.permissions.revoke_agent(name, kind, module);
         (self.engine.shared.repaint)();
         revoked
     }
@@ -536,7 +589,7 @@ impl Agents<'_> {
     /// no Permission for the Module yet (with the request's code, before anything else is
     /// looked at), a bad call, or nothing to read yet.
     pub fn read(&self, module: Module, agent: &Agent, tool: &str, arguments: Value, now: i64) -> Result<Value, Refusal> {
-        if let Access::Pending(request) = self.access(agent, module.name(), now) {
+        if let Access::Pending(request) = self.access(agent, Kind::Agent, module.name(), now) {
             return Err(Refusal::pending(&request, now));
         }
         let engine = self.engine;
@@ -546,5 +599,16 @@ impl Agents<'_> {
             Module::Network => network::answer(&engine.net, tool, arguments, now),
             Module::Apps => apps::answer(engine, tool, arguments),
         }
+    }
+
+    /// Answers `agent`'s call of the Proposal tool `tool` at `now`, or refuses it: no Agent
+    /// proposals Permission for the tool's Module yet (with the request's code, before anything
+    /// else is looked at), or a Proposal that cannot be made.
+    pub fn propose(&self, agent: &Agent, tool: &str, arguments: Value, now: i64) -> Result<Value, Refusal> {
+        let tool = proposals::Tool::from_name(tool).ok_or_else(|| Refusal::unknown_tool(tool))?;
+        if let Access::Pending(request) = self.access(agent, Kind::AgentProposals, tool.module().name(), now) {
+            return Err(Refusal::pending(&request, now));
+        }
+        proposals::answer(self.engine, agent, tool, arguments, now)
     }
 }

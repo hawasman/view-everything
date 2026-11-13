@@ -524,7 +524,9 @@ pub(crate) fn traffic(
     let mut processes: Vec<ProcessTraffic> = Vec::new();
     let mut at: HashMap<ProcessId, usize> = HashMap::new();
     for s in sockets {
-        let (SocketHolder::Pid(pid), Some(bytes)) = (s.holder, s.bytes) else { continue };
+        let (SocketHolder::Pid(pid), Some(bytes)) = (s.holder, s.bytes) else {
+            continue;
+        };
         let remote = s.remote.ip().to_canonical();
         if remote.is_loopback() || remote == s.local.ip().to_canonical() {
             continue;

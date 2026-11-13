@@ -157,7 +157,11 @@ fn a_socket_of_an_unreadable_process_counts_for_no_one() {
         vec![
             vec![tcp(1, SocketHolder::Unknown, 0, 0), tcp(2, pid(10), 0, 0), tcp(3, pid(99), 0, 0)],
             // 99 has ended: it is not in the process table read with the sockets.
-            vec![tcp(1, SocketHolder::Unknown, 9_000, 9_000), tcp(2, pid(10), 500, 5), tcp(3, pid(99), 7, 7)],
+            vec![
+                tcp(1, SocketHolder::Unknown, 9_000, 9_000),
+                tcp(2, pid(10), 500, 5),
+                tcp(3, pid(99), 7, 7),
+            ],
         ],
     );
     for t in [100, 101] {
@@ -259,7 +263,11 @@ fn the_stretch_names_the_process_that_moved_the_most_bytes() {
     // Up to 102, only firefox's burst and rsync's first 2 000 bytes were recorded.
     assert_eq!(net.summary(0, 102).top_process(), Some(&firefox));
     // A past Moment shows that second's traffic.
-    assert_eq!(rows(&traffic(&net, Moment::At(104))), vec![("rsync", 0, 2_000)], "a sample keeps the Processes that moved bytes");
+    assert_eq!(
+        rows(&traffic(&net, Moment::At(104))),
+        vec![("rsync", 0, 2_000)],
+        "a sample keeps the Processes that moved bytes"
+    );
 }
 
 #[test]
