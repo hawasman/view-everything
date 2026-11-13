@@ -62,6 +62,15 @@ What the same recorder kept of the [Network](network.md): times, `at` and `null`
 | `network.interfaces` | `from`, `to` (default: the last hour), `limit`, `cursor` | `seconds` with a network reading, `connections` (distinct connections those seconds kept, each the top 200), and `rows` by interface, busiest first: `name`, `received` and `sent` (bytes over the stretch), `last_seen`. An interface that went away keeps its row |
 | `network.connections` | `at`, `limit`, `cursor` | the connections read at that second (`time`), open conversations first: `protocol`, `local`, `remote` (`null` while it has none), `state`, `holder` (`process`, `nobody` for one the kernel is closing, `unknown` for another user's process) with its `pid` and `process` name. Live lists every one; a past second keeps the top 200 |
 
+### Apps
+
+What the [Apps](apps.md) page lists, read by the running app.
+
+| Tool | Arguments | Answers |
+| --- | --- | --- |
+| `apps.programs` | `name` (any letter case), `limit`, `cursor` | the installed programs, largest first by On-disk Size: `sized` (how many have a size) and their `on_disk_size`, and `rows`: `name`, `kind`, `source`, `id`, `version`, `installed`, `on_disk_size` (`null` when none of its folders is in the Index) and `roots` (each folder with its size) |
+| `apps.startup` | `limit`, `cursor` | the Startup items: `name`, `kind` (`Autostart` or `systemd unit`), `id`, `command`, `source` (the file that defines it), `scope` (`User` or `System`), `only_in` and `not_in` (desktops), `drop_ins` |
+
 A call that cannot be answered comes back as an error result whose `structuredContent.refusal` says why, so the agent can correct it:
 
 | `reason` | When |
@@ -73,11 +82,11 @@ A call that cannot be answered comes back as an error result whose `structuredCo
 | `bad_arguments` | an argument the tool does not take, `from` after `to`, or a cursor it did not hand out |
 | `unknown_tool` | any other tool name |
 | `no_sample` | nothing was recorded at that second: the recorder did not run then, or it is more than an hour ago |
-| `loading` | the app is still reading its Index |
-| `not_running` | the Module is read by the running app (Performance, Network), and it is not running |
+| `loading` | the app is still reading its Index (Files, and `apps.programs`, whose sizes come from it) |
+| `not_running` | the Module is read by the running app (Performance, Network, Apps), and it is not running |
 | `no_index` | no app running and no saved Index yet |
 | `failed` | not the agent's doing: the app's answer could not be read, the agent's key could not be saved, or the running app is an older version that does not answer this Module |
 
 ## With the app closed
 
-`ve mcp serve` asks the running app, so answers include the last seconds of changes. With the app closed it reads the saved Index file for the Files tools, for an agent already approved in the saved settings. Reading the file, `files.locations` cannot say which Locations are online (`null`), `is:offline` is a bad Query, and `dupe:`, `is:duplicate` and `is:cleanable` find nothing. An agent that is not approved yet gets `not_approved`: start the app so it can ask you. The Performance and Network tools need the app running (`not_running`): its recorder keeps the hour in memory, not on disk.
+`ve mcp serve` asks the running app, so answers include the last seconds of changes. With the app closed it reads the saved Index file for the Files tools, for an agent already approved in the saved settings. Reading the file, `files.locations` cannot say which Locations are online (`null`), `is:offline` is a bad Query, and `dupe:`, `is:duplicate` and `is:cleanable` find nothing. An agent that is not approved yet gets `not_approved`: start the app so it can ask you. The Performance, Network and Apps tools need the app running (`not_running`): its recorder keeps the hour in memory, not on disk, and the Apps page's list is the app's.

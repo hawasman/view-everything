@@ -23,7 +23,7 @@ It keeps one Index of every file on your Volumes, saved between runs, so searchi
 - **Query:** results as you type, with modifiers such as `ext:`, `size:>1gb`, `dm:yesterday`, `regex:`, `dupe:` and `owner:`. [More](docs/guide/query-language.md)
 - **Saved Queries** for the searches you repeat.
 - **Command line:** `ve find`, `ve top` and `ve export` read the same Index. [More](docs/guide/command-line.md)
-- **Agents:** `ve mcp serve` lets your own agent (any MCP client) read the Index, once you approve it. [More](docs/guide/agents.md)
+- **Agents:** `ve mcp serve` lets your own agent (any MCP client) read the Index, Performance, Network and Apps, once you approve it for each. [More](docs/guide/agents.md)
 
 ### See
 - **Overview:** three answers, most severe first: what is filling the disk (the fullest Location, what can be cleaned up, the largest Owner), what is slowing the machine (CPU and memory over the last hour, the busiest process) and what is talking (the busiest interface, the hour's connections, the process holding the most open); each opens its page. Then what is indexed, the Trash, when the Index was last synced, a used bar per Location, the Categories, and the largest and most recently modified files.

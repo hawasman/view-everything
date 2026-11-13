@@ -5,10 +5,11 @@
 //! approves in Settings → Permissions or with `ve mcp --approve CODE`. The host is told of each
 //! new request so the tray can say who asked for what.
 //!
-//! Each Module's tools are in its own module here ([`files`], [`performance`], [`network`]).
-//! They share what this one defines: row caps and cursors ([`Page`]) and the [`Refusal`] of a
-//! call that cannot be answered.
+//! Each Module's tools are in its own module here ([`files`], [`performance`], [`network`],
+//! [`apps`]). They share what this one defines: row caps and cursors ([`Page`]) and the
+//! [`Refusal`] of a call that cannot be answered.
 
+pub mod apps;
 pub mod files;
 pub mod network;
 pub mod performance;
@@ -26,6 +27,7 @@ use std::sync::Arc;
 pub const FILES: &str = "Files";
 pub const PERFORMANCE: &str = "Performance";
 pub const NETWORK: &str = "Network";
+pub const APPS: &str = "Apps";
 
 /// Rows an answer holds unless the call asks for another number.
 pub const DEFAULT_LIMIT: usize = 50;
@@ -38,10 +40,11 @@ pub enum Module {
     Files,
     Performance,
     Network,
+    Apps,
 }
 
 impl Module {
-    pub const ALL: [Module; 3] = [Module::Files, Module::Performance, Module::Network];
+    pub const ALL: [Module; 4] = [Module::Files, Module::Performance, Module::Network, Module::Apps];
 
     /// Its name, as its Permission and approval requests carry it.
     pub fn name(self) -> &'static str {
@@ -49,6 +52,7 @@ impl Module {
             Module::Files => FILES,
             Module::Performance => PERFORMANCE,
             Module::Network => NETWORK,
+            Module::Apps => APPS,
         }
     }
 
@@ -58,6 +62,7 @@ impl Module {
             Module::Files => "files",
             Module::Performance => "performance",
             Module::Network => "network",
+            Module::Apps => "apps",
         }
     }
 
@@ -76,15 +81,7 @@ impl Module {
             Module::Files => files::Tool::from_name(name).is_some(),
             Module::Performance => performance::Tool::from_name(name).is_some(),
             Module::Network => network::Tool::from_name(name).is_some(),
-        }
-    }
-
-    /// The names of its tools.
-    fn tool_names(self) -> Vec<&'static str> {
-        match self {
-            Module::Files => files::Tool::ALL.map(files::Tool::name).to_vec(),
-            Module::Performance => performance::Tool::ALL.map(performance::Tool::name).to_vec(),
-            Module::Network => network::Tool::ALL.map(network::Tool::name).to_vec(),
+            Module::Apps => apps::Tool::from_name(name).is_some(),
         }
     }
 
@@ -107,6 +104,7 @@ impl Module {
             Module::Files => of!(files::Tool),
             Module::Performance => of!(performance::Tool),
             Module::Network => of!(network::Tool),
+            Module::Apps => of!(apps::Tool),
         }
     }
 }
@@ -204,7 +202,7 @@ impl Refusal {
 
     /// A tool name no Module has.
     pub fn unknown_tool(name: &str) -> Refusal {
-        let names: Vec<_> = Module::ALL.into_iter().flat_map(Module::tool_names).collect();
+        let names: Vec<_> = tools().into_iter().map(|t| t.name).collect();
         Refusal::new(
             Reason::UnknownTool,
             format!("unknown tool `{name}`; the tools are {}", names.join(", ")),
@@ -253,22 +251,28 @@ impl Page {
         self.limit
     }
 
+    /// Where this page of `total` rows ends, and the cursor for the rows after it.
+    fn end(self, total: usize) -> (usize, Option<String>) {
+        let end = self.offset.saturating_add(self.limit).min(total);
+        (end, (end < total).then(|| end.to_string()))
+    }
+
     /// Cuts this page out of `items`: the rows, and the cursor for the ones after them.
     pub fn cut<T>(self, items: Vec<T>) -> (Vec<T>, Option<String>) {
-        let total = items.len();
-        let end = self.offset.saturating_add(self.limit).min(total);
+        let (end, next) = self.end(items.len());
         let page = items.into_iter().skip(self.offset).take(end.saturating_sub(self.offset)).collect();
-        (page, (end < total).then(|| end.to_string()))
+        (page, next)
     }
 
     /// `fields` with `rows` paged beside them: `total`, the page's `rows`, `next_cursor` and
-    /// `limit`.
-    fn answer<T>(self, rows: Vec<T>, row: impl Fn(T) -> Value, fields: Value) -> Value {
+    /// `limit`. Only the page's rows are turned into JSON.
+    fn answer<T>(self, rows: impl ExactSizeIterator<Item = T>, row: impl Fn(T) -> Value, fields: Value) -> Value {
         let total = rows.len();
-        let (page, next) = self.cut(rows);
+        let (end, next) = self.end(total);
+        let page = rows.skip(self.offset).take(end.saturating_sub(self.offset)).map(row).collect();
         let mut answer = fields;
         answer["total"] = json!(total);
-        answer["rows"] = Value::Array(page.into_iter().map(row).collect());
+        answer["rows"] = Value::Array(page);
         answer["next_cursor"] = json!(next);
         answer["limit"] = json!(self.limit);
         answer
@@ -527,20 +531,19 @@ impl Agents<'_> {
         revoked
     }
 
-    /// Refuses `agent` with its approval request until it may read `module` at `now`.
-    fn check(&self, agent: &Agent, module: &str, now: i64) -> Result<(), Refusal> {
-        match self.access(agent, module, now) {
-            Access::Allowed => Ok(()),
-            Access::Pending(request) => Err(Refusal::pending(&request, now)),
-        }
-    }
-
-    /// Answers `agent`'s call of `module`'s tool `tool` at `now` (Unix seconds), or refuses it.
+    /// Answers `agent`'s call of `module`'s tool `tool` at `now` (Unix seconds), or refuses it:
+    /// no Permission for the Module yet (with the request's code, before anything else is
+    /// looked at), a bad call, or nothing to read yet.
     pub fn read(&self, module: Module, agent: &Agent, tool: &str, arguments: Value, now: i64) -> Result<Value, Refusal> {
+        if let Access::Pending(request) = self.access(agent, module.name(), now) {
+            return Err(Refusal::pending(&request, now));
+        }
+        let engine = self.engine;
         match module {
-            Module::Files => self.files(agent, tool, arguments, now),
-            Module::Performance => self.performance(agent, tool, arguments, now),
-            Module::Network => self.network(agent, tool, arguments, now),
+            Module::Files => files::read(engine, tool, arguments),
+            Module::Performance => performance::answer(&engine.perf, tool, arguments, now),
+            Module::Network => network::answer(&engine.net, tool, arguments, now),
+            Module::Apps => apps::answer(engine, tool, arguments),
         }
     }
 }

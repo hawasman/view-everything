@@ -5,7 +5,8 @@
 //! file (`ve mcp serve` with no app running). A call that cannot be answered is a [`Refusal`]
 //! the agent can act on.
 
-use super::{Agent, Agents, Page, Reason, Refusal, cursor_schema, limit_schema};
+use super::{Page, Reason, Refusal, cursor_schema, limit_schema};
+use crate::Engine;
 use crate::socket::search::{self, LastSynced, Row, Select};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -255,19 +256,14 @@ pub fn answer(index: &Index, categories: &CategoryMap, query: Option<&Query>, ca
     Ok(answer)
 }
 
-impl Agents<'_> {
-    /// Answers `agent`'s call of the Files tool `tool` at `now` on the live Index, or refuses it:
-    /// no Permission yet (with the request's code, before anything else is looked at), a bad
-    /// call, or the Index still loading.
-    pub fn files(&self, agent: &Agent, tool: &str, arguments: Value, now: i64) -> Result<Value, Refusal> {
-        self.check(agent, super::FILES, now)?;
-        let call = Call::parse(tool, arguments)?;
-        let engine = self.engine;
-        if engine.is_loading_index() {
-            return Err(Refusal::new(Reason::Loading, search::LOADING));
-        }
-        let query = engine.parse_query(call.query()).map_err(Refusal::bad_query)?;
-        let index = engine.shared.index.read();
-        answer(&index, &engine.shared.categories, query.as_ref(), &call, true)
+/// Answers the Files tool `tool` on `engine`'s live Index, or refuses it: a bad call, or the
+/// Index still loading.
+pub(super) fn read(engine: &Engine, tool: &str, arguments: Value) -> Result<Value, Refusal> {
+    let call = Call::parse(tool, arguments)?;
+    if engine.is_loading_index() {
+        return Err(Refusal::new(Reason::Loading, search::LOADING));
     }
+    let query = engine.parse_query(call.query()).map_err(Refusal::bad_query)?;
+    let index = engine.shared.index.read();
+    answer(&index, &engine.shared.categories, query.as_ref(), &call, true)
 }

@@ -3,7 +3,7 @@
 //! read the running app's recorder (its one-hour Timeline), so they answer only while the app
 //! runs; a reading that was not taken is `null`, never zero.
 
-use super::{Agent, Agents, Page, Reason, Refusal, at_schema, cursor_schema, largest_first, limit_schema, range_schema};
+use super::{Page, Reason, Refusal, at_schema, cursor_schema, largest_first, limit_schema, range_schema};
 use crate::perf::{Perf, Process, Processes};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -89,8 +89,9 @@ struct ProcessesArgs {
     cursor: Option<String>,
 }
 
-/// Answers the Performance tool `name` on `perf` at `now`.
-fn answer(perf: &Perf, name: &str, arguments: Value, now: i64) -> Result<Value, Refusal> {
+/// Answers the Performance tool `name` from `perf`'s recorder at `now` (Unix seconds), or
+/// refuses it: a bad call, or nothing recorded at the Moment asked for.
+pub(super) fn answer(perf: &Perf, name: &str, arguments: Value, now: i64) -> Result<Value, Refusal> {
     match Tool::from_name(name).ok_or_else(|| Refusal::unknown_tool(name))? {
         Tool::Summary => {
             let args: SummaryArgs = super::arguments(name, arguments)?;
@@ -129,7 +130,7 @@ fn answer(perf: &Perf, name: &str, arguments: Value, now: i64) -> Result<Value, 
                 by.then(a.id.cmp(&b.id))
             });
             Ok(page.answer(
-                rows,
+                rows.into_iter(),
                 |p| row(&table, p),
                 json!({ "at": args.at, "time": table.time, "sort": args.sort }),
             ))
@@ -151,14 +152,4 @@ fn row(table: &Processes, p: &Process) -> Value {
         "started": table.started(p),
         "cpu_seconds": table.cpu_seconds(p),
     })
-}
-
-impl Agents<'_> {
-    /// Answers `agent`'s call of the Performance tool `tool` at `now` (Unix seconds) from the
-    /// recorder, or refuses it: no Permission yet (with the request's code, before anything else
-    /// is looked at), a bad call, or nothing recorded at the Moment asked for.
-    pub fn performance(&self, agent: &Agent, tool: &str, arguments: Value, now: i64) -> Result<Value, Refusal> {
-        self.check(agent, super::PERFORMANCE, now)?;
-        answer(&self.engine.perf, tool, arguments, now)
-    }
 }

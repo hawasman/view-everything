@@ -4,12 +4,11 @@
 //! app runs; a reading that was not taken is `null`, never zero. Per-process traffic is not read
 //! yet, so no tool answers it.
 
-use super::{Agent, Agents, Page, Reason, Refusal, at_schema, cursor_schema, limit_schema, range_schema};
+use super::{Page, Reason, Refusal, at_schema, cursor_schema, limit_schema, range_schema};
 use crate::net::{Connection, Holder, InterfaceSummary, Net};
 use crate::perf::Reading;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::Arc;
 
 /// One of the Network tools.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,9 +42,9 @@ impl Tool {
                  Read-only."
             }
             Tool::Connections => {
-                "The open TCP and UDP connections and listening sockets at a second of the last hour, or Live: protocol, \
-                 local and remote address, state and the process holding each, open conversations first. A past second \
-                 keeps the top 200. Answers one page of rows and a cursor. Read-only."
+                "The open TCP and UDP Connections, listening ones included, at a second of the last hour, or Live: \
+                 protocol, local and remote address, state and the Process holding each, open conversations first. A past \
+                 second keeps the top 200. Answers one page of rows and a cursor. Read-only."
             }
         }
     }
@@ -80,8 +79,9 @@ struct ConnectionsArgs {
     cursor: Option<String>,
 }
 
-/// Answers the Network tool `name` on `net` at `now`.
-fn answer(net: &Net, name: &str, arguments: Value, now: i64) -> Result<Value, Refusal> {
+/// Answers the Network tool `name` from `net`'s recorder at `now` (Unix seconds), or refuses
+/// it: a bad call, or nothing recorded at the Moment asked for.
+pub(super) fn answer(net: &Net, name: &str, arguments: Value, now: i64) -> Result<Value, Refusal> {
     match Tool::from_name(name).ok_or_else(|| Refusal::unknown_tool(name))? {
         Tool::Interfaces => {
             let args: InterfacesArgs = super::arguments(name, arguments)?;
@@ -91,7 +91,7 @@ fn answer(net: &Net, name: &str, arguments: Value, now: i64) -> Result<Value, Re
             let mut rows = summary.interfaces;
             rows.sort_by(|a, b| b.moved().cmp(&a.moved()).then_with(|| a.name.cmp(&b.name)));
             Ok(page.answer(
-                rows,
+                rows.into_iter(),
                 |i: InterfaceSummary| {
                     json!({ "name": &*i.name, "received": i.received, "sent": i.sent, "last_seen": i.last_seen })
                 },
@@ -117,16 +117,16 @@ fn answer(net: &Net, name: &str, arguments: Value, now: i64) -> Result<Value, Re
                 )));
             };
             Ok(page.answer(
-                connections.list.clone(),
-                |c| row(&c),
+                connections.list.iter(),
+                |c| row(c),
                 json!({ "at": args.at, "time": sample.time }),
             ))
         }
     }
 }
 
-/// One connection as a row.
-fn row(c: &Arc<Connection>) -> Value {
+/// One Connection as a row.
+fn row(c: &Connection) -> Value {
     let (holder, pid, process) = match &c.holder {
         Holder::Process { id, name } => ("process", Some(id.pid), Some(&**name)),
         Holder::Nobody => ("nobody", None, None),
@@ -141,14 +141,4 @@ fn row(c: &Arc<Connection>) -> Value {
         "pid": pid,
         "process": process,
     })
-}
-
-impl Agents<'_> {
-    /// Answers `agent`'s call of the Network tool `tool` at `now` (Unix seconds) from the
-    /// recorder, or refuses it: no Permission yet (with the request's code, before anything else
-    /// is looked at), a bad call, or nothing recorded at the Moment asked for.
-    pub fn network(&self, agent: &Agent, tool: &str, arguments: Value, now: i64) -> Result<Value, Refusal> {
-        self.check(agent, super::NETWORK, now)?;
-        answer(&self.engine.net, tool, arguments, now)
-    }
 }

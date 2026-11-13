@@ -1,6 +1,6 @@
 //! The socket's agent methods: `agents.pending` (result: the pending [`Request`]s),
 //! `agents.approve` (`{"code"}`; result: `{"agent", "module", "granted_at"}`), and one method
-//! per [`Module`] agents read, named for it (`files`, `performance`, `network`):
+//! per [`Module`] agents read, named for it (`files`, `performance`, `network`, `apps`):
 //! `{"agent": {"name", "key"}, "tool", "arguments"}`; result: `{"answer"}` or `{"refusal"}`,
 //! see [`crate::agents`].
 //!

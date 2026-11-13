@@ -18,6 +18,7 @@ use ve_engine::perf::{
     Backend, Counters, CpuCounters, CpuTimes, Memory, Perf, ProcessCounters, ProcessCountersTable, ProcessId, Reading,
 };
 use ve_engine::socket::{self, Claim};
+use ve_engine::apps::Sources;
 use ve_engine::{Config, Engine, Phase};
 use ve_scan::VolumeInfo;
 
@@ -311,7 +312,9 @@ fn an_agent_is_refused_until_approved_then_answered_in_capped_pages() {
             "performance.summary",
             "performance.processes",
             "network.interfaces",
-            "network.connections"
+            "network.connections",
+            "apps.programs",
+            "apps.startup"
         ]
     );
     assert!(tools.as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
@@ -428,6 +431,8 @@ fn with_no_app_running_an_approved_agent_reads_the_saved_index() {
     let unread = mcp.call("performance.summary", json!({}));
     assert_eq!(refusal(&unread)["reason"], "not_running", "the recorder runs in the app");
     let unread = mcp.call("network.connections", json!({}));
+    assert_eq!(refusal(&unread)["reason"], "not_running");
+    let unread = mcp.call("apps.programs", json!({}));
     assert_eq!(refusal(&unread)["reason"], "not_running");
 
     // Same name, no key on file for it here: a new key, which the settings do not approve.
@@ -564,5 +569,105 @@ fn network_is_refused_until_approved_then_answered_from_the_recorder() {
         refusal(&mcp.call("network.connections", json!({})))["reason"],
         "approval_pending"
     );
+    engine.shutdown();
+}
+
+#[test]
+fn apps_is_refused_until_approved_then_answered_with_on_disk_sizes() {
+    let (engine_data, fixture, home) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let write = |path: &str, text: &str| {
+        let path = fixture.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    };
+    // A Steam game in the indexed Location, a pacman package and an /opt folder that are not.
+    let steamapps = "user/.local/share/Steam/steamapps";
+    write(
+        &format!("{steamapps}/appmanifest_70.acf"),
+        "\"AppState\"\n{\n\t\"appid\"\t\t\"70\"\n\t\"name\"\t\t\"Half-Life\"\n\t\"installdir\"\t\t\"HL\"\n}\n",
+    );
+    write(&format!("{steamapps}/common/HL/hl.bin"), &"x".repeat(64 * 1024));
+    write("system/var/lib/pacman/local/vim-9.1-1/desc", "%NAME%\nvim\n\n%VERSION%\n9.1-1\n");
+    fs::create_dir_all(fixture.path().join("system/opt/tool")).unwrap();
+    for (file, name) in [("backup.desktop", "Backup"), ("chat.desktop", "Chat")] {
+        write(
+            &format!("user/.config/autostart/{file}"),
+            &format!("[Desktop Entry]\nType=Application\nName={name}\nExec={} --background\n", name.to_lowercase()),
+        );
+    }
+    let volume = VolumeInfo {
+        mount: fixture.path().to_path_buf(),
+        identity: "uuid:apps".into(),
+        fs_type: "ext4".into(),
+        label: "apps".into(),
+        removable: false,
+        network: false,
+        read_only: false,
+    };
+    let engine = Engine::start(
+        Config {
+            index_path: Some(engine_data.path().join("index.bin")),
+            mounted: vec![volume.clone()],
+            volumes: vec![volume],
+            remotes: Vec::new(),
+            intervals: Default::default(),
+            categories: CategoryMap::builtin(),
+            live_helper: false,
+        },
+        Arc::new(|| {}),
+    );
+    engine.apps.set_sources(Some(Sources::new(
+        fixture.path().join("system"),
+        Some(fixture.path().join("user")),
+    )));
+    let (engine, socket_path) = host(engine, home.path());
+    let mut mcp = Mcp::start(&socket_path, home.path(), "apps-agent");
+
+    approve(&mut mcp, "apps.startup", "Apps", &socket_path, home.path());
+    // Sized once the Location is synced and its Owners detected.
+    let mut programs = Value::Null;
+    wait_for("Half-Life's size", || {
+        programs = answer(&mcp.call("apps.programs", json!({}))).clone();
+        programs["rows"][0]["on_disk_size"].as_u64().is_some()
+    });
+    assert_eq!((programs["total"].as_u64(), programs["sized"].as_u64()), (Some(3), Some(1)));
+    let game = &programs["rows"][0];
+    assert_eq!(
+        (&game["name"], &game["kind"], &game["source"], &game["id"]),
+        (&json!("Half-Life"), &json!("Game"), &json!("Steam"), &json!("70"))
+    );
+    assert!(game["on_disk_size"].as_u64().unwrap() >= 64 * 1024, "{game}");
+    assert_eq!(game["roots"][0]["on_disk_size"], game["on_disk_size"]);
+    // The unsized ones after it, by name, with no size rather than 0.
+    let rest: Vec<_> = programs["rows"].as_array().unwrap()[1..]
+        .iter()
+        .map(|r| (r["name"].as_str().unwrap(), r["on_disk_size"].clone()))
+        .collect();
+    assert_eq!(rest, [("tool", Value::Null), ("vim", Value::Null)]);
+    let vim = mcp.call("apps.programs", json!({ "name": "VI" }));
+    assert_eq!(answer(&vim)["rows"][0]["version"], "9.1-1");
+    assert_eq!(answer(&vim)["total"], 1);
+
+    let first = mcp.call("apps.startup", json!({ "limit": 1 }));
+    let first = answer(&first).clone();
+    assert_eq!((first["total"].as_u64(), first["next_cursor"].as_str()), (Some(2), Some("1")));
+    assert_eq!(
+        (&first["rows"][0]["name"], &first["rows"][0]["command"], &first["rows"][0]["scope"]),
+        (&json!("Backup"), &json!("backup --background"), &json!("User"))
+    );
+    let rest = mcp.call("apps.startup", json!({ "limit": 1, "cursor": "1" }));
+    assert_eq!(answer(&rest)["rows"][0]["name"], "Chat");
+    assert_eq!(answer(&rest)["next_cursor"], Value::Null);
+    let bad = mcp.call("apps.startup", json!({ "cursor": "soon" }));
+    assert_eq!(refusal(&bad)["reason"], "bad_arguments");
+
+    // Approving Apps granted nothing else, and revoking it refuses again.
+    assert_eq!(refusal(&mcp.call("network.interfaces", json!({})))["reason"], "approval_pending");
+    engine.agents().revoke("apps-agent", "Apps").unwrap();
+    assert_eq!(refusal(&mcp.call("apps.programs", json!({})))["reason"], "approval_pending");
     engine.shutdown();
 }
