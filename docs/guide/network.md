@@ -20,7 +20,7 @@ An interface that goes away (a VPN that disconnects, a USB tether unplugged) kee
 - A connection that closes counts no more; it never makes a rate go back. A new one counts every byte it moved since it opened. A connection handed to another process (a server passing it to a worker) counts for the process holding it now, from then on.
 - A process that cannot be read, or that ended between the two readings, counts for no one.
 - Click a process to open it in the Inspector.
-- Live lists every process holding a TCP connection, idle ones too; each past second keeps the 200 that moved the most bytes then.
+- Live lists every process holding a TCP connection, idle ones too; each past second keeps the 200 that moved the most bytes then, so scrubbing the Timeline dock to a past Moment shows that second's traffic, with the rates of the two-second reading it falls in.
 
 ## Connections
 
@@ -31,7 +31,7 @@ An interface that goes away (a VPN that disconnects, a USB tether unplugged) kee
 - Click a connection to open its process in the Inspector (command line, user, start time, parent, CPU time); **Show on Performance** there opens Performance → System with that process selected in the table. Its row stays in view as the table re-sorts, until you scroll the table yourself.
 - The list shows about a dozen rows at a time and scrolls; only the rows in view are drawn, so thousands of connections cost no more than a few.
 
-The Overview's "Talking on the network" answer counts the distinct connections the hour's kept seconds hold and names the process holding the most open connections with a remote end now; clicking it opens Network with that process inspected and its first connection at the top of the list.
+The Overview's "Talking on the network" answer counts the distinct connections the hour's kept seconds hold and names the process that moved the most bytes over TCP in the hour (where traffic per process cannot be read, the process holding the most open connections with a remote end now); clicking it opens Network with that process inspected and its first connection at the top of the list.
 
 Connections are read every two seconds, with the process table. Live lists every one; each past second keeps the 200 most worth keeping by state (open conversations first): a UDP socket's bytes, and those of other users' connections, cannot be read without administrator rights, so bytes cannot rank them all.
 
