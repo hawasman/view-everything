@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use ve_core::{EntryId, Index};
+use ve_engine::cleaner::volume_blocker;
 use ve_engine::tasks::{Outcome, TaskKind};
 use ve_engine::{Repaint, Shared};
 use ve_scan::VolumeInfo;
@@ -619,20 +620,6 @@ fn top_level(index: &Index, ids: &[EntryId]) -> Vec<EntryId> {
             true
         })
         .collect()
-}
-
-/// Why nothing on `volume` can be changed right now, if so: a Remote, an Offline Volume or a
-/// read-only mount.
-pub fn volume_blocker(volume: &ve_core::Volume, volumes: &[VolumeInfo]) -> Option<String> {
-    if volume.is_remote() {
-        return Some("Remote Locations are read-only".into());
-    }
-    if !volume.online {
-        return Some("Offline Volume: it is not mounted, so nothing on it can be changed.".into());
-    }
-    let info = volumes.iter().find(|v| v.mount == volume.mount)?;
-    info.read_only
-        .then(|| format!("{} is mounted read-only, so nothing on it can be changed.", info.mount.display()))
 }
 
 /// Why `id` can't go to the Trash, if it can't.
