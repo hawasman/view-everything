@@ -67,15 +67,15 @@ Answers *why* the machine is slow, not only *what* is running: btop-style live v
 ### 5.5 Network
 
 - Without privileges: per-interface throughput, totals and connection lists.
-- Per-app traffic needs elevation on most platforms. The page shows what it can and offers one button, "Show traffic per app (needs administrator)", with an explanation; nothing prompts when the page opens.
-- Per-app history in the Timeline. "Keep recording in the background" is the feature that introduces the privileged service (§9), offered with an explanation once per-app traffic is approved.
+- Per-app traffic comes in two steps. Without privileges, on Linux: TCP only, for the user's own processes, read every two seconds, and the page says so. Complete per-app traffic (UDP, other users' processes, short connections) needs elevation: the page offers one button, "Show traffic per app (needs administrator)", with an explanation; nothing prompts when the page opens.
+- Per-app history in the Timeline, for whichever of the two is on. "Keep recording in the background" is the feature that introduces the privileged service (§9), offered with an explanation once per-app traffic is approved.
 
 ### 5.6 Agent access (MCP and CLI)
 
 - An MCP server and the CLI expose the same core operations.
 - **Read** operations return aggregates by default (ranked folders, top processes, Timeline summaries) with row caps and a continuation cursor, so answers stay small.
-- **Changes** are never applied directly: an agent can only propose a plan (Cleanup Plan, Trash list), which a person approves in the UI or by an explicit CLI confirmation.
-- **Approval:** an agent sees nothing until the user approves it, per Module. An unapproved agent receives a clear refusal saying approval is pending; the user receives a notification (desktop or tray) to approve. Headless:
+- **Changes** are never applied directly: an agent can only make a Proposal (a Cleanup Plan of Cleanables the Cleaner already found, or a Trash list of Entries on local Volumes), which a person applies in the UI or by an explicit CLI confirmation (`ve proposals --apply <ID>`). Never Admin only Cleanables, never a Remote. Each row is checked against the Index again when applied; an unanswered Proposal lapses after 24 hours.
+- **Approval:** an agent sees nothing until the user approves it, per Module; reading a Module and proposing changes in it are separate Permissions. An unapproved agent receives a clear refusal saying approval is pending; the user receives a notification (desktop or tray) to approve. Headless:
   - `ve-cli mcp --list-requests`
   - `ve-cli mcp --approve <CODE>`
 - No model ships in the app; users bring their own agent.

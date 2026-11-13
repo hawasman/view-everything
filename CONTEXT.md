@@ -51,7 +51,7 @@ One full re-walk that brings a Location, or one folder in it, up to date. A Sync
 _Avoid_: rescan, reindex, refresh, resync
 
 **Task**:
-One piece of work the app does in the background: a Sync, a Catch-up, a Duplicate search, a Cleaner search, a Clean, a Trash, an Empty Trash or a Compare.
+One piece of work the app does in the background: a Sync, a Catch-up, a Duplicate search, a Cleaner search, a Clean, a Trash, an Empty Trash or a Compare. A Task the app started on its own is Paused while the machine is busy; a Task the user started never is.
 _Avoid_: job, operation, process, activity
 
 **Live updates**:
@@ -179,8 +179,12 @@ An approval the user granted for something beyond the app's core features, such 
 _Avoid_: consent, grant, access right
 
 **Agent**:
-A program the user runs that asks the app questions over MCP (`ve mcp serve`), such as Claude or an IDE assistant. An agent is its client name plus a key issued on first contact; it reads a Module only under a Permission for that Module, which the user grants by approving the agent's 4-character code. Agents only read.
+A program the user runs that talks to the app over MCP (`ve mcp serve`), such as Claude or an IDE assistant. An agent is its client name plus a key issued on first contact; it reads a Module, or makes Proposals in it, only under a Permission for that, which the user grants by approving the agent's 4-character code. Agents read and propose; only a person applies a change.
 _Avoid_: client, bot, assistant (unqualified)
+
+**Proposal**:
+A list an agent submits for the user to apply or dismiss: a Cleanup Plan of Cleanables the Cleaner already found, or a list of Entries on local Volumes to Trash. A Proposal changes nothing by itself and lapses if left unanswered.
+_Avoid_: request, suggestion, plan (unqualified)
 
 ### Changes
 
