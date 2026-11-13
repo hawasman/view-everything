@@ -1,7 +1,8 @@
 //! Writes a synthetic Index for measuring the Explorer: `gen_index <entries> <out.bin> [identity]`.
 //! Its one Volume is mounted at a path that does not exist, so a sync leaves it as it is. Its
-//! identity is `bench` unless given: another one keeps it an Offline Location beside the folder
-//! `VE_BENCH_MOUNT` names, so that folder can be Synced on top of a large Index.
+//! identity is `bench`, which `VE_BENCH_MOUNT` matches, unless given: another identity matches no
+//! mounted Volume, so it stays an Offline Volume beside the ones the app indexes (a folder
+//! Synced on top of it by `mem_report` or the UI sandbox's `VE_SANDBOX_VOLUME`).
 
 use std::path::Path;
 use ve_core::{EntryMeta, Index, SyncState};

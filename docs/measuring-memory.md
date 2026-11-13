@@ -10,7 +10,7 @@ target/release/examples/gen_index 5000000 /path/to/scratch/index-5m.bin syntheti
 ```
 
 - **Where the Index goes:** a scratch folder, never the real Index in `~/.local/share/view-everything`.
-- **The identity argument:** with `synthetic`, the Index-sized Location is matched by nobody, so it stays an Offline Location next to whatever the app indexes. Without it the identity is `bench`.
+- **The identity argument:** with `synthetic`, the Index-sized Volume matches no mounted Volume, so it stays an Offline Volume next to whatever the app indexes. Without it the identity is `bench`, which `VE_BENCH_MOUNT` matches.
 - **What the Index looks like:** 50k folders of 100 files each. All names differ and all sizes differ, and every file's creation time differs from its modification time. That makes names and `created` worst cases; real names are interned and share sizes.
 
 ## Headless: the Index and each cache
@@ -22,7 +22,7 @@ target/release/examples/mem_report /path/to/scratch/index-5m.bin [/path/to/a/rea
 - **What it measures:** it loads the Index, then builds what the engine keeps beside it: FileOrder, a View for the empty Query and for `ext:mp4`, Category sums and the Duplicates search.
 - **With a folder:** it also adds the folder as a second Location and Syncs it, to show what a Sync leaves on top of a loaded Index.
 - **The table:** each row gives the heap bytes held, the peak while building, live heap, and RSS before and after `malloc_trim`. A counting global allocator supplies the heap figures.
-- **The column list:** after the table it prints every large allocation `Index::load` made, in the order the fields are declared on `Index`. That gives the bytes per Entry of each column.
+- **The column list:** after the table it prints every allocation of 256 KiB or more that `Index::load` left live, in the order each was first made. Deserialization follows the order of `Index`'s fields, so the list reads as the columns in that order. A column of several vectors (`SparseColumn`, `Rank`, `U64Column`) shows as several lines; the small ones (the wide side tables, the folder child runs) are not listed.
 - **Heap is not RSS:** heap counts capacity. Vectors grown by doubling hold pages that are never touched, so RSS is the figure for what the machine pays.
 - **A real folder with Duplicates:** sparse files are enough. `truncate -s 2M f && printf group-1 | dd of=f conv=notrunc` gives a 2 MiB file that costs no disk.
 

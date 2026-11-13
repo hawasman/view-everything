@@ -33,25 +33,24 @@ fn grew(by: usize) {
     PEAK.fetch_max(now, Ordering::Relaxed);
 }
 
-/// Records a large allocation moving from `old` (0: new) to `new` (0: freed).
+/// Records a large allocation moving from `old` (0: new) to `new` (0: freed). A moved one keeps
+/// the order it was first made in.
 fn track(old: usize, new: usize, size: usize) {
     if !TRACK.load(Ordering::Relaxed) {
         return;
     }
     let Ok(mut slots) = BIG.try_lock() else { return };
-    let seq = match slots.iter_mut().find(|s| old != 0 && s.0 == old) {
-        Some(slot) => {
-            let seq = slot.2;
-            *slot = (0, 0, 0);
-            seq
+    let mut seq = None;
+    if let Some(slot) = slots.iter_mut().find(|s| old != 0 && s.0 == old) {
+        seq = Some(slot.2);
+        *slot = (0, 0, 0);
+    }
+    if new != 0 && size >= LARGE {
+        let seq = seq.unwrap_or_else(|| BIG_SEQ.fetch_add(1, Ordering::Relaxed));
+        match slots.iter_mut().find(|s| s.0 == 0) {
+            Some(slot) => *slot = (new, size, seq),
+            None => panic!("more than {SLOTS} large allocations live; raise SLOTS"),
         }
-        None => BIG_SEQ.fetch_add(1, Ordering::Relaxed),
-    };
-    if new != 0
-        && size >= LARGE
-        && let Some(slot) = slots.iter_mut().find(|s| s.0 == 0)
-    {
-        *slot = (new, size, seq);
     }
 }
 
@@ -79,8 +78,9 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn realloc(&self, p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let q = unsafe { System.realloc(p, layout, new_size) };
         if !q.is_null() {
-            LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+            // Counted as if the old block lived until the new one was made, as a move does.
             grew(new_size);
+            LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
             if layout.size() >= LARGE || new_size >= LARGE {
                 track(if layout.size() >= LARGE { p as usize } else { 0 }, q as usize, new_size);
             }
@@ -240,9 +240,9 @@ fn main() {
     ));
     drop(view);
 
-    // The loaded Location is Offline (its folder does not exist), so the search above skipped
-    // it. Online, each of its files of at least the minimum size is a candidate, held while
-    // sizes are compared; its files cannot be read, so the search ends there.
+    // The loaded Volume is an Offline Volume (a Volume is online only once matched to a mount),
+    // so the search above skipped it. Online, each of its files of at least the minimum size is a
+    // candidate, held while sizes are compared; the synthetic sizes all differ, so none is read.
     let candidates = {
         let index = shared.read();
         (0..index.capacity() as u32)
@@ -266,7 +266,7 @@ fn main() {
     );
     let peak = PEAK.load(Ordering::Relaxed) - report.before;
     drop(more);
-    report.row(&format!("Duplicates search with the loaded Location online ({candidates} candidates)"));
+    report.row(&format!("Duplicates search with the loaded Volume online ({candidates} candidates)"));
     println!("  peak per candidate: {:.0} bytes", peak as f64 / candidates.max(1) as f64);
 
     println!();
