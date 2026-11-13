@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use ve_core::{CategoryMap, EntryMeta, Index, SyncState};
 use ve_engine::apps::Sources;
-use ve_engine::net::{InterfaceCounters, Net, Protocol, Socket, SocketHolder, State};
+use ve_engine::net::{InterfaceCounters, Net, Protocol, Socket, SocketHolder, State, TcpBytes};
 use ve_engine::perf::{Backend, Counters, CpuCounters, CpuTimes, Memory, Perf, ProcessCounters, ProcessCountersTable, ProcessId, Reading};
 use ve_engine::socket::{self, Claim};
 use ve_engine::{Config, Engine, Phase};
@@ -237,8 +237,12 @@ impl Backend for Machine {
                 remote: "93.184.216.34:443".parse().unwrap(),
                 state: State::Established,
                 holder: SocketHolder::Pid(u32::from(pid)),
-                inode: 0,
-                bytes: None,
+                inode: u64::from(pid),
+                // Each process receives ten times what it sends, process `pid` `pid` times process 1's.
+                bytes: Some(TcpBytes {
+                    received: self.step * u64::from(pid) * 100,
+                    sent: self.step * u64::from(pid) * 10,
+                }),
             })
             .collect();
         sockets.push(Socket {
@@ -320,11 +324,18 @@ fn an_agent_is_refused_until_approved_then_answered_in_capped_pages() {
             "performance.processes",
             "network.interfaces",
             "network.connections",
+            "network.traffic",
             "apps.programs",
-            "apps.startup"
+            "apps.startup",
+            "files.propose_trash",
+            "files.proposal"
         ]
     );
-    assert!(tools.as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
+    // Only submitting a Proposal is not read-only; nothing is destructive.
+    let read_only: Vec<_> = tools.as_array().unwrap().iter().map(|t| t["annotations"]["readOnlyHint"] == true).collect();
+    assert_eq!(read_only.iter().filter(|r| !**r).count(), 1);
+    assert!(!read_only[names.iter().position(|n| *n == "files.propose_trash").unwrap()], "it submits a Proposal");
+    assert!(tools.as_array().unwrap().iter().all(|t| t["annotations"]["destructiveHint"] == false));
 
     // First contact: refused with a code, before the call itself is looked at.
     let refused = mcp.call("files.find", json!({ "query": "ext:txt" }));
@@ -441,6 +452,12 @@ fn with_no_app_running_an_approved_agent_reads_the_saved_index() {
     assert_eq!(refusal(&unread)["reason"], "not_running");
     let unread = mcp.call("apps.programs", json!({}));
     assert_eq!(refusal(&unread)["reason"], "not_running");
+    // Proposals are held by the running app.
+    let unheld = mcp.call("files.propose_trash", json!({ "paths": ["/w/docs/a.pdf"], "reason": "old" }));
+    assert_eq!(refusal(&unheld)["reason"], "not_running");
+    let listed = ve(&["proposals"], &nobody, home.path());
+    assert_eq!(listed.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&listed.stderr).contains("the app is not running"));
 
     // Same name, no key on file for it here: a new key, which the settings do not approve.
     fs::remove_file(data.join("agent-keys.json")).unwrap();
@@ -499,7 +516,7 @@ fn performance_is_refused_until_approved_then_answered_from_the_recorder() {
 
     // Approving Performance granted nothing else, and revoking it refuses again.
     assert_eq!(refusal(&mcp.call("files.locations", json!({})))["reason"], "approval_pending");
-    engine.agents().revoke("perf-agent", "Performance").unwrap();
+    engine.agents().revoke("perf-agent", ve_engine::permissions::Kind::Agent, "Performance").unwrap();
     assert_eq!(refusal(&mcp.call("performance.summary", json!({})))["reason"], "approval_pending");
     engine.shutdown();
 }
@@ -560,9 +577,30 @@ fn network_is_refused_until_approved_then_answered_from_the_recorder() {
     let gap = mcp.call("network.connections", json!({ "at": t0 - 100 }));
     assert_eq!(refusal(&gap)["reason"], "no_sample");
 
+    // TCP traffic per Process: Live per second, the most first; over a stretch, in bytes.
+    let live = mcp.call("network.traffic", json!({ "limit": 2 }));
+    let live = answer(&live).clone();
+    assert_eq!((live["total"].as_u64(), live["next_cursor"].as_str()), (Some(249), Some("2")));
+    let top = &live["rows"][0];
+    assert_eq!((&top["pid"], &top["process"]), (&json!(249), &json!("proc-249")));
+    let per_second = top["received_per_second"].as_u64().unwrap();
+    assert!(per_second > 0, "{top}");
+    assert_eq!(per_second, 10 * top["sent_per_second"].as_u64().unwrap());
+    assert_eq!(live["rows"][1]["pid"], 248);
+    let stretch = mcp.call("network.traffic", json!({ "from": t0, "to": t0 + 3 }));
+    let stretch = answer(&stretch).clone();
+    let top = &stretch["rows"][0];
+    assert_eq!((&top["pid"], stretch["from"].as_i64()), (&json!(249), Some(t0)));
+    assert_eq!(top["received"].as_u64().unwrap(), 10 * top["sent"].as_u64().unwrap());
+    assert!(top["sent"].as_u64().unwrap() > 0, "{top}");
+    let both = mcp.call("network.traffic", json!({ "at": t0 + 3, "from": t0 }));
+    assert_eq!(refusal(&both)["reason"], "bad_arguments");
+    let gap = mcp.call("network.traffic", json!({ "at": t0 - 100 }));
+    assert_eq!(refusal(&gap)["reason"], "no_sample");
+
     // Approving Network granted nothing else, and revoking it refuses again.
     assert_eq!(refusal(&mcp.call("performance.summary", json!({})))["reason"], "approval_pending");
-    engine.agents().revoke("net-agent", "Network").unwrap();
+    engine.agents().revoke("net-agent", ve_engine::permissions::Kind::Agent, "Network").unwrap();
     assert_eq!(refusal(&mcp.call("network.connections", json!({})))["reason"], "approval_pending");
     engine.shutdown();
 }
@@ -664,7 +702,166 @@ fn apps_is_refused_until_approved_then_answered_with_on_disk_sizes() {
 
     // Approving Apps granted nothing else, and revoking it refuses again.
     assert_eq!(refusal(&mcp.call("network.interfaces", json!({})))["reason"], "approval_pending");
-    engine.agents().revoke("apps-agent", "Apps").unwrap();
+    engine.agents().revoke("apps-agent", ve_engine::permissions::Kind::Agent, "Apps").unwrap();
     assert_eq!(refusal(&mcp.call("apps.programs", json!({})))["reason"], "approval_pending");
+    engine.shutdown();
+}
+
+/// Runs `ve` with `input` on its stdin.
+fn ve_answering(args: &[&str], input: &str, socket: &Path, home: &Path) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ve"))
+        .args(args)
+        .env(socket::PATH_ENV, socket)
+        .env("XDG_DATA_HOME", home.join("data"))
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn an_agent_proposes_a_trash_list_the_user_applies_from_the_shell() {
+    let (engine_data, fixture, home, trash) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    for name in ["old-1.log", "old-2.log", "changed.log", "keep.log"] {
+        fs::write(fixture.path().join(name), "x").unwrap();
+    }
+    let volume = VolumeInfo {
+        mount: fixture.path().to_path_buf(),
+        identity: "uuid:fixture".into(),
+        fs_type: "ext4".into(),
+        label: "fixture".into(),
+        removable: false,
+        network: false,
+        read_only: false,
+    };
+    let engine = Engine::start(
+        Config {
+            index_path: Some(engine_data.path().join("index.bin")),
+            mounted: vec![volume.clone()],
+            volumes: vec![volume],
+            remotes: Vec::new(),
+            intervals: Default::default(),
+            categories: CategoryMap::builtin(),
+            live_helper: false,
+        },
+        Arc::new(|| {}),
+    );
+    wait_for("the first Sync", || {
+        !engine.is_busy() && matches!(engine.shared.status.lock().phase, Phase::Idle) && !engine.shared.tasks.finished().is_empty()
+    });
+    // The test's own Trash: the user's stays out of it.
+    let bin = trash.path().to_path_buf();
+    engine.set_trash_mover(Arc::new(move |path: &Path| {
+        fs::rename(path, bin.join(path.file_name().unwrap())).map_err(|e| e.to_string())
+    }));
+    let remote_file = {
+        let mut index = engine.shared.index.write();
+        let remote = index.add_remote(&ve_core::Remote::new("me@backup", "/srv").unwrap());
+        let root = index.volume(remote).unwrap().root;
+        let file = index.insert(root, "old.log", EntryMeta::default());
+        index.path(file).to_string_lossy().into_owned()
+    };
+    let (engine, socket_path) = host(engine, home.path());
+    let mut mcp = Mcp::start(&socket_path, home.path(), "cleanup-agent");
+    let file = |name: &str| fixture.path().join(name).to_string_lossy().into_owned();
+    let trash_list = json!({ "paths": [file("old-1.log"), file("old-2.log"), file("changed.log")], "reason": "Logs nobody reads" });
+
+    // Reading Files is approved; proposing in it is a Permission of its own, asked for apart.
+    approve(&mut mcp, "files.locations", "Files", &socket_path, home.path());
+    let refused = mcp.call("files.propose_trash", trash_list.clone());
+    assert_eq!(refusal(&refused)["reason"], "approval_pending", "{refused}");
+    assert!(text(&refused).contains("may not make Proposals in Files"), "{}", text(&refused));
+    let code = refusal(&refused)["code"].as_str().unwrap().to_owned();
+    let listed = ve(&["mcp", "--list-requests"], &socket_path, home.path());
+    let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+    assert!(
+        listed.contains(&format!("{code}\tFiles\tin 10 min\tcleanup-agent\tAgent proposals")),
+        "{listed}"
+    );
+    let approved = ve(&["mcp", "--approve", &code], &socket_path, home.path());
+    assert_eq!(
+        String::from_utf8_lossy(&approved.stdout),
+        "Approved: cleanup-agent may make Proposals in Files\n"
+    );
+
+    // A Remote's Entry is refused, saying which.
+    let remote = mcp.call("files.propose_trash", json!({ "paths": [file("keep.log"), remote_file], "reason": "x" }));
+    assert_eq!(refusal(&remote)["reason"], "remote", "{remote}");
+    assert_eq!(refusal(&remote)["paths"], json!([remote_file]));
+
+    let proposed = mcp.call("files.propose_trash", trash_list);
+    let proposed = answer(&proposed).clone();
+    assert_eq!((proposed["id"].as_u64(), proposed["status"].as_str()), (Some(1), Some("pending")));
+    assert_eq!((proposed["rows"].as_u64(), proposed["source"].as_str()), (Some(3), Some("running app")));
+    assert!(fixture.path().join("old-1.log").exists(), "proposing moves nothing");
+    let listed = ve(&["proposals"], &socket_path, home.path());
+    let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+    assert!(listed.contains("1\tpending\tcleanup-agent\t3\t"), "{listed}");
+    assert!(listed.trim_end().ends_with("\tLogs nobody reads"), "{listed}");
+
+    // Not answered yes: nothing moves, and it waits.
+    let declined = ve_answering(&["proposals", "--apply", "1"], "n\n", &socket_path, home.path());
+    assert!(declined.status.success(), "{}", String::from_utf8_lossy(&declined.stderr));
+    assert!(String::from_utf8_lossy(&declined.stdout).ends_with("Nothing moved; Proposal 1 is still pending.\n"));
+    assert!(fixture.path().join("old-1.log").exists());
+
+    // Since it was proposed one row changed: applying leaves it out and says so.
+    {
+        let mut index = engine.shared.index.write();
+        let changed = index.find_path(&fixture.path().join("changed.log")).unwrap();
+        let grown = EntryMeta {
+            on_disk: 1 << 20,
+            ..index.meta(changed)
+        };
+        index.update(changed, grown);
+    }
+    let applied = ve_answering(&["proposals", "--apply", "1"], "y\n", &socket_path, home.path());
+    let printed = String::from_utf8_lossy(&applied.stdout).into_owned();
+    assert!(applied.status.success(), "{printed}{}", String::from_utf8_lossy(&applied.stderr));
+    assert!(printed.starts_with("Proposal 1 from cleanup-agent: Logs nobody reads\n"), "{printed}");
+    assert!(
+        printed.contains(&format!("Left out, 1 item:\n  {}: changed since it was proposed\n", file("changed.log"))),
+        "{printed}"
+    );
+    assert!(printed.contains(&format!("  {}  (", file("old-1.log"))), "{printed}");
+    assert!(
+        printed.ends_with("Move 2 items to the Trash? [y/N] Moved 2 items to the Trash.\nProposal 1 is applied.\n"),
+        "{printed}"
+    );
+    assert!(trash.path().join("old-1.log").exists() && trash.path().join("old-2.log").exists());
+    assert!(fixture.path().join("changed.log").exists() && fixture.path().join("keep.log").exists());
+
+    // The agent reads what happened.
+    let status = mcp.call("files.proposal", json!({ "id": 1 }));
+    let status = answer(&status);
+    assert_eq!(status["status"], "applied");
+    assert_eq!(status["outcome"]["trashed"], json!([file("old-1.log"), file("old-2.log")]));
+    assert_eq!(status["outcome"]["dropped"], json!([{ "path": file("changed.log"), "why": "changed" }]));
+    let again = ve_answering(&["proposals", "--apply", "1"], "y\n", &socket_path, home.path());
+    assert_eq!(again.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&again.stderr).contains("already applied"));
+
+    // Dismissed: nothing moves, and the agent is told.
+    let second = mcp.call("files.propose_trash", json!({ "paths": [file("keep.log")], "reason": "Unused" }));
+    let id = answer(&second)["id"].as_u64().unwrap().to_string();
+    let dismissed = ve(&["proposals", "--dismiss", &id], &socket_path, home.path());
+    assert_eq!(
+        String::from_utf8_lossy(&dismissed.stdout),
+        format!("Dismissed Proposal {id} from cleanup-agent: nothing moved.\n")
+    );
+    let status = mcp.call("files.proposal", json!({ "id": id.parse::<u64>().unwrap() }));
+    assert_eq!(answer(&status)["status"], "dismissed");
+    assert!(fixture.path().join("keep.log").exists());
+    let unknown = mcp.call("files.proposal", json!({ "id": 99 }));
+    assert_eq!(refusal(&unknown)["reason"], "no_proposal");
     engine.shutdown();
 }

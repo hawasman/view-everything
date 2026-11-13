@@ -14,8 +14,10 @@
 
 ### Agents
 - Agents read **Performance**: `performance.summary` (the mean CPU and memory use over a stretch of the last hour, and the process that took the most CPU) and `performance.processes` (the process table at a second, or Live, busiest or largest first, capped and paged like the Files tools). Each Module needs its own approval; Performance answers only while the app runs. [More](docs/guide/agents.md#performance)
-- Agents read **Network**: `network.interfaces` (what each interface received and sent over a stretch of the last hour, busiest first) and `network.connections` (the open connections at a second, or Live, with the process holding each), capped and paged. Per-process traffic is not read yet. [More](docs/guide/agents.md#network)
+- Agents read **Network**: `network.interfaces` (what each interface received and sent over a stretch of the last hour, busiest first) and `network.connections` (the open connections at a second, or Live, with the process holding each), capped and paged. [More](docs/guide/agents.md#network)
 - Agents read **Apps**: `apps.programs` (the installed programs, largest first by On-disk Size, optionally by name) and `apps.startup` (the Startup items), capped and paged. [More](docs/guide/agents.md#apps)
+- Agents make **Proposals**: `files.propose_trash` submits Entries on local Volumes to move to the Trash, with a reason; it changes nothing. Proposing is a Permission of its own (**Agent proposals**), approved apart from reading, and a Remote's or an Offline Volume's Entries are refused with the paths. A desktop notification names the agent; `ve proposals` lists Proposals, `ve proposals --apply ID` checks each row against the Index again, leaves out and reports the ones that changed or vanished, asks, and runs the Trash Task; `--dismiss ID` declines. Unanswered, a Proposal lapses after 24 hours; the agent reads where it stands (pending, applied, dismissed, lapsed) with `files.proposal`. [More](docs/guide/agents.md#proposals)
+- Agents read **traffic per process**: `network.traffic` answers what each of your processes received and sent over TCP at a second (or Live) per second, or over a stretch of the last hour in bytes, the most first, capped and paged. [More](docs/guide/agents.md#network)
 
 ## v0.3.0-rc.1
 

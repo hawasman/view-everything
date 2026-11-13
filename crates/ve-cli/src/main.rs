@@ -1,8 +1,10 @@
 //! `ve`: asks the running app's engine over its socket and prints Entries, largest folders or
 //! CSV. With the app closed it reads the saved Index file instead (never writing it). `ve mcp`
-//! serves the same to agents over MCP (see [`mcp`]).
+//! serves the same to agents over MCP (see [`mcp`]); `ve proposals` answers the Proposals they
+//! make (see [`proposals`]).
 
 mod mcp;
+mod proposals;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -20,6 +22,8 @@ Usage:
   ve export [OPTIONS] [--] [QUERY]... CSV of a Query's results (everything without one; --json for JSON)
   ve mcp serve | --list-requests | --approve <CODE>
                                       MCP server for agents, and their approval (ve mcp --help)
+  ve proposals [--apply <ID> | --dismiss <ID>]
+                                      Agents' Proposals, and your answer to one (ve proposals --help)
 
 Options:
   --csv           CSV output (path, name, Logical Size, On-disk Size, modified, Category, Owner, Owner kind)
@@ -126,6 +130,9 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "mcp") {
         return mcp::main(&args[1..]);
+    }
+    if args.first().is_some_and(|a| a == "proposals") {
+        return proposals::main(&args[1..]);
     }
     let parsed = match parse_args(&args) {
         Ok(Some(parsed)) => parsed,

@@ -18,12 +18,13 @@ ve find   [--csv|--json] [--path DIR] <QUERY>...                     matching pa
 ve top    [--csv|--json] [--path DIR] [--files] [-n N] [QUERY]...    largest folders (or files) by On-disk Size
 ve export [--json] [--path DIR] [QUERY]...                           CSV of a Query's results (everything without one)
 ve mcp serve | --list-requests | --approve CODE                      MCP server for agents, and their approval
+ve proposals [--apply ID | --dismiss ID]                             agents' Proposals, and your answer to one
 ```
 
 - `ve du` is the same as `ve top`. Under a Query it ranks by Filtered Size.
 - `top` prints `<bytes>\t<path>`.
 - `--index FILE` reads that saved Index file instead of asking the app.
-- `ve mcp` is described in [Agents](agents.md).
+- `ve mcp` and `ve proposals` are described in [Agents](agents.md).
 
 The Query is the same [language](query-language.md) as the app's. Quote it for your shell, or put `--` before words that start with `-`.
 
@@ -66,9 +67,14 @@ Newline-delimited JSON, one message per line. The client opens with `{"version":
 | `launch.match` | `text` | the Launcher's matches: at most 50 `item`s (`kind` (`file` or `folder`), `name`, `path`, `offline`, `remote`), best first; blank text matches nothing; `end`: `count` |
 | `search` | `query`, `path` (absolute), `select` (`matches`, `largest_folders`, `largest_files`), `limit` | one `item` per Entry (`path`, `name`, `is_dir`, `logical_size`, `on_disk_size`, `modified_ns` (`null` when unknown), `category`, `owner`, `owner_kind`); `end`: `count`, `last_synced` |
 | `tasks` | `follow` (bool) | one `item` per running Task (`task`, `kind`, `label`, `done`, `total`, `unit`); following, then one per change, and one with `outcome` when a Task finishes, until none runs; `end`: `{}` |
-| `agents.pending` | none | `result`: the agents' approval requests (`code`, `agent`, `module`, `requested_at`, `expires_at`) |
-| `agents.approve` | `code` | `result`: `agent`, `module`, `granted_at`; an unknown or expired code is an `error` |
+| `agents.pending` | none | `result`: the agents' approval requests (`code`, `agent`, `module`, `kind` (`agent` to read, `agent_proposals` to propose), `requested_at`, `expires_at`) |
+| `agents.approve` | `code` | `result`: `agent`, `module`, `kind`, `granted_at`; an unknown or expired code is an `error` |
 | `files` | `agent` (`name`, `key`), `tool`, `arguments` | `result`: `{"answer": ...}` or `{"refusal": ...}`, as the [agent tools](agents.md#tools) answer |
+| `propose` | `agent` (`name`, `key`), `tool`, `arguments` | the same, for the [Proposal tools](agents.md#proposals) |
+| `proposals.list` | none | `result`: every Proposal kept, newest first (`id`, `agent`, `change`, `reason`, `submitted_at`, `lapses_at`, `status`, `answered_at`, `rows`, `outcome`) |
+| `proposals.check` | `id` | `result`: `proposal`, and its rows checked against the Index now: `keep` and `dropped` (`path`, `why`); a Proposal that is not pending is an `error` |
+| `proposals.apply` | `id`, `paths` (the rows you confirmed) | checks again, moves the confirmed rows still as proposed to the Trash, and once that Task is done `result`: the applied Proposal with its `outcome` (`trashed`, `dropped`, `failed`, `left_out`) |
+| `proposals.dismiss` | `id` | `result`: the dismissed Proposal |
 
 ```sh
 printf '{"version":1}\n{"id":1,"method":"search","params":{"query":"ext:iso","limit":3}}\n' \

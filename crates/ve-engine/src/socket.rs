@@ -14,11 +14,14 @@
 //! Launcher, or closes it when open), `search` (streams [`search::Row`]s for a
 //! [`search::Search`]; end: `{"count", "last_synced"}`), `launch.match` (streams the Launcher's
 //! [`crate::launch::Match`]es for `{"text"}`; end: `{"count"}`), `tasks` (streams running Tasks'
-//! progress; with `{"follow": true}` until none runs; end: `{}`), and the agent methods
-//! `agents.pending`, `agents.approve` and one per Module agents read (`files`, `performance`,
-//! `network`, `apps`; see [`agents`]).
+//! progress; with `{"follow": true}` until none runs; end: `{}`), the agent methods
+//! `agents.pending`, `agents.approve`, `propose` and one per Module agents read (`files`,
+//! `performance`, `network`, `apps`; see [`agents`]), and the user's Proposal methods
+//! `proposals.list`, `proposals.check`, `proposals.apply` and `proposals.dismiss` (see
+//! [`proposals`]).
 
 mod agents;
+mod proposals;
 pub mod search;
 #[cfg(windows)]
 mod windows;
@@ -470,6 +473,7 @@ fn serve_lines(reader: &mut impl BufRead, out: &mut BufWriter<impl Write>, engin
             "search" => answer_search(out, &id, params, engine)?,
             "tasks" => answer_tasks(out, &id, &params, engine)?,
             method if agents::answers(method) => agents::answer(out, &id, method, params, engine)?,
+            method if proposals::answers(method) => proposals::answer(out, &id, method, params, engine)?,
             other => send(out, &json!({ "id": id, "error": format!("unknown method `{other}`") }))?,
         }
         out.flush()?;

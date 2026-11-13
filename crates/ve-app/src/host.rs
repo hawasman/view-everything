@@ -108,6 +108,7 @@ impl Host {
         });
         // An agent's request for a Module is announced on the desktop; Settings → Permissions lists it.
         engine.agents().set_on_request(Box::new(crate::agent_notice::show));
+        engine.proposals().set_on_proposal(Box::new(crate::agent_notice::show_proposal));
         let engine = Arc::new(engine);
 
         let (actions, chosen) = async_channel::unbounded::<TrayAction>();

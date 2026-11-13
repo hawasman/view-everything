@@ -1,4 +1,5 @@
-//! Trash and Empty Trash. The app never deletes permanently except through Empty Trash.
+//! Trash and Empty Trash. The app never deletes permanently except through Empty Trash. Moving
+//! to the Trash is the engine's Task ([`Shared::move_to_trash`]); this is the window's side of it.
 
 use crate::format;
 use gpui_kit::component::button::ButtonVariant;
@@ -14,11 +15,6 @@ use ve_engine::cleaner::volume_blocker;
 use ve_engine::tasks::{Outcome, TaskKind};
 use ve_engine::{Repaint, Shared};
 use ve_scan::VolumeInfo;
-
-/// Moves `paths` to the operating system's trash.
-pub fn move_to_trash(paths: &[PathBuf]) -> Result<(), String> {
-    trash::delete_all(paths).map_err(|e| e.to_string())
-}
 
 /// Bytes and items the trash currently holds, or `None` where the platform can't tell.
 pub fn trash_size() -> Option<(u64, u64)> {
@@ -453,54 +449,12 @@ impl Trash {
             return;
         }
         let this = self.clone();
-        let total = items.len() as u64;
-        let task = self
-            .shared
-            .tasks
-            .begin(TaskKind::Trash, format!("Move {total} item(s) to the Trash"), false);
-        task.set_progress(0, Some(total));
-        (self.repaint)();
         window
             .spawn(cx, async move |cx| {
-                let outcome = cx
-                    .background_executor()
-                    .spawn(async move {
-                        // Check the disk first: anything already gone just leaves the Index.
-                        let (present, missing): (Vec<_>, Vec<_>) = items.into_iter().partition(|p| std::fs::symlink_metadata(p).is_ok());
-                        // One by one, so progress is real and a failure leaves the rest moved.
-                        let mut errors: Vec<String> = Vec::new();
-                        task.set_progress(missing.len() as u64, Some(total));
-                        for (k, path) in present.iter().enumerate() {
-                            if let Err(e) = move_to_trash(std::slice::from_ref(path)) {
-                                errors.push(e);
-                            }
-                            task.set_progress((missing.len() + k + 1) as u64, Some(total));
-                        }
-                        let result = match errors.as_slice() {
-                            [] => Ok(()),
-                            [only] => Err(only.clone()),
-                            [first, ..] => Err(format!("{} items could not be moved; the first: {first}", errors.len())),
-                        };
-                        task.finish(match &result {
-                            Ok(()) => Outcome::Done(format!("Moved {} item(s)", crate::format::count(present.len() as u64))),
-                            Err(e) => Outcome::Failed(e.clone()),
-                        });
-                        (present, missing, result)
-                    })
-                    .await;
-                let (present, missing, result) = outcome;
-                // A failed batch may still have moved some items: whatever left the disk is gone.
-                let moved: Vec<PathBuf> = present.into_iter().filter(|p| std::fs::symlink_metadata(p).is_err()).collect();
-                {
-                    let mut index = this.shared.index.write();
-                    for path in moved.iter().chain(&missing) {
-                        if let Some(id) = index.find_path(path) {
-                            index.remove(id);
-                        }
-                    }
-                }
+                let shared = this.shared.clone();
+                let trashed = cx.background_executor().spawn(async move { shared.move_to_trash(items) }).await;
                 this.measure();
-                let text = trashed_message(&moved, missing.len(), result.err());
+                let text = trashed_message(&trashed.moved, trashed.missing.len(), trashed.error());
                 cx.update(|window, cx| {
                     window.push_notification(Notification::info(text), cx);
                 })

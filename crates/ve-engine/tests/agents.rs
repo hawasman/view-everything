@@ -63,7 +63,7 @@ fn first_contact_is_pending_until_its_code_is_approved() {
     let (engine, saved, told) = start();
     let claude = agent("Claude", "k1");
 
-    let request = pending(engine.agents().access(&claude, FILES, T0));
+    let request = pending(engine.agents().access(&claude, Kind::Agent, FILES, T0));
     assert_eq!(request.code.len(), 4);
     assert!(
         request.code.chars().all(|c| c.is_ascii_digit() || c.is_ascii_uppercase()),
@@ -73,7 +73,7 @@ fn first_contact_is_pending_until_its_code_is_approved() {
     assert_eq!((request.agent.as_str(), request.module.as_str()), ("Claude", FILES));
     assert_eq!(request.expires_at, T0 + CODE_LIFETIME);
     // Asking again while pending is the same request, and the host is told once.
-    let again = pending(engine.agents().access(&claude, FILES, T0 + 30));
+    let again = pending(engine.agents().access(&claude, Kind::Agent, FILES, T0 + 30));
     assert_eq!(again.code, request.code);
     assert_eq!(*told.lock(), vec![request.clone()]);
     assert_eq!(engine.agents().pending(T0 + 30), vec![request.clone()]);
@@ -90,7 +90,7 @@ fn first_contact_is_pending_until_its_code_is_approved() {
             key: Some("k1".into()),
         }
     );
-    assert_eq!(engine.agents().access(&claude, FILES, T0 + 61), Access::Allowed);
+    assert_eq!(engine.agents().access(&claude, Kind::Agent, FILES, T0 + 61), Access::Allowed);
     assert!(engine.agents().pending(T0 + 61).is_empty());
     assert_eq!(*saved.lock(), vec![vec![granted]]);
 }
@@ -99,7 +99,7 @@ fn first_contact_is_pending_until_its_code_is_approved() {
 fn a_code_expires_after_ten_minutes() {
     let (engine, saved, _) = start();
     let claude = agent("Claude", "k1");
-    let request = pending(engine.agents().access(&claude, FILES, T0));
+    let request = pending(engine.agents().access(&claude, Kind::Agent, FILES, T0));
 
     assert_eq!(engine.agents().pending(T0 + CODE_LIFETIME - 1).len(), 1);
     let refused = engine.agents().approve(&request.code, T0 + CODE_LIFETIME).unwrap_err();
@@ -108,7 +108,7 @@ fn a_code_expires_after_ten_minutes() {
     assert!(engine.agents().pending(T0 + CODE_LIFETIME).is_empty());
     assert!(saved.lock().is_empty());
     // Asking again after expiry is a new request with a new deadline.
-    let renewed = pending(engine.agents().access(&claude, FILES, T0 + CODE_LIFETIME));
+    let renewed = pending(engine.agents().access(&claude, Kind::Agent, FILES, T0 + CODE_LIFETIME));
     assert_eq!(renewed.expires_at, T0 + 2 * CODE_LIFETIME);
     assert!(engine.agents().approve("ZZZZ", T0).unwrap_err().contains("No request"));
 }
@@ -116,23 +116,23 @@ fn a_code_expires_after_ten_minutes() {
 #[test]
 fn another_key_under_an_approved_name_is_refused() {
     let (engine, _, told) = start();
-    let request = pending(engine.agents().access(&agent("Claude", "k1"), FILES, T0));
+    let request = pending(engine.agents().access(&agent("Claude", "k1"), Kind::Agent, FILES, T0));
     engine.agents().approve(&request.code, T0).unwrap();
 
-    let impostor = pending(engine.agents().access(&agent("Claude", "k2"), FILES, T0 + 1));
-    let renamed = pending(engine.agents().access(&agent("Claude Desktop", "k1"), FILES, T0 + 1));
+    let impostor = pending(engine.agents().access(&agent("Claude", "k2"), Kind::Agent, FILES, T0 + 1));
+    let renamed = pending(engine.agents().access(&agent("Claude Desktop", "k1"), Kind::Agent, FILES, T0 + 1));
 
     assert_ne!(impostor.code, request.code);
     assert_ne!(renamed.code, impostor.code);
     assert_eq!(told.lock().len(), 3);
-    assert_eq!(engine.agents().access(&agent("Claude", "k1"), FILES, T0 + 2), Access::Allowed);
+    assert_eq!(engine.agents().access(&agent("Claude", "k1"), Kind::Agent, FILES, T0 + 2), Access::Allowed);
 }
 
 #[test]
 fn revoking_refuses_the_agent_again() {
     let (engine, saved, _) = start();
     let claude = agent("Claude", "k1");
-    let request = pending(engine.agents().access(&claude, FILES, T0));
+    let request = pending(engine.agents().access(&claude, Kind::Agent, FILES, T0));
     engine.agents().approve(&request.code, T0).unwrap();
 
     engine.permissions().revoke(Kind::Agent, "Claude").unwrap();
@@ -153,10 +153,10 @@ fn revoking_refuses_the_agent_again() {
 
     // Approved again, then revoked for the one Module.
     engine.agents().approve(&code, T0 + 6).unwrap();
-    assert_eq!(engine.agents().access(&claude, FILES, T0 + 7), Access::Allowed);
-    engine.agents().revoke("Claude", FILES).unwrap();
-    assert!(matches!(engine.agents().access(&claude, FILES, T0 + 8), Access::Pending(_)));
-    assert!(engine.agents().revoke("Claude", FILES).is_err());
+    assert_eq!(engine.agents().access(&claude, Kind::Agent, FILES, T0 + 7), Access::Allowed);
+    engine.agents().revoke("Claude", Kind::Agent, FILES).unwrap();
+    assert!(matches!(engine.agents().access(&claude, Kind::Agent, FILES, T0 + 8), Access::Pending(_)));
+    assert!(engine.agents().revoke("Claude", Kind::Agent, FILES).is_err());
 }
 
 #[test]
