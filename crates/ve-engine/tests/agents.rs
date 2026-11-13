@@ -4,8 +4,7 @@
 use parking_lot::Mutex;
 use std::sync::Arc;
 use ve_core::CategoryMap;
-use ve_engine::agents::files::Reason;
-use ve_engine::agents::{Access, Agent, CODE_LIFETIME, FILES, Request};
+use ve_engine::agents::{Access, Agent, CODE_LIFETIME, FILES, Module, Reason, Request};
 use ve_engine::permissions::{Hooks, Kind, Permission};
 use ve_engine::{Config, Engine};
 
@@ -142,7 +141,7 @@ fn revoking_refuses_the_agent_again() {
     assert_eq!(saved.lock().last(), Some(&Vec::new()));
     let refused = engine
         .agents()
-        .files(&claude, "files.find", serde_json::json!({ "query": "x" }), T0 + 5)
+        .read(Module::Files, &claude, "files.find", serde_json::json!({ "query": "x" }), T0 + 5)
         .unwrap_err();
     assert_eq!(refused.reason, Reason::ApprovalPending);
     let code = refused.code.clone().unwrap();
