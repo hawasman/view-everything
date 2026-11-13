@@ -55,12 +55,13 @@ What the [Performance](performance.md) recorder kept of the last hour. Times are
 
 ### Network
 
-What the same recorder kept of the [Network](network.md): times, `at` and `null` work as for Performance. Per-process traffic is not read yet, so no tool answers it.
+What the same recorder kept of the [Network](network.md): times, `at` and `null` work as for Performance. [Traffic per process](network.md#traffic-per-process) is TCP only, and only your own processes: UDP and other users' need administrator rights.
 
 | Tool | Arguments | Answers |
 | --- | --- | --- |
 | `network.interfaces` | `from`, `to` (default: the last hour), `limit`, `cursor` | `seconds` with a network reading, `connections` (distinct connections those seconds kept, each the top 200), and `rows` by interface, busiest first: `name`, `received` and `sent` (bytes over the stretch), `last_seen`. An interface that went away keeps its row |
 | `network.connections` | `at`, `limit`, `cursor` | the connections read at that second (`time`), open conversations first: `protocol`, `local`, `remote` (`null` while it has none), `state`, `holder` (`process`, `nobody` for one the kernel is closing, `unknown` for another user's process) with its `pid` and `process` name. Live lists every one; a past second keeps the top 200 |
+| `network.traffic` | `at`, or `from` and `to`; `limit`, `cursor` | TCP traffic per process, the most first. At a second (`at`, or Live when no argument names a time): `time` and `rows` of `pid`, `process`, `received_per_second`, `sent_per_second`; Live lists every process holding a counted connection, a past second keeps the top 200. Over a stretch (`from` and/or `to`): `rows` of `pid`, `process`, `received` and `sent` (bytes over the stretch, each second's top 200). `no_sample` when no traffic was read then: the recorder did not run, it was its first reading, or this system cannot read it |
 
 ### Apps
 

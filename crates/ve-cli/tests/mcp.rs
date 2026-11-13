@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use ve_core::{CategoryMap, EntryMeta, Index, SyncState};
 use ve_engine::apps::Sources;
-use ve_engine::net::{InterfaceCounters, Net, Protocol, Socket, SocketHolder, State};
+use ve_engine::net::{InterfaceCounters, Net, Protocol, Socket, SocketHolder, State, TcpBytes};
 use ve_engine::perf::{Backend, Counters, CpuCounters, CpuTimes, Memory, Perf, ProcessCounters, ProcessCountersTable, ProcessId, Reading};
 use ve_engine::socket::{self, Claim};
 use ve_engine::{Config, Engine, Phase};
@@ -237,8 +237,12 @@ impl Backend for Machine {
                 remote: "93.184.216.34:443".parse().unwrap(),
                 state: State::Established,
                 holder: SocketHolder::Pid(u32::from(pid)),
-                inode: 0,
-                bytes: None,
+                inode: u64::from(pid),
+                // Each process receives ten times what it sends, process `pid` `pid` times process 1's.
+                bytes: Some(TcpBytes {
+                    received: self.step * u64::from(pid) * 100,
+                    sent: self.step * u64::from(pid) * 10,
+                }),
             })
             .collect();
         sockets.push(Socket {
@@ -320,6 +324,7 @@ fn an_agent_is_refused_until_approved_then_answered_in_capped_pages() {
             "performance.processes",
             "network.interfaces",
             "network.connections",
+            "network.traffic",
             "apps.programs",
             "apps.startup",
             "files.propose_trash",
@@ -329,7 +334,7 @@ fn an_agent_is_refused_until_approved_then_answered_in_capped_pages() {
     // Only submitting a Proposal is not read-only; nothing is destructive.
     let read_only: Vec<_> = tools.as_array().unwrap().iter().map(|t| t["annotations"]["readOnlyHint"] == true).collect();
     assert_eq!(read_only.iter().filter(|r| !**r).count(), 1);
-    assert!(!read_only[10], "files.propose_trash submits a Proposal");
+    assert!(!read_only[names.iter().position(|n| *n == "files.propose_trash").unwrap()], "it submits a Proposal");
     assert!(tools.as_array().unwrap().iter().all(|t| t["annotations"]["destructiveHint"] == false));
 
     // First contact: refused with a code, before the call itself is looked at.
@@ -570,6 +575,27 @@ fn network_is_refused_until_approved_then_answered_from_the_recorder() {
     let past = mcp.call("network.connections", json!({ "at": t0 + 3 }));
     assert_eq!(answer(&past)["total"], 200);
     let gap = mcp.call("network.connections", json!({ "at": t0 - 100 }));
+    assert_eq!(refusal(&gap)["reason"], "no_sample");
+
+    // TCP traffic per Process: Live per second, the most first; over a stretch, in bytes.
+    let live = mcp.call("network.traffic", json!({ "limit": 2 }));
+    let live = answer(&live).clone();
+    assert_eq!((live["total"].as_u64(), live["next_cursor"].as_str()), (Some(249), Some("2")));
+    let top = &live["rows"][0];
+    assert_eq!((&top["pid"], &top["process"]), (&json!(249), &json!("proc-249")));
+    let per_second = top["received_per_second"].as_u64().unwrap();
+    assert!(per_second > 0, "{top}");
+    assert_eq!(per_second, 10 * top["sent_per_second"].as_u64().unwrap());
+    assert_eq!(live["rows"][1]["pid"], 248);
+    let stretch = mcp.call("network.traffic", json!({ "from": t0, "to": t0 + 3 }));
+    let stretch = answer(&stretch).clone();
+    let top = &stretch["rows"][0];
+    assert_eq!((&top["pid"], stretch["from"].as_i64()), (&json!(249), Some(t0)));
+    assert_eq!(top["received"].as_u64().unwrap(), 10 * top["sent"].as_u64().unwrap());
+    assert!(top["sent"].as_u64().unwrap() > 0, "{top}");
+    let both = mcp.call("network.traffic", json!({ "at": t0 + 3, "from": t0 }));
+    assert_eq!(refusal(&both)["reason"], "bad_arguments");
+    let gap = mcp.call("network.traffic", json!({ "at": t0 - 100 }));
     assert_eq!(refusal(&gap)["reason"], "no_sample");
 
     // Approving Network granted nothing else, and revoking it refuses again.

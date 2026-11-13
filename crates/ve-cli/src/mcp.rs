@@ -202,8 +202,8 @@ impl Server {
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "view-everything", "version": env!("CARGO_PKG_VERSION") },
             "instructions": "Read access to view-everything's Modules: Files (the user's file Index), Performance \
-                (the last hour of CPU, memory and processes), Network (the last hour of interface traffic, and open \
-                connections) and Apps (installed programs with their size, and the Startup \
+                (the last hour of CPU, memory and processes), Network (the last hour of interface traffic, open \
+                connections and TCP traffic per process) and Apps (installed programs with their size, and the Startup \
                 items). Each Module needs its own approval: the first call to one is refused with an approval code \
                 until the user approves this agent; tell the user the code. Nothing here changes a file: \
                 files.propose_trash submits a Proposal (Entries to move to the Trash, with a reason) that the user \
