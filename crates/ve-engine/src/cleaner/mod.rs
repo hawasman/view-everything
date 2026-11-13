@@ -205,20 +205,25 @@ fn look_verdict(epoch: u64, look_epoch: u64, cancelled: bool) -> LookVerdict {
 /// [`Cleaner::found`] meanwhile is the last look's answer. `shared.repaint` is called when it
 /// is replaced.
 pub fn refresh(shared: &Arc<Shared>) {
-    let mut state = shared.cleaner.state.lock();
-    if !state.configured {
-        return;
+    {
+        let mut state = shared.cleaner.state.lock();
+        if !state.configured {
+            return;
+        }
+        let stamp = rules_stamp(state.rules_path.as_deref());
+        if stamp != state.rules_stamp {
+            state.load_rules();
+            state.invalidate();
+        }
+        if state.looking || state.paused {
+            return;
+        }
     }
-    let stamp = rules_stamp(state.rules_path.as_deref());
-    if stamp != state.rules_stamp {
-        state.load_rules();
-        state.invalidate();
-    }
-    if state.looking || state.paused {
-        return;
-    }
+    // Read without the Cleaner's lock: while a Sync writes the Index this waits, and readers of
+    // the Cleanables must not wait with it.
     let generation = shared.index.read().generation();
-    if state.seen == Some(generation) {
+    let mut state = shared.cleaner.state.lock();
+    if state.looking || state.paused || state.seen == Some(generation) {
         return;
     }
     // Looking again only because the Index moved (Live updates) waits out the throttle, so a
@@ -262,6 +267,20 @@ pub fn refresh(shared: &Arc<Shared>) {
 
 /// One look on its own thread, which an app-started Task drops to background priority.
 fn look(shared: &Arc<Shared>, epoch: u64, volumes: &[VolumeInfo], rules: &[Arc<Rule>], task: Option<TaskHandle>, cancel: &AtomicBool) {
+    /// A look that panics ends as if cancelled, so the Cleaner is not left looking forever.
+    struct Unwound<'a>(&'a Shared);
+    impl Drop for Unwound<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                let mut state = self.0.cleaner.state.lock();
+                state.looking = false;
+                state.paused = true;
+                drop(state);
+                (self.0.repaint)();
+            }
+        }
+    }
+    let _unwound = Unwound(shared);
     // Paused, it waits before taking the Index: a Sync must not wait on it.
     if let Some(task) = &task {
         task.enter_thread();
