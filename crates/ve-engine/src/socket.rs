@@ -15,8 +15,8 @@
 //! [`search::Search`]; end: `{"count", "last_synced"}`), `launch.match` (streams the Launcher's
 //! [`crate::launch::Match`]es for `{"text"}`; end: `{"count"}`), `tasks` (streams running Tasks'
 //! progress; with `{"follow": true}` until none runs; end: `{}`), and the agent methods
-//! `agents.pending`, `agents.approve` and one per Module agents read, `files` and
-//! `performance` (see [`agents`]).
+//! `agents.pending`, `agents.approve` and one per Module agents read (`files`, `performance`,
+//! `network`; see [`agents`]).
 
 mod agents;
 pub mod search;

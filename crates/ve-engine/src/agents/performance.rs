@@ -5,7 +5,7 @@
 
 use super::{Agent, Agents, Page, Reason, Refusal, at_schema, cursor_schema, largest_first, limit_schema, range_schema};
 use crate::perf::{Perf, Process, Processes};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// One of the Performance tools.
@@ -65,7 +65,7 @@ impl Tool {
 }
 
 /// What processes rank by.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Sort {
     #[default]
@@ -131,17 +131,8 @@ fn answer(perf: &Perf, name: &str, arguments: Value, now: i64) -> Result<Value, 
             Ok(page.answer(
                 rows,
                 |p| row(&table, p),
-                json!({ "at": args.at, "time": table.time, "sort": args.sort_name() }),
+                json!({ "at": args.at, "time": table.time, "sort": args.sort }),
             ))
-        }
-    }
-}
-
-impl ProcessesArgs {
-    fn sort_name(&self) -> &'static str {
-        match self.sort {
-            Sort::Cpu => "cpu",
-            Sort::Memory => "memory",
         }
     }
 }

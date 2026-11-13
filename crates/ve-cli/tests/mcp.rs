@@ -13,7 +13,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use ve_core::{CategoryMap, EntryMeta, Index, SyncState};
-use ve_engine::net::{InterfaceCounters, Net};
+use ve_engine::net::{InterfaceCounters, Net, Protocol, Socket, SocketHolder, State};
 use ve_engine::perf::{
     Backend, Counters, CpuCounters, CpuTimes, Memory, Perf, ProcessCounters, ProcessCountersTable, ProcessId, Reading,
 };
@@ -170,6 +170,8 @@ fn approve(mcp: &mut Mcp, tool: &str, module: &str, socket: &Path, home: &Path) 
 
 /// A machine of 250 processes, process `pid` taking `pid` times process 1's CPU and the
 /// lowest PIDs the most memory; the whole machine half busy, a quarter of its memory used.
+/// `eth0` moves a hundred times what `wlan0` does; each process but the last holds a connection,
+/// and a listening socket of a process that cannot be read makes 250.
 #[derive(Default)]
 struct Machine {
     step: u64,
@@ -196,11 +198,18 @@ impl Backend for Machine {
                 swap: Reading::Unsupported,
             }),
             disks: Reading::Unsupported,
-            network: Reading::Value(vec![InterfaceCounters {
-                name: "eth0".into(),
-                received: self.step * 1000,
-                sent: self.step * 100,
-            }]),
+            network: Reading::Value(vec![
+                InterfaceCounters {
+                    name: "wlan0".into(),
+                    received: self.step * 10,
+                    sent: self.step,
+                },
+                InterfaceCounters {
+                    name: "eth0".into(),
+                    received: self.step * 1000,
+                    sent: self.step * 100,
+                },
+            ]),
         }
     }
 
@@ -219,6 +228,26 @@ impl Backend for Machine {
             boot_time: Some(1_700_000_000),
             ticks_per_second: 100,
         })
+    }
+
+    fn connections(&mut self) -> Reading<Vec<Socket>> {
+        let mut sockets: Vec<Socket> = (1..250u16)
+            .map(|pid| Socket {
+                protocol: Protocol::Tcp,
+                local: format!("127.0.0.1:{}", 10_000 + pid).parse().unwrap(),
+                remote: "93.184.216.34:443".parse().unwrap(),
+                state: State::Established,
+                holder: SocketHolder::Pid(u32::from(pid)),
+            })
+            .collect();
+        sockets.push(Socket {
+            protocol: Protocol::Tcp,
+            local: "0.0.0.0:22".parse().unwrap(),
+            remote: "0.0.0.0:0".parse().unwrap(),
+            state: State::Listen,
+            holder: SocketHolder::Unknown,
+        });
+        Reading::Value(sockets)
     }
 }
 
@@ -280,7 +309,9 @@ fn an_agent_is_refused_until_approved_then_answered_in_capped_pages() {
             "files.locations",
             "files.summary",
             "performance.summary",
-            "performance.processes"
+            "performance.processes",
+            "network.interfaces",
+            "network.connections"
         ]
     );
     assert!(tools.as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
@@ -396,6 +427,8 @@ fn with_no_app_running_an_approved_agent_reads_the_saved_index() {
     );
     let unread = mcp.call("performance.summary", json!({}));
     assert_eq!(refusal(&unread)["reason"], "not_running", "the recorder runs in the app");
+    let unread = mcp.call("network.connections", json!({}));
+    assert_eq!(refusal(&unread)["reason"], "not_running");
 
     // Same name, no key on file for it here: a new key, which the settings do not approve.
     fs::remove_file(data.join("agent-keys.json")).unwrap();
@@ -460,6 +493,75 @@ fn performance_is_refused_until_approved_then_answered_from_the_recorder() {
     engine.agents().revoke("perf-agent", "Performance").unwrap();
     assert_eq!(
         refusal(&mcp.call("performance.summary", json!({})))["reason"],
+        "approval_pending"
+    );
+    engine.shutdown();
+}
+
+#[test]
+fn network_is_refused_until_approved_then_answered_from_the_recorder() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = engine_reading(Machine::default());
+    let t0 = chrono::Utc::now().timestamp() - 10;
+    for t in t0..=t0 + 3 {
+        engine.perf.tick(t);
+    }
+    let (engine, socket_path) = host(engine, home.path());
+    let mut mcp = Mcp::start(&socket_path, home.path(), "net-agent");
+
+    approve(&mut mcp, "network.interfaces", "Network", &socket_path, home.path());
+    let interfaces = mcp.call("network.interfaces", json!({ "from": t0, "to": t0 + 3, "limit": 1 }));
+    let interfaces = answer(&interfaces).clone();
+    // Distinct connections among those the seconds kept: the top 200 of each.
+    assert_eq!(
+        (interfaces["seconds"].as_u64(), interfaces["connections"].as_u64()),
+        (Some(3), Some(200))
+    );
+    assert_eq!(interfaces["total"], 2);
+    assert_eq!(
+        interfaces["rows"][0],
+        json!({ "name": "eth0", "received": 3000, "sent": 300, "last_seen": t0 + 3 }),
+        "busiest first"
+    );
+    let rest = mcp.call(
+        "network.interfaces",
+        json!({ "from": t0, "to": t0 + 3, "cursor": interfaces["next_cursor"] }),
+    );
+    assert_eq!(answer(&rest)["rows"][0]["name"], "wlan0");
+    assert_eq!(answer(&rest)["next_cursor"], Value::Null);
+
+    // Live lists every connection: 200 at most, open conversations first, then the rest.
+    let first = mcp.call("network.connections", json!({ "limit": 500 }));
+    let first = answer(&first).clone();
+    assert_eq!((first["total"].as_u64(), first["limit"].as_u64()), (Some(250), Some(200)));
+    let row = &first["rows"][0];
+    assert_eq!(
+        (&row["protocol"], &row["state"], &row["remote"], &row["holder"]),
+        (&json!("TCP"), &json!("established"), &json!("93.184.216.34:443"), &json!("process"))
+    );
+    assert_eq!(row["process"], format!("proc-{:03}", row["pid"].as_u64().unwrap()));
+    let rest = mcp.call("network.connections", json!({ "limit": 500, "cursor": first["next_cursor"] }));
+    let rest = answer(&rest).clone();
+    assert_eq!((rest["rows"].as_array().unwrap().len(), &rest["next_cursor"]), (50, &Value::Null));
+    let listening = &rest["rows"][49];
+    assert_eq!(
+        (&listening["state"], &listening["remote"], &listening["holder"], &listening["pid"]),
+        (&json!("listening"), &Value::Null, &json!("unknown"), &Value::Null)
+    );
+    // A past second keeps the top 200.
+    let past = mcp.call("network.connections", json!({ "at": t0 + 3 }));
+    assert_eq!(answer(&past)["total"], 200);
+    let gap = mcp.call("network.connections", json!({ "at": t0 - 100 }));
+    assert_eq!(refusal(&gap)["reason"], "no_sample");
+
+    // Approving Network granted nothing else, and revoking it refuses again.
+    assert_eq!(
+        refusal(&mcp.call("performance.summary", json!({})))["reason"],
+        "approval_pending"
+    );
+    engine.agents().revoke("net-agent", "Network").unwrap();
+    assert_eq!(
+        refusal(&mcp.call("network.connections", json!({})))["reason"],
         "approval_pending"
     );
     engine.shutdown();

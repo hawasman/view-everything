@@ -53,6 +53,15 @@ What the [Performance](performance.md) recorder kept of the last hour. Times are
 | `performance.summary` | `from`, `to` (default: the last hour) | `seconds` recorded, mean `cpu` busy share and `memory` share used (0 to 1), and `top_process` (`pid`, `name`, `cpu`): the one that took the most CPU over the stretch |
 | `performance.processes` | `at`, `sort` (`cpu` or `memory`), `limit`, `cursor` | the process table read at that second (`time`), busiest first: `pid`, `ppid`, `name`, `cpu` (0 to 1), `memory` (resident bytes), `io_read` and `io_write` (bytes per second), `started`, `cpu_seconds`. Live lists every process; a past second keeps the top 200 |
 
+### Network
+
+What the same recorder kept of the [Network](network.md): times, `at` and `null` work as for Performance. Per-process traffic is not read yet, so no tool answers it.
+
+| Tool | Arguments | Answers |
+| --- | --- | --- |
+| `network.interfaces` | `from`, `to` (default: the last hour), `limit`, `cursor` | `seconds` with a network reading, `connections` (distinct connections those seconds kept, each the top 200), and `rows` by interface, busiest first: `name`, `received` and `sent` (bytes over the stretch), `last_seen`. An interface that went away keeps its row |
+| `network.connections` | `at`, `limit`, `cursor` | the connections read at that second (`time`), open conversations first: `protocol`, `local`, `remote` (`null` while it has none), `state`, `holder` (`process`, `nobody` for one the kernel is closing, `unknown` for another user's process) with its `pid` and `process` name. Live lists every one; a past second keeps the top 200 |
+
 A call that cannot be answered comes back as an error result whose `structuredContent.refusal` says why, so the agent can correct it:
 
 | `reason` | When |
@@ -65,10 +74,10 @@ A call that cannot be answered comes back as an error result whose `structuredCo
 | `unknown_tool` | any other tool name |
 | `no_sample` | nothing was recorded at that second: the recorder did not run then, or it is more than an hour ago |
 | `loading` | the app is still reading its Index |
-| `not_running` | the Module is read by the running app (Performance), and it is not running |
+| `not_running` | the Module is read by the running app (Performance, Network), and it is not running |
 | `no_index` | no app running and no saved Index yet |
-| `failed` | not the agent's doing: the app's answer could not be read, or the agent's key could not be saved |
+| `failed` | not the agent's doing: the app's answer could not be read, the agent's key could not be saved, or the running app is an older version that does not answer this Module |
 
 ## With the app closed
 
-`ve mcp serve` asks the running app, so answers include the last seconds of changes. With the app closed it reads the saved Index file for the Files tools, for an agent already approved in the saved settings. Reading the file, `files.locations` cannot say which Locations are online (`null`), `is:offline` is a bad Query, and `dupe:`, `is:duplicate` and `is:cleanable` find nothing. An agent that is not approved yet gets `not_approved`: start the app so it can ask you. The Performance tools need the app running (`not_running`): its recorder keeps the hour in memory, not on disk.
+`ve mcp serve` asks the running app, so answers include the last seconds of changes. With the app closed it reads the saved Index file for the Files tools, for an agent already approved in the saved settings. Reading the file, `files.locations` cannot say which Locations are online (`null`), `is:offline` is a bad Query, and `dupe:`, `is:duplicate` and `is:cleanable` find nothing. An agent that is not approved yet gets `not_approved`: start the app so it can ask you. The Performance and Network tools need the app running (`not_running`): its recorder keeps the hour in memory, not on disk.

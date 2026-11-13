@@ -16,7 +16,7 @@ use std::time::SystemTime;
 use ve_core::paths::APP_DIR;
 use ve_core::{Index, Query, QueryContext};
 use ve_engine::agents::files::{self, Call};
-use ve_engine::agents::{self, Agent, FILES, Reason, Refusal, Request, ToolInfo};
+use ve_engine::agents::{self, Agent, FILES, Module, Reason, Refusal, Request, ToolInfo};
 use ve_engine::permissions::Permission;
 use ve_engine::socket::{self, Client};
 
@@ -125,6 +125,15 @@ fn error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+/// What the running app made of a tool call.
+enum App {
+    Answered(Result<Value, Refusal>),
+    /// No app answers.
+    Absent,
+    /// The app answering is another version, which does not take the call.
+    Other,
+}
+
 #[derive(Default)]
 struct Server {
     /// The client's name, from `initialize`.
@@ -188,7 +197,8 @@ impl Server {
             "capabilities": { "tools": { "listChanged": false } },
             "serverInfo": { "name": "view-everything", "version": env!("CARGO_PKG_VERSION") },
             "instructions": "Read-only access to view-everything's Modules: Files (the user's file Index), Performance \
-                (the last hour of CPU, memory and processes). Each Module needs its own approval: the first call to one \
+                (the last hour of CPU, memory and processes) and Network (the last hour of interface traffic, and open \
+                connections). Each Module needs its own approval: the first call to one \
                 is refused with an approval code until the user approves this agent; tell the user the code. \
                 Every answer is capped in rows; pass next_cursor back as cursor for the next rows.",
         })
@@ -213,21 +223,30 @@ impl Server {
     /// Answers a tool call from the running app, else (Files only) from the saved Index file;
     /// the second value says which.
     fn answer(&mut self, name: &str, arguments: Value) -> Result<(Value, &'static str), Refusal> {
-        let module = agents::module_of(name).ok_or_else(|| Refusal::unknown_tool(name))?;
+        let module = Module::of_tool(name).ok_or_else(|| Refusal::unknown_tool(name))?;
         let agent = self.agent()?;
-        if let Some(answered) = self.ask_app(&agent, module, name, &arguments) {
-            return answered.map(|answer| (answer, "running app"));
-        }
-        if module != FILES {
-            return Err(Refusal::new(
+        let app = self.ask_app(&agent, module, name, &arguments);
+        let module_name = module.name();
+        match app {
+            App::Answered(answered) => answered.map(|answer| (answer, "running app")),
+            App::Absent | App::Other if module == Module::Files => {
+                self.read_file(&agent, name, arguments).map(|answer| (answer, "saved Index file"))
+            }
+            App::Absent => Err(Refusal::new(
                 Reason::NotRunning,
                 format!(
-                    "{module} is read by the running app, and view-everything is not running. \
+                    "{module_name} is read by the running app, and view-everything is not running. \
                      Ask the user to start view-everything, then call again."
                 ),
-            ));
+            )),
+            App::Other => Err(Refusal::new(
+                Reason::Failed,
+                format!(
+                    "the running view-everything is another version, which does not answer {module_name} for agents. \
+                     Ask the user to update view-everything and run it again."
+                ),
+            )),
         }
-        self.read_file(&agent, name, arguments).map(|answer| (answer, "saved Index file"))
     }
 
     /// This client as an agent: its name and its key, issued now if it has none yet.
@@ -247,35 +266,36 @@ impl Server {
         Ok(agent)
     }
 
-    /// Asks the running app to answer the tool `name` of `module`; `None` when none answers,
-    /// or the one answering does not know the Module's method (another version of the app).
-    fn ask_app(&mut self, agent: &Agent, module: &str, name: &str, arguments: &Value) -> Option<Result<Value, Refusal>> {
-        let method = module.to_lowercase();
+    /// Asks the running app to answer the tool `name` of `module`.
+    fn ask_app(&mut self, agent: &Agent, module: Module, name: &str, arguments: &Value) -> App {
         let params = json!({ "agent": agent, "tool": name, "arguments": arguments });
         // A connection the app closed (it restarted) is opened again once.
         for _ in 0..2 {
             if self.engine.is_none() {
-                self.engine = Client::connect(&socket::path()?).ok();
+                self.engine = socket::path().and_then(|path| Client::connect(&path).ok());
             }
-            let reply = match self.engine.as_mut()?.call(&method, params.clone()) {
+            let Some(engine) = self.engine.as_mut() else {
+                return App::Absent;
+            };
+            let reply = match engine.call(module.method(), params.clone()) {
                 Ok(reply) => reply,
                 Err(socket::Error::Refused(_)) => {
                     self.engine = None;
-                    return None;
+                    return App::Other;
                 }
                 Err(socket::Error::Io(_)) => {
                     self.engine = None;
                     continue;
                 }
             };
-            return Some(match (reply.get("answer"), reply.get("refusal")) {
+            return App::Answered(match (reply.get("answer"), reply.get("refusal")) {
                 (Some(answer), _) => Ok(answer.clone()),
                 (None, Some(refusal)) => Err(serde_json::from_value(refusal.clone())
                     .unwrap_or_else(|e| Refusal::new(Reason::Failed, format!("unreadable refusal from the app: {e}")))),
                 (None, None) => Err(Refusal::new(Reason::Failed, "the app answered nothing")),
             });
         }
-        None
+        App::Absent
     }
 
     /// Answers from the saved Index file, for an agent the saved settings approve.

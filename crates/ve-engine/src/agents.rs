@@ -5,11 +5,12 @@
 //! approves in Settings → Permissions or with `ve mcp --approve CODE`. The host is told of each
 //! new request so the tray can say who asked for what.
 //!
-//! Each Module's tools are in its own module here ([`files`], [`performance`]). They share
-//! what this one defines: row caps and cursors ([`Page`]) and the [`Refusal`] of a call that
-//! cannot be answered.
+//! Each Module's tools are in its own module here ([`files`], [`performance`], [`network`]).
+//! They share what this one defines: row caps and cursors ([`Page`]) and the [`Refusal`] of a
+//! call that cannot be answered.
 
 pub mod files;
+pub mod network;
 pub mod performance;
 
 use crate::Engine;
@@ -21,20 +22,100 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// The Modules agents can read, each a Permission of its own.
+/// The Modules agents can read, by the name their Permission carries.
 pub const FILES: &str = "Files";
 pub const PERFORMANCE: &str = "Performance";
+pub const NETWORK: &str = "Network";
 
 /// Rows an answer holds unless the call asks for another number.
 pub const DEFAULT_LIMIT: usize = 50;
 /// The most rows one answer holds, whatever the call asks for.
 pub const MAX_LIMIT: usize = 200;
 
+/// A Module agents can read: each is a Permission of its own and a socket method of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Module {
+    Files,
+    Performance,
+    Network,
+}
+
+impl Module {
+    pub const ALL: [Module; 3] = [Module::Files, Module::Performance, Module::Network];
+
+    /// Its name, as its Permission and approval requests carry it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Module::Files => FILES,
+            Module::Performance => PERFORMANCE,
+            Module::Network => NETWORK,
+        }
+    }
+
+    /// The socket method that answers its tools.
+    pub fn method(self) -> &'static str {
+        match self {
+            Module::Files => "files",
+            Module::Performance => "performance",
+            Module::Network => "network",
+        }
+    }
+
+    /// The Module whose tools the socket method `method` answers.
+    pub fn from_method(method: &str) -> Option<Module> {
+        Module::ALL.into_iter().find(|m| m.method() == method)
+    }
+
+    /// The Module of the tool called `name`, if there is such a tool.
+    pub fn of_tool(name: &str) -> Option<Module> {
+        Module::ALL.into_iter().find(|m| m.has_tool(name))
+    }
+
+    fn has_tool(self, name: &str) -> bool {
+        match self {
+            Module::Files => files::Tool::from_name(name).is_some(),
+            Module::Performance => performance::Tool::from_name(name).is_some(),
+            Module::Network => network::Tool::from_name(name).is_some(),
+        }
+    }
+
+    /// The names of its tools.
+    fn tool_names(self) -> Vec<&'static str> {
+        match self {
+            Module::Files => files::Tool::ALL.map(files::Tool::name).to_vec(),
+            Module::Performance => performance::Tool::ALL.map(performance::Tool::name).to_vec(),
+            Module::Network => network::Tool::ALL.map(network::Tool::name).to_vec(),
+        }
+    }
+
+    /// Its tools, as `tools/list` describes them.
+    pub fn tools(self) -> Vec<ToolInfo> {
+        macro_rules! of {
+            ($tool:ty) => {
+                <$tool>::ALL
+                    .into_iter()
+                    .map(|t| ToolInfo {
+                        module: self,
+                        name: t.name(),
+                        description: t.description(),
+                        input_schema: t.input_schema(),
+                    })
+                    .collect()
+            };
+        }
+        match self {
+            Module::Files => of!(files::Tool),
+            Module::Performance => of!(performance::Tool),
+            Module::Network => of!(network::Tool),
+        }
+    }
+}
+
 /// A tool an agent can call, as `tools/list` describes it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolInfo {
     /// The Module whose Permission it needs.
-    pub module: &'static str,
+    pub module: Module,
     pub name: &'static str,
     pub description: &'static str,
     /// The JSON Schema of its arguments.
@@ -43,24 +124,7 @@ pub struct ToolInfo {
 
 /// Every tool agents can call, by Module.
 pub fn tools() -> Vec<ToolInfo> {
-    let files = files::Tool::ALL.map(|t| ToolInfo {
-        module: FILES,
-        name: t.name(),
-        description: t.description(),
-        input_schema: t.input_schema(),
-    });
-    let performance = performance::Tool::ALL.map(|t| ToolInfo {
-        module: PERFORMANCE,
-        name: t.name(),
-        description: t.description(),
-        input_schema: t.input_schema(),
-    });
-    files.into_iter().chain(performance).collect()
-}
-
-/// The Module of the tool called `name`, if there is such a tool.
-pub fn module_of(name: &str) -> Option<&'static str> {
-    tools().into_iter().find(|t| t.name == name).map(|t| t.module)
+    Module::ALL.into_iter().flat_map(Module::tools).collect()
 }
 
 /// Why a call was not answered.
@@ -140,7 +204,7 @@ impl Refusal {
 
     /// A tool name no Module has.
     pub fn unknown_tool(name: &str) -> Refusal {
-        let names: Vec<_> = tools().iter().map(|t| t.name).collect();
+        let names: Vec<_> = Module::ALL.into_iter().flat_map(Module::tool_names).collect();
         Refusal::new(
             Reason::UnknownTool,
             format!("unknown tool `{name}`; the tools are {}", names.join(", ")),
@@ -468,6 +532,15 @@ impl Agents<'_> {
         match self.access(agent, module, now) {
             Access::Allowed => Ok(()),
             Access::Pending(request) => Err(Refusal::pending(&request, now)),
+        }
+    }
+
+    /// Answers `agent`'s call of `module`'s tool `tool` at `now` (Unix seconds), or refuses it.
+    pub fn read(&self, module: Module, agent: &Agent, tool: &str, arguments: Value, now: i64) -> Result<Value, Refusal> {
+        match module {
+            Module::Files => self.files(agent, tool, arguments, now),
+            Module::Performance => self.performance(agent, tool, arguments, now),
+            Module::Network => self.network(agent, tool, arguments, now),
         }
     }
 }

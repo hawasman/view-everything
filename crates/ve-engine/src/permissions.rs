@@ -62,7 +62,7 @@ pub struct Permission {
     /// kept no time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granted_at: Option<i64>,
-    /// The Module an agent may read (`Files`); `None` for the other kinds.
+    /// The Module an agent may read (`Files`, `Performance`, ...); `None` for the other kinds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     /// The key `ve mcp serve` issued the agent on first contact: a client presenting another key
