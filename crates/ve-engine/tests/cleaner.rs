@@ -38,10 +38,17 @@ fn looked() -> (tempfile::TempDir, Engine, PathBuf) {
     fs::create_dir_all(mount.join("proj/target/debug")).unwrap();
     fs::write(mount.join("proj/Cargo.toml"), "[package]").unwrap();
     fs::write(mount.join("proj/target/debug/app"), vec![b'x'; 4096]).unwrap();
+    let engine = look(&mount, None);
+    (root, engine, mount.join("proj/target"))
+}
+
+/// An Engine indexing `mount` as its one Volume, once the Cleaner has looked there with the
+/// built-in rules and those of `rules_path`.
+fn look(mount: &Path, rules_path: Option<PathBuf>) -> Engine {
     let config = Config {
         index_path: None,
-        mounted: vec![volume(&mount)],
-        volumes: vec![volume(&mount)],
+        mounted: vec![volume(mount)],
+        volumes: vec![volume(mount)],
         remotes: Vec::new(),
         intervals: Default::default(),
         categories: CategoryMap::builtin(),
@@ -51,12 +58,51 @@ fn looked() -> (tempfile::TempDir, Engine, PathBuf) {
     wait_for("the first Sync", || {
         !engine.is_busy() && matches!(engine.shared.status.lock().phase, Phase::Idle)
     });
-    engine.shared.cleaner.configure(None, vec![volume(&mount)], Ages::default());
+    engine.shared.cleaner.configure(rules_path, vec![volume(mount)], Ages::default());
     wait_for("the Cleaner's look", || {
         cleaner::refresh(&engine.shared);
         engine.cleanables().version > 0
     });
-    (root, engine, mount.join("proj/target"))
+    engine
+}
+
+/// What root owns is only ever Admin only: never offered to, nor removed by, the normal Clean.
+#[cfg(unix)]
+#[test]
+fn cleanables_the_user_does_not_own_are_admin_only() {
+    use std::os::unix::fs::MetadataExt as _;
+    let mount = Path::new("/etc/ssl");
+    let mine = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let me = fs::metadata(mine.path()).unwrap().uid();
+    // Needs a small root-owned folder and a user other than root.
+    if me == 0 || !fs::metadata(mount).is_ok_and(|m| m.is_dir() && m.uid() == 0) {
+        eprintln!("skipped: needs /etc/ssl owned by root and a user other than root");
+        return;
+    }
+    let rules = mine.path().join("cleanup.toml");
+    fs::write(
+        &rules,
+        "[[rule]]\nname = \"Root's\"\ngroup = \"cache\"\nquery = 'parent:\"/etc/ssl\"'\nfiles = true\n",
+    )
+    .unwrap();
+    let engine = look(mount, Some(rules));
+    let found = engine.cleanables();
+    assert!(
+        engine.shared.cleaner.rules().errors.is_empty(),
+        "{:?}",
+        engine.shared.cleaner.rules().errors
+    );
+    assert!(found.own.iter().all(|c| c.rule.name != "Root's"), "offered to the normal Clean");
+    let theirs = found
+        .admin
+        .iter()
+        .find(|c| c.rule.name == "Root's")
+        .expect("an Admin only Cleanable");
+    let err = engine.clean(&[theirs.key()]).unwrap_err();
+    assert!(err.contains("needs the admin step"), "{err}");
+    assert!(theirs.path.symlink_metadata().is_ok());
+    // Still a Cleanable for is:cleanable.
+    assert!(engine.shared.cleanables.lock().set.contains(theirs.entry.index()));
 }
 
 #[test]
