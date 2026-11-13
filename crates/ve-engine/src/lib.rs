@@ -336,6 +336,9 @@ impl Engine {
     }
 
     pub fn forget(&self, identity: String) {
+        // The indexer takes it once the running Sync ends: a Paused one the app started would
+        // hold it until the machine is quiet, so it runs anyway.
+        self.shared.tasks.run_anyway_kinds(&[TaskKind::Sync, TaskKind::CatchUp]);
         let _ = self.commands.send(Command::Forget(identity));
     }
 

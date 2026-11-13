@@ -148,7 +148,8 @@ impl Tasks {
         self.begin_as(kind, label, cancellable, StartedBy::App)
     }
 
-    pub fn begin_as(&self, kind: TaskKind, label: String, cancellable: bool, started_by: StartedBy) -> TaskHandle {
+    /// Begins a Task started by `started_by`, for a caller that decides it at run time.
+    pub(crate) fn begin_as(&self, kind: TaskKind, label: String, cancellable: bool, started_by: StartedBy) -> TaskHandle {
         let cancel = Arc::new(AtomicBool::new(false));
         let pause = Arc::new(AtomicBool::new(false));
         let id = {
