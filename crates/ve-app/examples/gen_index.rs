@@ -1,5 +1,8 @@
-//! Writes a synthetic Index for measuring the Explorer: `gen_index <entries> <out.bin>`.
-//! Its one Volume is mounted at a path that does not exist, so a sync leaves it as it is.
+//! Writes a synthetic Index for measuring the Explorer: `gen_index <entries> <out.bin> [identity]`.
+//! Its one Volume is mounted at a path that does not exist, so a sync leaves it as it is. Its
+//! identity is `bench`, which `VE_BENCH_MOUNT` matches, unless given: another identity matches no
+//! mounted Volume, so it stays an Offline Volume beside the ones the app indexes (a folder
+//! Synced on top of it by `mem_report` or the UI sandbox's `VE_SANDBOX_VOLUME`).
 
 use std::path::Path;
 use ve_core::{EntryMeta, Index, SyncState};
@@ -8,12 +11,13 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let total: usize = args.next().and_then(|a| a.parse().ok()).expect("entry count");
     let out = args.next().expect("output path");
+    let identity = args.next().unwrap_or_else(|| "bench".into());
     let mut index = Index::new();
     let root_meta = EntryMeta {
         is_dir: true,
         ..Default::default()
     };
-    let volume = index.add_volume(Path::new("/ve-bench"), "ext4", "bench", root_meta, SyncState::Walk);
+    let volume = index.add_volume(Path::new("/ve-bench"), "ext4", &identity, root_meta, SyncState::Walk);
     let root = index.volume(volume).unwrap().root;
     let exts = ["mp4", "jpg", "rs", "txt", "zip", "pdf", "mp3", "exe", "log", "bin"];
     let mut made = 0;
