@@ -7498,6 +7498,7 @@ dependencies = [
  "async-channel",
  "chrono",
  "dirs 7.0.0",
+ "embed-resource",
  "futures-lite",
  "global-hotkey",
  "gpui-kit",

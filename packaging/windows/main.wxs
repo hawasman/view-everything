@@ -8,6 +8,9 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of View Everything is already installed." />
     <MediaTemplate EmbedCab="yes" />
     <WixVariable Id="WixUILicenseRtf" Value="packaging\windows\License.rtf" />
+    <!-- Shown by the Start menu shortcut and in Add/Remove Programs. -->
+    <Icon Id="ViewEverythingIcon" SourceFile="packaging\icons\view-everything.ico" />
+    <Property Id="ARPPRODUCTICON" Value="ViewEverythingIcon" />
 
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
@@ -34,7 +37,7 @@
         <Shortcut Id="StartMenuShortcutLnk" Name="View Everything"
                   Description="Find files by name and find what is consuming disk space"
                   Target="[APPLICATIONFOLDER]view-everything.exe"
-                  WorkingDirectory="APPLICATIONFOLDER" />
+                  WorkingDirectory="APPLICATIONFOLDER" Icon="ViewEverythingIcon" />
         <RegistryValue Root="HKCU" Key="Software\view-everything" Name="StartMenuShortcut"
                        Type="integer" Value="1" KeyPath="yes" />
       </Component>

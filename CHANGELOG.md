@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Windows: the app icon is embedded in `view-everything.exe` and set on the Start menu shortcut and in Add/Remove Programs.
+
 ### Tasks
 - Every Task records who started it, shown on the Work page and in the Inspector. Tasks the app starts on its own (Catch-up, a periodic Sync, a Duplicate search, a Cleaner search) run at the operating system's lowest CPU and disk priority, window open or not; Sync now, Rescan, Clean and Trash run at full speed. [More](docs/guide/live-updates-and-background.md#who-started-a-task)
 - A Task the app started on its own pauses after about 30 s of heavy CPU or memory load (read from the Performance samples) and resumes after about 2 quiet minutes. The Work page, the Inspector and the tray say "Paused: the machine is busy" with **Run anyway**, which resumes it at once. Tasks you start never pause. [More](docs/guide/live-updates-and-background.md#paused-while-the-machine-is-busy)

@@ -64,3 +64,6 @@ zbus = { version = "5.19.0", default-features = false, features = ["async-io", "
 [dev-dependencies]
 minisign = "0.10"
 tempfile = "3.27.0"
+
+[build-dependencies]
+embed-resource = "3.0.12"
