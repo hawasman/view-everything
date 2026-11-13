@@ -19,20 +19,6 @@ use ve_scan::VolumeInfo;
 /// Least time between two looks that only follow the Index moving on.
 const RELOOK_THROTTLE: Duration = Duration::from_secs(5);
 
-/// Why nothing on `volume` can be changed right now, if so: a Remote, an Offline Volume or a
-/// read-only mount.
-pub fn volume_blocker(volume: &ve_core::Volume, volumes: &[VolumeInfo]) -> Option<String> {
-    if volume.is_remote() {
-        return Some("Remote Locations are read-only".into());
-    }
-    if !volume.online {
-        return Some("Offline Volume: it is not mounted, so nothing on it can be changed.".into());
-    }
-    let info = volumes.iter().find(|v| v.mount == volume.mount)?;
-    info.read_only
-        .then(|| format!("{} is mounted read-only, so nothing on it can be changed.", info.mount.display()))
-}
-
 /// One Cleanable of a Clean: its rule, the path removed (or the command's working folder) and,
 /// when it was ticked for being old, the age limit in days it must still meet on disk.
 pub type Planned = (Arc<Rule>, PathBuf, Option<u64>);
@@ -404,17 +390,14 @@ pub fn start_admin_clean(shared: &Arc<Shared>, plan: Vec<Planned>) -> Option<Cle
 }
 
 fn start(shared: &Arc<Shared>, plan: Vec<Planned>, admin: bool) -> Option<Clean> {
-    // A Clean cannot run twice, whichever client started it.
-    if shared.tasks.is_running(TaskKind::Clean) {
-        return None;
-    }
     let total = plan.len();
     let label = if admin {
         format!("Clean {total} Cleanables as admin")
     } else {
         format!("Clean {total} Cleanables")
     };
-    let task = shared.tasks.begin(TaskKind::Clean, label, false);
+    // A Clean cannot run twice, whichever client started it.
+    let task = shared.tasks.begin_alone(TaskKind::Clean, label, false)?;
     task.set_progress(0, Some(total as u64));
     Some(Clean {
         shared: shared.clone(),

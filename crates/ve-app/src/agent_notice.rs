@@ -33,11 +33,12 @@ fn proposal_text(proposal: &Proposal) -> (String, String) {
             format::size(proposal.on_disk_size())
         ),
     };
+    let hours = (proposal.lapses_at - proposal.submitted_at) / 3600;
     (
         "Agent Proposal".to_owned(),
         format!(
             "The agent \u{201c}{agent}\u{201d} proposes {what}: {reason}. Nothing has moved. Review and apply it with \
-             `ve proposals --apply {id}`, or dismiss it with `ve proposals --dismiss {id}`; unanswered, it lapses in 24 hours."
+             `ve proposals --apply {id}`, or dismiss it with `ve proposals --dismiss {id}`; unanswered, it lapses in {hours} hours."
         ),
     )
 }
@@ -64,7 +65,8 @@ fn notify((title, body): (String, String)) {
 fn post(title: &str, body: &str) -> Result<(), String> {
     use std::collections::HashMap;
     use zbus::zvariant::Value;
-    // Servers that support body markup read `<`, `>` and `&` as markup; the agent names itself.
+    // Servers that support body markup read `<`, `>` and `&` as markup; the agent writes its
+    // name and a Proposal's reason.
     let body = body.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     let connection = zbus::blocking::Connection::session().map_err(|e| e.to_string())?;
     // Ties the notification to the app's desktop file, so the desktop shows its name and icon.

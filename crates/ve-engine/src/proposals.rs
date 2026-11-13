@@ -12,8 +12,8 @@
 //! The Proposals are kept beside the Index (`proposals.json`, readable by the user alone), so a
 //! restart of the app neither forgets one nor resets its clock.
 
-use crate::Engine;
 use crate::agents::{Agent, Reason, Refusal};
+use crate::{Engine, volume_blocker};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -237,12 +237,18 @@ impl Store {
         let saved = match path.as_deref().map(|p| (p, std::fs::read_to_string(p))) {
             None => Saved::default(),
             Some((_, Err(e))) if e.kind() == io::ErrorKind::NotFound => Saved::default(),
-            Some((path, read)) => match read.map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())) {
+            Some((path, read)) => match read
+                .map_err(|e| e.to_string())
+                .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
+            {
                 Ok(saved) => saved,
                 Err(e) => {
                     let aside = path.with_extension("json.bad");
                     let moved = std::fs::rename(path, &aside).map_or_else(|e| format!(" (not set aside: {e})"), |()| String::new());
-                    eprintln!("Could not read the Proposals ({e}); starting with none, the file is {}{moved}", aside.display());
+                    eprintln!(
+                        "Could not read the Proposals ({e}); starting with none, the file is {}{moved}",
+                        aside.display()
+                    );
                     Saved::default()
                 }
             },
@@ -363,7 +369,7 @@ fn answered(p: &Proposal) -> String {
         Status::Pending => format!("Proposal {} is pending", p.id),
         Status::Applied => format!("Proposal {} was already applied", p.id),
         Status::Dismissed => format!("Proposal {} was dismissed", p.id),
-        Status::Lapsed => format!("Proposal {} lapsed: it was left unanswered for 24 hours", p.id),
+        Status::Lapsed => format!("Proposal {} lapsed: it was left unanswered for {} hours", p.id, LAPSE / 3600),
     }
 }
 
@@ -414,9 +420,11 @@ impl Proposals<'_> {
         if self.engine.is_loading_index() {
             return Err(Refusal::new(Reason::Loading, crate::socket::search::LOADING));
         }
+        let mounted = ve_scan::discover_volumes();
         let rows = {
             let index = self.engine.shared.index.read();
             let (mut remote, mut offline, mut unknown, mut volumes) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let mut read_only = Vec::new();
             let mut ids = Vec::new();
             for text in paths {
                 // Not only absolute paths: a Remote's Entries read `ssh:user@host:/path/...`.
@@ -428,6 +436,8 @@ impl Proposals<'_> {
                     Some(v) if v.is_remote() => remote.push(text.clone()),
                     Some(v) if !v.online => offline.push(text.clone()),
                     _ if index.parent(id).is_none() => volumes.push(text.clone()),
+                    // Neither Remote nor offline: what blocks it is a read-only mount.
+                    Some(v) if volume_blocker(v, &mounted).is_some() => read_only.push(text.clone()),
                     _ => ids.push(id),
                 }
             }
@@ -454,10 +464,7 @@ impl Proposals<'_> {
             if !unknown.is_empty() {
                 return Err(Refusal::new(
                     Reason::BadPath,
-                    format!(
-                        "{} is not a path in the Index; files.find finds Entries by name",
-                        some(&unknown)
-                    ),
+                    format!("{} is not a path in the Index; files.find finds Entries by name", some(&unknown)),
                 )
                 .with_paths(unknown));
             }
@@ -467,6 +474,13 @@ impl Proposals<'_> {
                     format!("{} is a whole Volume, which cannot be moved to the Trash", some(&volumes)),
                 )
                 .with_paths(volumes));
+            }
+            if !read_only.is_empty() {
+                return Err(Refusal::new(
+                    Reason::BadPath,
+                    format!("{} is on a read-only mount, so it cannot be moved to the Trash", some(&read_only)),
+                )
+                .with_paths(read_only));
             }
             let chosen: HashSet<EntryId> = ids.iter().copied().collect();
             let mut seen = HashSet::new();
@@ -553,7 +567,9 @@ impl Proposals<'_> {
 
     /// Every Proposal kept at `now`, newest first.
     pub fn list(&self, now: i64) -> Vec<Proposal> {
-        self.with(now, |saved| (saved.proposals.iter().rev().map(|h| h.proposal.clone()).collect(), false))
+        self.with(now, |saved| {
+            (saved.proposals.iter().rev().map(|h| h.proposal.clone()).collect(), false)
+        })
     }
 
     /// The pending Proposal `id` at `now`, or why it cannot be answered.
@@ -603,10 +619,7 @@ impl Proposals<'_> {
         } else {
             self.engine.move_to_trash(go.into_iter().map(|r| r.path).collect())
         };
-        dropped.extend(trashed.missing.into_iter().map(|path| Dropped {
-            path,
-            why: Why::Vanished,
-        }));
+        dropped.extend(trashed.missing.into_iter().map(|path| Dropped { path, why: Why::Vanished }));
         let outcome = Outcome {
             trashed: trashed.moved,
             dropped,

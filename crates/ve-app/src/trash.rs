@@ -1,5 +1,5 @@
-//! Trash and Empty Trash. The app never deletes permanently except through Empty Trash. Moving
-//! to the Trash is the engine's Task ([`Shared::move_to_trash`]); this is the window's side of it.
+//! Trash and Empty Trash. Moving to the Trash is the engine's Task ([`Shared::move_to_trash`]);
+//! this is the window's side of it, and Empty Trash, one of the two permanent changes (with Clean).
 
 use crate::format;
 use gpui_kit::component::button::ButtonVariant;
@@ -11,9 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use ve_core::{EntryId, Index};
-use ve_engine::cleaner::volume_blocker;
 use ve_engine::tasks::{Outcome, TaskKind};
-use ve_engine::{Repaint, Shared};
+use ve_engine::{Repaint, Shared, volume_blocker};
 use ve_scan::VolumeInfo;
 
 /// Bytes and items the trash currently holds, or `None` where the platform can't tell.
@@ -269,15 +268,20 @@ pub struct Trash {
     size: Arc<Mutex<Option<(u64, u64)>>>,
     /// Bumped per measurement so a slow, older one can't overwrite a newer result.
     measures: Arc<AtomicU64>,
+    /// The engine's [`Shared::trash_moves`] as last seen: a Trash any client finished since
+    /// (this window's, or an applied Proposal) changed what the Trash holds.
+    moves_seen: Arc<AtomicU64>,
 }
 
 impl Trash {
     pub fn new(shared: Arc<Shared>, repaint: Repaint) -> Self {
+        let moves_seen = Arc::new(AtomicU64::new(shared.trash_moves.load(Ordering::SeqCst)));
         let trash = Self {
             shared,
             repaint,
             size: Arc::new(Mutex::new(None)),
             measures: Arc::new(AtomicU64::new(0)),
+            moves_seen,
         };
         trash.measure();
         trash
@@ -285,12 +289,22 @@ impl Trash {
 
     /// Bytes the Trash holds, as of the last measurement.
     pub fn size(&self) -> Option<u64> {
+        self.follow_moves();
         self.size.lock().map(|(bytes, _)| bytes)
     }
 
     /// Items the Trash holds, as of the last measurement.
     pub fn items(&self) -> Option<u64> {
+        self.follow_moves();
         self.size.lock().map(|(_, items)| items)
+    }
+
+    /// Measures again once a Trash finished since the last measurement.
+    fn follow_moves(&self) {
+        let moves = self.shared.trash_moves.load(Ordering::SeqCst);
+        if self.moves_seen.swap(moves, Ordering::SeqCst) != moves {
+            self.measure();
+        }
     }
 
     fn measure(&self) {
@@ -453,7 +467,6 @@ impl Trash {
             .spawn(cx, async move |cx| {
                 let shared = this.shared.clone();
                 let trashed = cx.background_executor().spawn(async move { shared.move_to_trash(items) }).await;
-                this.measure();
                 let text = trashed_message(&trashed.moved, trashed.missing.len(), trashed.error());
                 cx.update(|window, cx| {
                     window.push_notification(Notification::info(text), cx);

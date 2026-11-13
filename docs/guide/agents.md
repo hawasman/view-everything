@@ -78,7 +78,7 @@ An agent approved to propose in Files (its own Permission, see [Approving it](#a
 
 | Tool | Arguments | Answers |
 | --- | --- | --- |
-| `files.propose_trash` | `paths` (1 to 200, as `files.find` answers them), `reason` | the Proposal: `id`, `status` (`pending`), `lapses_at`, `rows`, `on_disk_size`. A folder takes everything in it, so a path inside another one proposed is left out. Every path must be in the Index, on a Volume that is online and not a whole Volume; a Remote's Entry is refused with `remote`, an Offline Volume's with `offline`, anything else with `bad_path`, each with the `paths` it is about, and nothing is submitted |
+| `files.propose_trash` | `paths` (1 to 200, as `files.find` answers them), `reason` | the Proposal: `id`, `status` (`pending`), `lapses_at`, `rows`, `on_disk_size`. A folder takes everything in it, so a path inside another one proposed is left out. Every path must be in the Index, on a Volume that is online and mounted writable, and not a whole Volume; a Remote's Entry is refused with `remote`, an Offline Volume's with `offline`, anything else with `bad_path`, each with the `paths` it is about, and nothing is submitted |
 | `files.proposal` | `id` | where one of this agent's Proposals stands: `status` (`pending`, `applied`, `dismissed` or `lapsed`), `reason`, `submitted_at`, `lapses_at`, `answered_at`, and once applied `outcome`: `trashed` (the paths moved), `dropped` (`path` and `why`: `changed`, `vanished` or `offline`), `failed` (`path` and `error`) and `left_out` (rows you did not confirm) |
 
 A Proposal arrives with a desktop notification naming the agent, what it proposes and its reason (Linux and macOS). Answer it from a shell:
@@ -104,7 +104,7 @@ A call that cannot be answered comes back as an error result whose `structuredCo
 | `approval_pending` | no Permission yet; `code` and `expires_at` say what to approve |
 | `not_approved` | no Permission, and the app is not running to ask you |
 | `bad_query` | the Query does not parse (the message names the modifier) |
-| `bad_path` | `path` is not absolute, or not in the Index; for a Proposal, a path not in the Index or a whole Volume (`paths` lists them) |
+| `bad_path` | `path` is not absolute, or not in the Index; for a Proposal, a path not in the Index, a whole Volume or on a read-only mount (`paths` lists them) |
 | `remote` | a Proposal names a Remote's Entries, which are read-only and have no Trash (`paths` lists them) |
 | `offline` | a Proposal names Entries of an Offline Volume (`paths` lists them) |
 | `too_many_pending` | the agent already has 20 Proposals waiting for you |

@@ -20,6 +20,7 @@ target/release/examples/mem_report /path/to/scratch/index-5m.bin [/path/to/a/rea
 ```
 
 - **What it measures:** it loads the Index, then builds what the engine keeps beside it: FileOrder, a View for the empty Query and for `ext:mp4`, Category sums and the Duplicates search.
+- **Not the Treemap layout:** the Treemap is the window's, so `mem_report` does not build it. Its size follows the window and the Depth, not the Index: at most `MAX_TILES` (15,000, in `crates/ve-app/src/treemap.rs`) tiles of 72 bytes, about 1 MiB. The figures on #31 were taken by counting the tiles of a layout of an Index of `/usr`; the synthetic Index lays out as a single tile, its 50k equal folders each below the minimum tile size.
 - **With a folder:** it also adds the folder as a second Location and Syncs it, to show what a Sync leaves on top of a loaded Index.
 - **The table:** each row gives the heap bytes held, the peak while building, live heap, and RSS before and after `malloc_trim`. A counting global allocator supplies the heap figures.
 - **The column list:** after the table it prints every allocation of 256 KiB or more that `Index::load` left live, in the order each was first made. Deserialization follows the order of `Index`'s fields, so the list reads as the columns in that order. A column of several vectors (`SparseColumn`, `Rank`, `U64Column`) shows as several lines; the small ones (the wide side tables, the folder child runs) are not listed.

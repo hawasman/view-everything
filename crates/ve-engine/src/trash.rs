@@ -66,7 +66,10 @@ impl Shared {
                 Err(_) if std::fs::symlink_metadata(&path).is_err() => trashed.moved.push(path),
                 Err(e) => trashed.failed.push((path, e)),
             }
-            task.set_progress((trashed.missing.len() + trashed.moved.len() + trashed.failed.len()) as u64, Some(total));
+            task.set_progress(
+                (trashed.missing.len() + trashed.moved.len() + trashed.failed.len()) as u64,
+                Some(total),
+            );
         }
         {
             let mut index = self.index.write();
@@ -80,6 +83,7 @@ impl Shared {
             None => Outcome::Done(format!("Moved {} item(s)", crate::format::count(trashed.moved.len() as u64))),
             Some(e) => Outcome::Failed(e),
         });
+        self.trash_moves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         (self.repaint)();
         trashed
     }

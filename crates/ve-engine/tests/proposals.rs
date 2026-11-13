@@ -105,7 +105,11 @@ fn status(engine: &Engine, agent: &Agent, id: u64, now: i64) -> Result<Value, Re
 
 #[test]
 fn proposing_is_a_permission_of_its_own_first_refused_with_a_code() {
-    let (data, mount, trash) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (data, mount, trash) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
     fs::write(mount.path().join("old.log"), "x").unwrap();
     let engine = start(data.path(), mount.path(), trash.path());
     let told = Arc::new(Mutex::new(Vec::new()));
@@ -117,7 +121,9 @@ fn proposing_is_a_permission_of_its_own_first_refused_with_a_code() {
     let paths = [path(mount.path(), "old.log")];
 
     // Reading Files grants no proposing.
-    let read = engine.agents().read(ve_engine::agents::Module::Files, &claude, "files.locations", Value::Null, T0);
+    let read = engine
+        .agents()
+        .read(ve_engine::agents::Module::Files, &claude, "files.locations", Value::Null, T0);
     approve(&engine, &read.unwrap_err(), T0);
     let refused = propose(&engine, &claude, &paths, T0 + 1).unwrap_err();
     assert_eq!(refused.reason, Reason::ApprovalPending);
@@ -137,14 +143,26 @@ fn proposing_is_a_permission_of_its_own_first_refused_with_a_code() {
 
     // Revoking proposing leaves reading alone, and the other way round.
     engine.agents().revoke("Claude", Kind::AgentProposals, "Files").unwrap();
-    assert_eq!(propose(&engine, &claude, &paths, T0 + 4).unwrap_err().reason, Reason::ApprovalPending);
-    assert!(engine.agents().read(ve_engine::agents::Module::Files, &claude, "files.locations", Value::Null, T0 + 4).is_ok());
+    assert_eq!(
+        propose(&engine, &claude, &paths, T0 + 4).unwrap_err().reason,
+        Reason::ApprovalPending
+    );
+    assert!(
+        engine
+            .agents()
+            .read(ve_engine::agents::Module::Files, &claude, "files.locations", Value::Null, T0 + 4)
+            .is_ok()
+    );
     engine.shutdown();
 }
 
 #[test]
 fn remote_and_offline_entries_are_refused_with_their_paths() {
-    let (data, mount, trash) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (data, mount, trash) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
     fs::write(mount.path().join("here.txt"), "x").unwrap();
     let engine = start(data.path(), mount.path(), trash.path());
     let remote_file = {
@@ -164,21 +182,31 @@ fn remote_and_offline_entries_are_refused_with_their_paths() {
     let whole = propose(&engine, &claude, &[mount.path().to_string_lossy().into_owned()], T0).unwrap_err();
     assert_eq!(whole.reason, Reason::BadPath);
     let nowhere = propose(&engine, &claude, &["/nowhere/at/all".into()], T0).unwrap_err();
-    assert_eq!((nowhere.reason, nowhere.paths), (Reason::BadPath, vec!["/nowhere/at/all".to_owned()]));
+    assert_eq!(
+        (nowhere.reason, nowhere.paths),
+        (Reason::BadPath, vec!["/nowhere/at/all".to_owned()])
+    );
 
     engine.set_volumes(Vec::new(), Vec::new(), Vec::new());
     wait_for("the Volume to go offline", || {
         engine.shared.index.read().volumes().any(|(_, v)| !v.is_remote() && !v.online)
     });
     let offline = propose(&engine, &claude, &[path(mount.path(), "here.txt")], T0).unwrap_err();
-    assert_eq!((offline.reason, offline.paths), (Reason::Offline, vec![path(mount.path(), "here.txt")]));
+    assert_eq!(
+        (offline.reason, offline.paths),
+        (Reason::Offline, vec![path(mount.path(), "here.txt")])
+    );
     assert!(engine.proposals().list(T0).is_empty());
     engine.shutdown();
 }
 
 #[test]
 fn applying_drops_rows_that_changed_or_vanished_and_moves_the_rest() {
-    let (data, mount, trash) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (data, mount, trash) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
     for name in ["keep.bin", "changed.bin", "gone.bin", "deleted.bin", "locked.txt", "unticked.bin"] {
         fs::write(mount.path().join(name), "x").unwrap();
     }
@@ -187,7 +215,16 @@ fn applying_drops_rows_that_changed_or_vanished_and_moves_the_rest() {
     let engine = start(data.path(), mount.path(), trash.path());
     let claude = agent("Claude");
     may_propose(&engine, &claude);
-    let names = ["keep.bin", "changed.bin", "gone.bin", "deleted.bin", "locked.txt", "unticked.bin", "build", "build/out.o"];
+    let names = [
+        "keep.bin",
+        "changed.bin",
+        "gone.bin",
+        "deleted.bin",
+        "locked.txt",
+        "unticked.bin",
+        "build",
+        "build/out.o",
+    ];
     let paths: Vec<String> = names.iter().map(|n| path(mount.path(), n)).collect();
     let id = propose(&engine, &claude, &paths, T0).unwrap()["id"].as_u64().unwrap();
     let proposal = engine.proposals().list(T0).pop().unwrap();
@@ -212,8 +249,14 @@ fn applying_drops_rows_that_changed_or_vanished_and_moves_the_rest() {
     assert_eq!(
         check.dropped,
         [
-            Dropped { path: mount.path().join("changed.bin"), why: Why::Changed },
-            Dropped { path: mount.path().join("gone.bin"), why: Why::Vanished },
+            Dropped {
+                path: mount.path().join("changed.bin"),
+                why: Why::Changed
+            },
+            Dropped {
+                path: mount.path().join("gone.bin"),
+                why: Why::Vanished
+            },
         ]
     );
     let confirmed: Vec<PathBuf> = check
@@ -229,13 +272,26 @@ fn applying_drops_rows_that_changed_or_vanished_and_moves_the_rest() {
     assert_eq!(
         outcome.dropped,
         [
-            Dropped { path: mount.path().join("changed.bin"), why: Why::Changed },
-            Dropped { path: mount.path().join("gone.bin"), why: Why::Vanished },
-            Dropped { path: mount.path().join("deleted.bin"), why: Why::Vanished },
+            Dropped {
+                path: mount.path().join("changed.bin"),
+                why: Why::Changed
+            },
+            Dropped {
+                path: mount.path().join("gone.bin"),
+                why: Why::Vanished
+            },
+            Dropped {
+                path: mount.path().join("deleted.bin"),
+                why: Why::Vanished
+            },
         ]
     );
     assert_eq!(
-        outcome.failed.iter().map(|f| (f.path.clone(), f.error.as_str())).collect::<Vec<_>>(),
+        outcome
+            .failed
+            .iter()
+            .map(|f| (f.path.clone(), f.error.as_str()))
+            .collect::<Vec<_>>(),
         [(mount.path().join("locked.txt"), "Permission denied")]
     );
     assert_eq!(outcome.left_out, [mount.path().join("unticked.bin")]);
@@ -256,15 +312,28 @@ fn applying_drops_rows_that_changed_or_vanished_and_moves_the_rest() {
     // The agent reads the outcome; a second answer is refused.
     let read = status(&engine, &claude, id, T0 + 30).unwrap();
     assert_eq!(read["status"], "applied");
-    assert_eq!(read["outcome"]["dropped"][0], json!({ "path": mount.path().join("changed.bin"), "why": "changed" }));
-    assert!(engine.proposals().apply(id, &confirmed, T0 + 31).unwrap_err().contains("already applied"));
+    assert_eq!(
+        read["outcome"]["dropped"][0],
+        json!({ "path": mount.path().join("changed.bin"), "why": "changed" })
+    );
+    assert!(
+        engine
+            .proposals()
+            .apply(id, &confirmed, T0 + 31)
+            .unwrap_err()
+            .contains("already applied")
+    );
     assert!(engine.proposals().dismiss(id, T0 + 31).unwrap_err().contains("already applied"));
     engine.shutdown();
 }
 
 #[test]
 fn a_proposal_is_dismissed_or_lapses_and_its_status_survives_a_restart() {
-    let (data, mount, trash) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (data, mount, trash) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
     fs::write(mount.path().join("a.tmp"), "x").unwrap();
     let paths = [path(mount.path(), "a.tmp")];
     let (claude, other) = (agent("Claude"), agent("Other"));
@@ -282,6 +351,13 @@ fn a_proposal_is_dismissed_or_lapses_and_its_status_survives_a_restart() {
     let granted = engine.permissions().list();
     engine.shutdown();
     drop(engine);
+    // It holds the agents' keys: readable by the user alone.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(data.path().join("proposals.json")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     // Kept beside the Index: a restart forgets nothing. (The host loads the Permissions.)
     let engine = start(data.path(), mount.path(), trash.path());
@@ -289,7 +365,10 @@ fn a_proposal_is_dismissed_or_lapses_and_its_status_survives_a_restart() {
     assert_eq!(status(&engine, &claude, dismissed, T0 + 6).unwrap()["status"], "dismissed");
     assert_eq!(status(&engine, &claude, lapsing, T0 + 1 + LAPSE - 1).unwrap()["status"], "pending");
     let lapsed = status(&engine, &claude, lapsing, T0 + 1 + LAPSE).unwrap();
-    assert_eq!((lapsed["status"].as_str(), lapsed["answered_at"].as_i64()), (Some("lapsed"), Some(T0 + 1 + LAPSE)));
+    assert_eq!(
+        (lapsed["status"].as_str(), lapsed["answered_at"].as_i64()),
+        (Some("lapsed"), Some(T0 + 1 + LAPSE))
+    );
     let refused = engine.proposals().apply(lapsing, &[mount.path().join("a.tmp")], T0 + 2 + LAPSE);
     assert!(refused.unwrap_err().contains("lapsed"));
     assert!(mount.path().join("a.tmp").exists());
@@ -305,7 +384,11 @@ fn a_proposal_is_dismissed_or_lapses_and_its_status_survives_a_restart() {
 
 #[test]
 fn an_agent_may_have_only_so_many_proposals_waiting() {
-    let (data, mount, trash) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (data, mount, trash) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
     fs::write(mount.path().join("a.tmp"), "x").unwrap();
     let engine = start(data.path(), mount.path(), trash.path());
     let claude = agent("Claude");

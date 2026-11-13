@@ -58,6 +58,20 @@ pub type Intervals = HashMap<PathBuf, Duration>;
 /// Tells whichever client is showing the Engine that it should draw again.
 pub type Repaint = Arc<dyn Fn() + Send + Sync>;
 
+/// Why nothing on `volume` can be changed right now, if so: a Remote, an Offline Volume or a
+/// read-only mount.
+pub fn volume_blocker(volume: &ve_core::Volume, volumes: &[VolumeInfo]) -> Option<String> {
+    if volume.is_remote() {
+        return Some("Remote Locations are read-only".into());
+    }
+    if !volume.online {
+        return Some("Offline Volume: it is not mounted, so nothing on it can be changed.".into());
+    }
+    let info = volumes.iter().find(|v| v.mount == volume.mount)?;
+    info.read_only
+        .then(|| format!("{} is mounted read-only, so nothing on it can be changed.", info.mount.display()))
+}
+
 /// What an Engine starts with.
 pub struct Config {
     /// Where the Index is saved, with the Snapshots, the hash cache and the macOS event id
@@ -130,6 +144,9 @@ pub struct Shared {
     pub proposals: proposals::Store,
     /// How the Trash moves an item; `None` for the operating system's trash.
     trash_mover: Mutex<Option<trash::Mover>>,
+    /// Counts the Trash Tasks that finished, whichever client started them, so a client that
+    /// shows how much the Trash holds knows to measure it again.
+    pub trash_moves: AtomicU64,
     /// Called from the background threads whenever something a client shows has changed.
     pub repaint: Repaint,
 }
@@ -281,6 +298,7 @@ impl Engine {
             agents: agents::Store::default(),
             proposals,
             trash_mover: Mutex::new(None),
+            trash_moves: AtomicU64::new(0),
             repaint,
         });
         let (commands, command_rx) = mpsc::channel();
@@ -1502,6 +1520,7 @@ mod tests {
             agents: Default::default(),
             proposals: proposals::Store::load(None),
             trash_mover: Mutex::new(None),
+            trash_moves: AtomicU64::new(0),
             repaint: Arc::new(|| {}),
         }
     }

@@ -5,7 +5,7 @@
 use chrono::TimeZone;
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use ve_engine::format;
 use ve_engine::proposals::{Check, Proposal};
@@ -47,7 +47,8 @@ pub fn main(args: &[String]) -> ExitCode {
 }
 
 fn id_of(text: &str) -> Result<u64, String> {
-    text.parse().map_err(|_| format!("{text} is not a Proposal id (`ve proposals` lists them)"))
+    text.parse()
+        .map_err(|_| format!("{text} is not a Proposal id (`ve proposals` lists them)"))
 }
 
 /// Connects to the running app, or says why not.
@@ -79,6 +80,21 @@ fn time(at: i64) -> String {
 /// "3 items", "1 item".
 fn items(n: usize) -> String {
     format!("{} item{}", format::count(n as u64), if n == 1 { "" } else { "s" })
+}
+
+/// `path` for the terminal: a control character in a file name (a newline, an escape
+/// sequence) is shown escaped, so a name cannot fake or hide lines of what will move.
+fn shown(path: &Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 fn list(out: &mut impl Write) -> Result<(), String> {
@@ -116,7 +132,7 @@ fn apply(id: u64, input: &mut impl BufRead, out: &mut impl Write) -> Result<(), 
     if !dropped.is_empty() {
         writeln!(out, "Left out, {}:", items(dropped.len())).map_err(io)?;
         for d in &dropped {
-            writeln!(out, "  {}: {}", d.path.display(), d.why.text()).map_err(io)?;
+            writeln!(out, "  {}: {}", shown(&d.path), d.why.text()).map_err(io)?;
         }
     }
     let paths: Vec<PathBuf> = keep.iter().map(|r| r.path.clone()).collect();
@@ -126,7 +142,7 @@ fn apply(id: u64, input: &mut impl BufRead, out: &mut impl Write) -> Result<(), 
         let total: u64 = keep.iter().map(|r| r.on_disk_size).sum();
         writeln!(out, "To move to the Trash, {}, {} on disk:", items(keep.len()), format::size(total)).map_err(io)?;
         for row in &keep {
-            writeln!(out, "  {}  ({})", row.path.display(), format::size(row.on_disk_size)).map_err(io)?;
+            writeln!(out, "  {}  ({})", shown(&row.path), format::size(row.on_disk_size)).map_err(io)?;
         }
         writeln!(
             out,
@@ -149,10 +165,10 @@ fn apply(id: u64, input: &mut impl BufRead, out: &mut impl Write) -> Result<(), 
     }
     // Rows that changed between the check and the move.
     for d in outcome.dropped.iter().filter(|d| !dropped.contains(d)) {
-        writeln!(out, "Left out {}: {}", d.path.display(), d.why.text()).map_err(io)?;
+        writeln!(out, "Left out {}: {}", shown(&d.path), d.why.text()).map_err(io)?;
     }
     for f in &outcome.failed {
-        writeln!(out, "Could not move {}: {}", f.path.display(), f.error).map_err(io)?;
+        writeln!(out, "Could not move {}: {}", shown(&f.path), f.error).map_err(io)?;
     }
     if outcome.trashed.is_empty() {
         writeln!(out, "Proposal {id} is applied; nothing moved.").map_err(io)?;
@@ -168,10 +184,5 @@ fn apply(id: u64, input: &mut impl BufRead, out: &mut impl Write) -> Result<(), 
 
 fn dismiss(id: u64, out: &mut impl Write) -> Result<(), String> {
     let dismissed: Proposal = call(&mut connect()?, "proposals.dismiss", json!({ "id": id }))?;
-    writeln!(
-        out,
-        "Dismissed Proposal {id} from {}: nothing moved.",
-        dismissed.agent
-    )
-    .map_err(|e| e.to_string())
+    writeln!(out, "Dismissed Proposal {id} from {}: nothing moved.", dismissed.agent).map_err(|e| e.to_string())
 }
