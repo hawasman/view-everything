@@ -125,7 +125,10 @@ fn another_key_under_an_approved_name_is_refused() {
     assert_ne!(impostor.code, request.code);
     assert_ne!(renamed.code, impostor.code);
     assert_eq!(told.lock().len(), 3);
-    assert_eq!(engine.agents().access(&agent("Claude", "k1"), Kind::Agent, FILES, T0 + 2), Access::Allowed);
+    assert_eq!(
+        engine.agents().access(&agent("Claude", "k1"), Kind::Agent, FILES, T0 + 2),
+        Access::Allowed
+    );
 }
 
 #[test]
@@ -155,7 +158,10 @@ fn revoking_refuses_the_agent_again() {
     engine.agents().approve(&code, T0 + 6).unwrap();
     assert_eq!(engine.agents().access(&claude, Kind::Agent, FILES, T0 + 7), Access::Allowed);
     engine.agents().revoke("Claude", Kind::Agent, FILES).unwrap();
-    assert!(matches!(engine.agents().access(&claude, Kind::Agent, FILES, T0 + 8), Access::Pending(_)));
+    assert!(matches!(
+        engine.agents().access(&claude, Kind::Agent, FILES, T0 + 8),
+        Access::Pending(_)
+    ));
     assert!(engine.agents().revoke("Claude", Kind::Agent, FILES).is_err());
 }
 

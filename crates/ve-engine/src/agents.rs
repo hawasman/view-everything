@@ -460,10 +460,7 @@ impl Engine {
 /// with `ve mcp serve` reading the saved settings when no app runs.
 pub fn allowed(list: &[Permission], agent: &Agent, kind: Kind, module: &str) -> bool {
     list.iter().any(|p| {
-        p.kind == kind
-            && p.subject == agent.name
-            && p.module.as_deref() == Some(module)
-            && p.key.as_deref() == Some(agent.key.as_str())
+        p.kind == kind && p.subject == agent.name && p.module.as_deref() == Some(module) && p.key.as_deref() == Some(agent.key.as_str())
     })
 }
 

@@ -45,12 +45,12 @@ pub(super) fn answer(out: &mut impl Write, id: &Value, method: &str, params: Val
             .map_err(|e| format!("bad agents.approve: {e}"))
             .and_then(|Approve { code }| engine.agents().approve(&code, now))
             .map(|p| json!({ "agent": p.subject, "module": p.module, "kind": p.kind, "granted_at": p.granted_at })),
-        "propose" => tool_call(params)
-            .map(|ToolCall { agent, tool, arguments }| answered(engine.agents().propose(&agent, &tool, arguments, now))),
+        "propose" => {
+            tool_call(params).map(|ToolCall { agent, tool, arguments }| answered(engine.agents().propose(&agent, &tool, arguments, now)))
+        }
         method => match Module::from_method(method) {
-            Some(module) => tool_call(params).map(|ToolCall { agent, tool, arguments }| {
-                answered(engine.agents().read(module, &agent, &tool, arguments, now))
-            }),
+            Some(module) => tool_call(params)
+                .map(|ToolCall { agent, tool, arguments }| answered(engine.agents().read(module, &agent, &tool, arguments, now))),
             None => Err(format!("unknown method `{method}`")),
         },
     };

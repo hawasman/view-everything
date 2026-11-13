@@ -15,7 +15,9 @@ use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::sync::Arc;
-use ve_engine::net::{Connection, Connections, Holder, Interface, InterfaceSummary, Net, NetSample, ProcessTraffic, RETAINED, Summary, Traffic};
+use ve_engine::net::{
+    Connection, Connections, Holder, Interface, InterfaceSummary, Net, NetSample, ProcessTraffic, RETAINED, Summary, Traffic,
+};
 use ve_engine::perf::{ProcessId, Processes, Reading, SPAN};
 use ve_engine::timeline::Moment;
 

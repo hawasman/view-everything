@@ -42,7 +42,10 @@ pub(crate) fn tcp_bytes() -> Option<HashMap<u64, TcpBytes>> {
             // A socket per family, so what is left of a failed dump never reads as the next;
             // a failed dump adds nothing, since what it did read may miss sockets.
             of_family.clear();
-            if netlink::Socket::open().and_then(|s| s.dump(family as u8, &mut buf, &mut of_family)).is_some() {
+            if netlink::Socket::open()
+                .and_then(|s| s.dump(family as u8, &mut buf, &mut of_family))
+                .is_some()
+            {
                 counts.extend(of_family.drain());
                 read = true;
             }
@@ -102,7 +105,9 @@ pub(crate) fn parse(datagram: &[u8], counts: &mut HashMap<u64, TcpBytes>) -> Par
             NLMSG_ERROR => return Part::Failed,
             SOCK_DIAG_BY_FAMILY => {
                 let message = &rest[HEADER..len];
-                let Some(inode) = u32_at(message, INODE_AT) else { return Part::Failed };
+                let Some(inode) = u32_at(message, INODE_AT) else {
+                    return Part::Failed;
+                };
                 let mut attributes = message.get(DIAG_MSG..).unwrap_or_default();
                 while let (Some(attr_len), Some(attr_kind)) = (u16_at(attributes, 0), u16_at(attributes, 2)) {
                     let attr_len = usize::from(attr_len);
@@ -246,7 +251,13 @@ mod tests {
         let mut counts = HashMap::new();
         assert_eq!(parse(&datagram, &mut counts), Part::More);
         assert_eq!(counts.len(), 2);
-        assert_eq!(counts[&4242], TcpBytes { received: 90_000, sent: 1_500 });
+        assert_eq!(
+            counts[&4242],
+            TcpBytes {
+                received: 90_000,
+                sent: 1_500
+            }
+        );
         assert_eq!(counts[&4243], TcpBytes { received: 7, sent: 0 });
 
         assert_eq!(parse(&framed(NLMSG_DONE, &[0; 4]), &mut counts), Part::Done);

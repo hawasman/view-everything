@@ -332,10 +332,24 @@ fn an_agent_is_refused_until_approved_then_answered_in_capped_pages() {
         ]
     );
     // Only submitting a Proposal is not read-only; nothing is destructive.
-    let read_only: Vec<_> = tools.as_array().unwrap().iter().map(|t| t["annotations"]["readOnlyHint"] == true).collect();
+    let read_only: Vec<_> = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["annotations"]["readOnlyHint"] == true)
+        .collect();
     assert_eq!(read_only.iter().filter(|r| !**r).count(), 1);
-    assert!(!read_only[names.iter().position(|n| *n == "files.propose_trash").unwrap()], "it submits a Proposal");
-    assert!(tools.as_array().unwrap().iter().all(|t| t["annotations"]["destructiveHint"] == false));
+    assert!(
+        !read_only[names.iter().position(|n| *n == "files.propose_trash").unwrap()],
+        "it submits a Proposal"
+    );
+    assert!(
+        tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["annotations"]["destructiveHint"] == false)
+    );
 
     // First contact: refused with a code, before the call itself is looked at.
     let refused = mcp.call("files.find", json!({ "query": "ext:txt" }));
@@ -516,7 +530,10 @@ fn performance_is_refused_until_approved_then_answered_from_the_recorder() {
 
     // Approving Performance granted nothing else, and revoking it refuses again.
     assert_eq!(refusal(&mcp.call("files.locations", json!({})))["reason"], "approval_pending");
-    engine.agents().revoke("perf-agent", ve_engine::permissions::Kind::Agent, "Performance").unwrap();
+    engine
+        .agents()
+        .revoke("perf-agent", ve_engine::permissions::Kind::Agent, "Performance")
+        .unwrap();
     assert_eq!(refusal(&mcp.call("performance.summary", json!({})))["reason"], "approval_pending");
     engine.shutdown();
 }
@@ -600,7 +617,10 @@ fn network_is_refused_until_approved_then_answered_from_the_recorder() {
 
     // Approving Network granted nothing else, and revoking it refuses again.
     assert_eq!(refusal(&mcp.call("performance.summary", json!({})))["reason"], "approval_pending");
-    engine.agents().revoke("net-agent", ve_engine::permissions::Kind::Agent, "Network").unwrap();
+    engine
+        .agents()
+        .revoke("net-agent", ve_engine::permissions::Kind::Agent, "Network")
+        .unwrap();
     assert_eq!(refusal(&mcp.call("network.connections", json!({})))["reason"], "approval_pending");
     engine.shutdown();
 }
@@ -702,7 +722,10 @@ fn apps_is_refused_until_approved_then_answered_with_on_disk_sizes() {
 
     // Approving Apps granted nothing else, and revoking it refuses again.
     assert_eq!(refusal(&mcp.call("network.interfaces", json!({})))["reason"], "approval_pending");
-    engine.agents().revoke("apps-agent", ve_engine::permissions::Kind::Agent, "Apps").unwrap();
+    engine
+        .agents()
+        .revoke("apps-agent", ve_engine::permissions::Kind::Agent, "Apps")
+        .unwrap();
     assert_eq!(refusal(&mcp.call("apps.programs", json!({})))["reason"], "approval_pending");
     engine.shutdown();
 }
@@ -794,14 +817,20 @@ fn an_agent_proposes_a_trash_list_the_user_applies_from_the_shell() {
     );
 
     // A Remote's Entry is refused, saying which.
-    let remote = mcp.call("files.propose_trash", json!({ "paths": [file("keep.log"), remote_file], "reason": "x" }));
+    let remote = mcp.call(
+        "files.propose_trash",
+        json!({ "paths": [file("keep.log"), remote_file], "reason": "x" }),
+    );
     assert_eq!(refusal(&remote)["reason"], "remote", "{remote}");
     assert_eq!(refusal(&remote)["paths"], json!([remote_file]));
 
     let proposed = mcp.call("files.propose_trash", trash_list);
     let proposed = answer(&proposed).clone();
     assert_eq!((proposed["id"].as_u64(), proposed["status"].as_str()), (Some(1), Some("pending")));
-    assert_eq!((proposed["rows"].as_u64(), proposed["source"].as_str()), (Some(3), Some("running app")));
+    assert_eq!(
+        (proposed["rows"].as_u64(), proposed["source"].as_str()),
+        (Some(3), Some("running app"))
+    );
     assert!(fixture.path().join("old-1.log").exists(), "proposing moves nothing");
     let listed = ve(&["proposals"], &socket_path, home.path());
     let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
@@ -827,9 +856,15 @@ fn an_agent_proposes_a_trash_list_the_user_applies_from_the_shell() {
     let applied = ve_answering(&["proposals", "--apply", "1"], "y\n", &socket_path, home.path());
     let printed = String::from_utf8_lossy(&applied.stdout).into_owned();
     assert!(applied.status.success(), "{printed}{}", String::from_utf8_lossy(&applied.stderr));
-    assert!(printed.starts_with("Proposal 1 from cleanup-agent: Logs nobody reads\n"), "{printed}");
     assert!(
-        printed.contains(&format!("Left out, 1 item:\n  {}: changed since it was proposed\n", file("changed.log"))),
+        printed.starts_with("Proposal 1 from cleanup-agent: Logs nobody reads\n"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(&format!(
+            "Left out, 1 item:\n  {}: changed since it was proposed\n",
+            file("changed.log")
+        )),
         "{printed}"
     );
     assert!(printed.contains(&format!("  {}  (", file("old-1.log"))), "{printed}");
@@ -845,7 +880,10 @@ fn an_agent_proposes_a_trash_list_the_user_applies_from_the_shell() {
     let status = answer(&status);
     assert_eq!(status["status"], "applied");
     assert_eq!(status["outcome"]["trashed"], json!([file("old-1.log"), file("old-2.log")]));
-    assert_eq!(status["outcome"]["dropped"], json!([{ "path": file("changed.log"), "why": "changed" }]));
+    assert_eq!(
+        status["outcome"]["dropped"],
+        json!([{ "path": file("changed.log"), "why": "changed" }])
+    );
     let again = ve_answering(&["proposals", "--apply", "1"], "y\n", &socket_path, home.path());
     assert_eq!(again.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&again.stderr).contains("already applied"));

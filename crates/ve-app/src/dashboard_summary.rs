@@ -970,7 +970,11 @@ mod tests {
 
         // Where nothing moved over TCP, the holder of the most connections is named instead.
         hour.processes = Some(vec![traffic(30, "rsync", 0, 0)]);
-        assert!(talking_answer(&hour, Some(holder)).text.ends_with("· firefox holds the most open, 12"));
+        assert!(
+            talking_answer(&hour, Some(holder))
+                .text
+                .ends_with("· firefox holds the most open, 12")
+        );
     }
 
     #[test]

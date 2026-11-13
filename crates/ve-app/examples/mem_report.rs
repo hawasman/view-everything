@@ -157,7 +157,11 @@ fn main() {
     let categories = CategoryMap::builtin();
 
     let mut report = Report { entries: 0, before: 0 };
-    println!("baseline: heap {:.1} MiB, rss {:.1} MiB", mib(LIVE.load(Ordering::Relaxed)), mib(rss()));
+    println!(
+        "baseline: heap {:.1} MiB, rss {:.1} MiB",
+        mib(LIVE.load(Ordering::Relaxed)),
+        mib(rss())
+    );
     println!();
     println!("| Phase | Heap held, MiB | Bytes per Entry | Peak above start, MiB | Heap live, MiB | RSS, MiB | RSS after trim, MiB |");
     println!("|---|---|---|---|---|---|---|");
@@ -266,7 +270,9 @@ fn main() {
     );
     let peak = PEAK.load(Ordering::Relaxed) - report.before;
     drop(more);
-    report.row(&format!("Duplicates search with the loaded Volume online ({candidates} candidates)"));
+    report.row(&format!(
+        "Duplicates search with the loaded Volume online ({candidates} candidates)"
+    ));
     println!("  peak per candidate: {:.0} bytes", peak as f64 / candidates.max(1) as f64);
 
     println!();
@@ -282,5 +288,10 @@ fn main() {
             bytes as f64 / index.capacity() as f64
         );
     }
-    println!("capacity {} ids, {} live, {} folder slots", index.capacity(), index.live_count(), index.folder_slots());
+    println!(
+        "capacity {} ids, {} live, {} folder slots",
+        index.capacity(),
+        index.live_count(),
+        index.folder_slots()
+    );
 }

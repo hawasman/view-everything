@@ -111,8 +111,7 @@ struct Ask {
 
 /// The arguments `arguments` of `tool`, which has required ones, or why not.
 fn arguments<T: serde::de::DeserializeOwned>(tool: Tool, arguments: Value) -> Result<T, Refusal> {
-    serde_json::from_value(arguments)
-        .map_err(|e| Refusal::new(Reason::BadArguments, format!("bad arguments for {}: {e}", tool.name())))
+    serde_json::from_value(arguments).map_err(|e| Refusal::new(Reason::BadArguments, format!("bad arguments for {}: {e}", tool.name())))
 }
 
 /// `proposal` as the agent reads it.
