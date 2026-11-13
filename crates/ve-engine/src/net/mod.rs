@@ -3,15 +3,23 @@
 //! its one-hour Timeline and the Moment. An interface that goes away keeps its history: the
 //! samples taken while it was there still hold it. Open TCP and UDP connections (#52) are read
 //! with the process table every two seconds, each with the process holding it where that can
-//! be read; a sample keeps the top [`RETAINED`], the live view lists them all. Per-app traffic
-//! needs administrator rights and is not read.
+//! be read; a sample keeps the top [`RETAINED`], the live view lists them all.
+//!
+//! Traffic per Process (#71, #72) comes from the same reading, without privileges: on Linux
+//! the kernel counts each TCP socket's bytes and tells any user (`sock_diag`, what `ss -ti`
+//! shows), and the user's own Processes are found holding them. So it is TCP only, and only
+//! the user's own Processes: UDP and other users' Processes need administrator rights and are
+//! not read. A sample keeps the Processes that moved bytes, the top [`RETAINED`]; the live
+//! view lists every one. Agents read it through [`Net::traffic`] (a stretch) and
+//! [`NetSample::traffic`] (one Moment).
 
+mod diag;
 mod linux;
 
 pub(crate) use linux::{interface_counters, sockets};
 
 use crate::perf::{self, Perf, ProcessCountersTable, ProcessId, Reading, Sample, delta};
-use crate::timeline::Moment;
+use crate::timeline::{Moment, Timeline};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -76,6 +84,11 @@ pub struct NetSample {
     /// The open connections as of this second (read every two seconds): every one for Live,
     /// the kept top [`RETAINED`] for a past second.
     pub connections: Reading<Arc<Connections>>,
+    /// TCP traffic per Process as of this second (read every two seconds): every Process
+    /// holding a counted socket for Live, the kept top [`RETAINED`] that moved bytes for a
+    /// past second. Unsupported where per-socket counts cannot be read, and for a run's first
+    /// reading, which has nothing to count from.
+    pub traffic: Reading<Arc<Traffic>>,
 }
 
 /// One interface over a stretch of the Timeline.
@@ -100,12 +113,20 @@ pub struct Summary {
     /// How many distinct connections (protocol, local and remote address) the kept samples of
     /// the stretch hold; `None` when none of its seconds has a connection reading.
     pub connections: Option<u32>,
+    /// What each Process moved over TCP in the stretch, the most first; `None` when none of
+    /// its seconds has a traffic reading.
+    pub processes: Option<Vec<ProcessTraffic>>,
 }
 
 impl Summary {
     /// The interface that moved the most bytes, either way.
     pub fn busiest(&self) -> Option<&InterfaceSummary> {
         self.interfaces.iter().filter(|i| i.moved() > 0).max_by_key(|i| i.moved())
+    }
+
+    /// The Process that moved the most bytes over TCP, either way.
+    pub fn top_process(&self) -> Option<&ProcessTraffic> {
+        self.processes.as_deref()?.first().filter(|p| p.moved() > 0)
     }
 }
 
@@ -136,35 +157,37 @@ impl Net {
     /// The network shown at `moment`: the newest for Live, that second's for a time. `None`
     /// is a gap.
     pub fn at(&self, moment: Moment) -> Option<NetSample> {
-        self.store.timeline_live(|timeline, live| {
-            let (sample, connections) = match moment {
+        self.store.timeline_live(|timeline, live, live_traffic| {
+            let (sample, connections, traffic) = match moment {
                 Moment::Live => {
                     let sample = timeline.latest()?.1;
-                    (sample, live.cloned().into())
+                    (sample, live.cloned().into(), live_traffic.cloned().into())
                 }
                 Moment::At(time) => {
                     let sample = timeline.at(time)?;
-                    (sample, sample.connections.clone())
+                    (sample, sample.connections.clone(), sample.traffic.clone())
                 }
             };
             Some(NetSample {
                 time: sample.time,
                 interfaces: sample.network.clone(),
                 connections,
+                traffic,
             })
         })
     }
 
-    /// Every interface seen from `from` to `to` (inclusive), with what it moved then, and how
-    /// many connections were kept then.
+    /// Every interface seen from `from` to `to` (inclusive), with what it moved then, how
+    /// many connections were kept then and what each Process moved over TCP.
     pub fn summary(&self, from: i64, to: i64) -> Summary {
         // The connection tables are taken from under the lock, so counting them never holds up
         // the recorder.
-        let (mut summary, tables) = self.store.timeline(|timeline| {
+        let (mut summary, tables, traffic) = self.store.timeline(|timeline| {
             let mut summary = Summary {
                 seconds: 0,
                 interfaces: Vec::new(),
                 connections: None,
+                processes: None,
             };
             let mut tables: Vec<Arc<Connections>> = Vec::new();
             for (time, sample) in timeline.range(from, to) {
@@ -198,12 +221,22 @@ impl Net {
                     s.last_seen = time;
                 }
             }
-            (summary, tables)
+            (summary, tables, traffic_tables(timeline, from, to))
         });
         if !tables.is_empty() {
             summary.connections = Some(u32::try_from(distinct(&tables)).unwrap_or(u32::MAX));
         }
+        summary.processes = totals(&traffic);
         summary
+    }
+
+    /// What each of the user's own Processes moved over TCP from `from` to `to` (inclusive),
+    /// received and sent bytes, the most first; `None` when no second then has a traffic
+    /// reading (not recorded, or not readable on this platform). Each recorded second keeps
+    /// the top [`RETAINED`] Processes, so a Process that was never among them is missing.
+    /// For the rates at one Moment, read [`NetSample::traffic`] from [`Net::at`].
+    pub fn traffic(&self, from: i64, to: i64) -> Option<Vec<ProcessTraffic>> {
+        totals(&self.store.timeline(|timeline| traffic_tables(timeline, from, to)))
     }
 
     /// Whether any recorded second has a network reading: the rail shows Network only then.
@@ -272,8 +305,9 @@ fn order(a: &Connection, b: &Connection) -> std::cmp::Ordering {
     a.state.rank().cmp(&b.state.rank()).then_with(|| a.key().cmp(&b.key()))
 }
 
-/// Connections a sample keeps: the most active by state (see [`State`]). The bytes each
-/// connection moves are not readable without administrator rights, so they cannot rank them.
+/// Connections a sample keeps: the most active by state (see [`State`]); and the Processes a
+/// sample's traffic keeps, the most bytes first. A UDP socket's bytes, and other users', are
+/// not readable without administrator rights, so bytes cannot rank connections.
 pub const RETAINED: usize = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -380,6 +414,195 @@ pub struct Socket {
     pub remote: SocketAddr,
     pub state: State,
     pub holder: SocketHolder,
+    /// The kernel's number for the socket, 0 for one without (closed, the kernel finishing it).
+    pub inode: u64,
+    /// A TCP socket's cumulative bytes, where the kernel's count can be read.
+    pub bytes: Option<TcpBytes>,
+}
+
+/// One TCP socket's cumulative bytes as the kernel counts them since it opened: received, and
+/// sent that the other end acknowledged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TcpBytes {
+    pub received: u64,
+    pub sent: u64,
+}
+
+/// What one Process moved over its TCP sockets in a stretch: bytes received and sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessTraffic {
+    pub id: ProcessId,
+    /// Shared with the process table.
+    pub name: Arc<str>,
+    pub received: u64,
+    pub sent: u64,
+}
+
+impl ProcessTraffic {
+    /// Bytes received plus sent.
+    pub fn moved(&self) -> u64 {
+        self.received + self.sent
+    }
+}
+
+/// TCP traffic per Process between two readings `seconds` apart: what each of the user's own
+/// Processes holding a counted TCP socket moved in that time, the most first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Traffic {
+    pub seconds: u32,
+    pub processes: Vec<ProcessTraffic>,
+}
+
+impl Traffic {
+    /// What `process` received, in bytes per second.
+    pub fn receive_rate(&self, process: &ProcessTraffic) -> u64 {
+        process.received / u64::from(self.seconds.max(1))
+    }
+
+    /// What `process` sent, in bytes per second.
+    pub fn send_rate(&self, process: &ProcessTraffic) -> u64 {
+        process.sent / u64::from(self.seconds.max(1))
+    }
+
+    /// The traffic of Process `id`, if it holds a counted socket.
+    pub fn get(&self, id: ProcessId) -> Option<&ProcessTraffic> {
+        self.processes.iter().find(|p| p.id == id)
+    }
+
+    /// Bytes it holds, for the memory budget; process names are shared, so not counted.
+    pub fn heap_size(&self) -> usize {
+        size_of::<Self>() + self.processes.capacity() * size_of::<ProcessTraffic>()
+    }
+}
+
+/// Each counted TCP socket's bytes at one reading, by inode: what the next reading counts from.
+pub(crate) struct TcpCounters {
+    /// The second it was read.
+    pub(crate) time: i64,
+    by_inode: HashMap<u64, TcpBytes>,
+}
+
+/// The TCP traffic per Process of `sockets`, read at second `now` with the process table
+/// `table`, against `prev` (the previous reading's counters, `None` at a run's first): each
+/// socket's bytes since `prev`, summed per Process holding it now. A socket that opened since
+/// counts all its bytes; one that closed counts none, so no rate ever goes back. A socket
+/// whose holder is unknown (another user's, or a Process that cannot be read) counts for no
+/// one, and one to the machine itself (loopback) is no network traffic, as loopback is no
+/// interface (see [`interface_counters`]). Unsupported when no socket has a count, or at a
+/// run's first reading; returns the counters for the next reading as well.
+pub(crate) fn traffic(
+    now: i64,
+    sockets: &[Socket],
+    table: Option<&ProcessCountersTable>,
+    prev: Option<&TcpCounters>,
+) -> (Reading<Traffic>, Option<TcpCounters>) {
+    let counters = TcpCounters {
+        time: now,
+        by_inode: sockets
+            .iter()
+            .filter(|s| s.inode != 0)
+            .filter_map(|s| Some((s.inode, s.bytes?)))
+            .collect(),
+    };
+    if counters.by_inode.is_empty() {
+        return (Reading::Unsupported, None);
+    }
+    let Some(prev) = prev.filter(|p| p.time < now) else {
+        return (Reading::Unsupported, Some(counters));
+    };
+    let by_pid = holders(table);
+    let mut processes: Vec<ProcessTraffic> = Vec::new();
+    let mut at: HashMap<ProcessId, usize> = HashMap::new();
+    for s in sockets {
+        let (SocketHolder::Pid(pid), Some(bytes)) = (s.holder, s.bytes) else { continue };
+        if s.remote.ip().to_canonical().is_loopback() {
+            continue;
+        }
+        let Some(&(id, name)) = by_pid.get(&pid) else { continue };
+        let moved = match prev.by_inode.get(&s.inode) {
+            Some(before) if bytes.received >= before.received && bytes.sent >= before.sent => TcpBytes {
+                received: bytes.received - before.received,
+                sent: bytes.sent - before.sent,
+            },
+            // New since the previous reading, or a new socket under a reused inode.
+            _ => bytes,
+        };
+        let i = *at.entry(id).or_insert_with(|| {
+            processes.push(ProcessTraffic {
+                id,
+                name: name.clone(),
+                received: 0,
+                sent: 0,
+            });
+            processes.len() - 1
+        });
+        processes[i].received += moved.received;
+        processes[i].sent += moved.sent;
+    }
+    processes.sort_by(most_first);
+    let seconds = u32::try_from(now - prev.time).unwrap_or(u32::MAX);
+    (Reading::Value(Traffic { seconds, processes }), Some(counters))
+}
+
+/// The live table and the kept part of a new traffic reading `now`: the Processes that moved
+/// bytes, the top [`RETAINED`]. Both are one `Arc` when nothing is left out.
+pub(crate) fn keep_traffic(now: Traffic) -> (Arc<Traffic>, Arc<Traffic>) {
+    let moving = now.processes.iter().take_while(|p| p.moved() > 0).count().min(RETAINED);
+    if moving == now.processes.len() {
+        let all = Arc::new(now);
+        return (all.clone(), all);
+    }
+    let kept = Arc::new(Traffic {
+        seconds: now.seconds,
+        processes: now.processes[..moving].to_vec(),
+    });
+    (Arc::new(now), kept)
+}
+
+/// The traffic tables kept from `from` to `to` (inclusive), each once: consecutive seconds
+/// share one until the next reading.
+fn traffic_tables(timeline: &Timeline<Sample>, from: i64, to: i64) -> Vec<Arc<Traffic>> {
+    let mut tables: Vec<Arc<Traffic>> = Vec::new();
+    for (_, sample) in timeline.range(from, to) {
+        if let Reading::Value(table) = &sample.traffic
+            && tables.last().is_none_or(|l| !Arc::ptr_eq(l, table))
+        {
+            tables.push(table.clone());
+        }
+    }
+    tables
+}
+
+/// What each Process moved over `tables`, the most first; `None` when there are none.
+fn totals(tables: &[Arc<Traffic>]) -> Option<Vec<ProcessTraffic>> {
+    if tables.is_empty() {
+        return None;
+    }
+    let mut by_id: HashMap<ProcessId, ProcessTraffic> = HashMap::new();
+    for p in tables.iter().flat_map(|t| &t.processes) {
+        let total = by_id.entry(p.id).or_insert_with(|| ProcessTraffic {
+            received: 0,
+            sent: 0,
+            ..p.clone()
+        });
+        total.received += p.received;
+        total.sent += p.sent;
+    }
+    let mut totals: Vec<ProcessTraffic> = by_id.into_values().collect();
+    totals.sort_by(most_first);
+    Some(totals)
+}
+
+/// The order of traffic tables: the most bytes first, then by PID.
+fn most_first(a: &ProcessTraffic, b: &ProcessTraffic) -> std::cmp::Ordering {
+    b.moved().cmp(&a.moved()).then(a.id.pid.cmp(&b.id.pid))
+}
+
+/// Each process of `table` by PID, with its name.
+fn holders(table: Option<&ProcessCountersTable>) -> HashMap<u32, (ProcessId, &Arc<str>)> {
+    table
+        .map(|t| t.processes.iter().map(|p| (p.id.pid, (p.id, &p.name))).collect())
+        .unwrap_or_default()
 }
 
 /// The process holding a connection (not an Owner: that is what a folder belongs to).
@@ -440,9 +663,7 @@ impl Connections {
 /// with it; a holder missing from the table (it started or ended between the two) is unknown.
 /// A connection unchanged since `prev` (the previous reading) is its `Arc` there.
 pub(crate) fn connections(sockets: Vec<Socket>, table: Option<&ProcessCountersTable>, prev: Option<&Connections>) -> Connections {
-    let by_pid: HashMap<u32, (ProcessId, &Arc<str>)> = table
-        .map(|t| t.processes.iter().map(|p| (p.id.pid, (p.id, &p.name))).collect())
-        .unwrap_or_default();
+    let by_pid = holders(table);
     let before: HashMap<_, &Arc<Connection>> = prev.map_or_else(HashMap::new, |p| p.list.iter().map(|c| (c.key(), c)).collect());
     let mut list: Vec<Arc<Connection>> = sockets
         .into_iter()

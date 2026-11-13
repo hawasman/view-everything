@@ -1,9 +1,10 @@
 //! The Network page (#38): each interface's receive and send throughput at the Moment, and
 //! what it moved over the last hour, from the samples Performance records; an interface that
-//! went away keeps its row. Below, the open TCP and UDP connections (#52) with the process
-//! holding each, "unknown" where it cannot be read; a click inspects that process. Per-app
-//! traffic needs administrator rights and is not read: the page says so in one static line and
-//! never asks.
+//! went away keeps its row. Then the TCP traffic of each of the user's own Processes (#71),
+//! read without privileges, under the line that says so; then the open TCP and UDP
+//! connections (#52) with the process holding each, "unknown" where it cannot be read. A
+//! click on a Process or a connection inspects that process. Nothing on the page asks for
+//! administrator rights.
 
 use crate::format;
 use crate::performance::{Lane, OnInspect, Scrub, lane_of, when};
@@ -14,7 +15,7 @@ use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::sync::Arc;
-use ve_engine::net::{Connection, Connections, Holder, Interface, InterfaceSummary, Net, NetSample, RETAINED, Summary};
+use ve_engine::net::{Connection, Connections, Holder, Interface, InterfaceSummary, Net, NetSample, ProcessTraffic, RETAINED, Summary, Traffic};
 use ve_engine::perf::{ProcessId, Processes, Reading, SPAN};
 use ve_engine::timeline::Moment;
 
@@ -23,8 +24,8 @@ const UNSUPPORTED: &str = "unsupported";
 /// What a reading that is unknown this second says: never zero.
 const UNKNOWN: &str = "—";
 
-/// The page's one line on per-app traffic: a fact, with nothing to click.
-pub const PER_APP: &str = "Traffic per app needs administrator rights and is not available yet.";
+/// What traffic per Process counts, in one static line: a fact, with nothing to click.
+pub const TRAFFIC_SCOPE: &str = "TCP only, your processes";
 
 fn rate(reading: &Reading<u64>) -> String {
     reading
@@ -54,10 +55,7 @@ pub fn page(
         (Moment::Live, None) => "Live · no sample yet".to_owned(),
         (Moment::At(t), _) => format!("At {}", when(t, now)),
     };
-    let head = v_flex()
-        .gap(px(4.))
-        .child(title_row("Network", Some(facts), cx))
-        .child(caption(PER_APP, cx));
+    let head = v_flex().gap(px(4.)).child(title_row("Network", Some(facts), cx));
     let Some(s) = sample else {
         let why = match moment {
             Moment::Live => "No sample yet: the first arrives within two seconds of recording.".to_owned(),
@@ -76,6 +74,7 @@ pub fn page(
                 .child(head)
                 .child(kpis(&s.interfaces, hour, cx))
                 .child(interfaces_panel(&s.interfaces, hour, moment, now, cx))
+                .child(traffic_panel(&s.traffic, hour, moment, inspect, cx))
                 .child(connections_panel(&s.connections, moment, inspect, scroll, cx)),
         )
         .into_any_element()
@@ -180,6 +179,104 @@ fn interfaces_panel(interfaces: &Reading<Vec<Interface>>, hour: &Summary, moment
         }
     };
     panel(cx).child(v_flex().gap(px(GAP)).child(section_title("Interfaces", cx)).child(body))
+}
+
+/// Width of the process column of the traffic table.
+const TRAFFIC_PROCESS_W: f32 = 260.;
+
+/// Each of the user's own Processes holding a TCP socket at the Moment (every one live, those
+/// of the kept top that moved bytes at a past second), the most bytes first, with its rates
+/// then and what it moved over the hour; a click inspects it.
+fn traffic_panel(traffic: &Reading<Arc<Traffic>>, hour: &Summary, moment: Moment, inspect: &Inspect, cx: &App) -> Div {
+    let p = palette(cx);
+    let (body, note) = match traffic {
+        Reading::Unsupported => (caption(UNSUPPORTED, cx).into_any_element(), None),
+        Reading::Value(t) if t.processes.is_empty() => {
+            let none = match moment {
+                Moment::Live => "None of your processes holds a TCP connection",
+                Moment::At(_) => "None of your processes moved bytes over TCP then",
+            };
+            (caption(none, cx).into_any_element(), None)
+        }
+        Reading::Value(t) => {
+            let n = t.processes.len();
+            let note = match moment {
+                Moment::At(_) if n >= RETAINED => format!("{n} kept of that second, the most bytes first"),
+                Moment::At(_) => format!("{n} moved bytes then"),
+                Moment::Live => format!("{n} with TCP connections"),
+            };
+            let header = h_flex()
+                .h(px(24.))
+                .px(px(4.))
+                .text_size(px(FS_BODY))
+                .text_color(p.muted)
+                .child(div().w(px(TRAFFIC_PROCESS_W)).flex_1().child("Process"))
+                .children(
+                    ["Receive", "Send", "Received, hour", "Sent, hour"].map(|t| div().w(px(NUMBER_W)).flex_none().text_right().child(t)),
+                );
+            let rows = t.processes.iter().map(|process| {
+                let total = hour.processes.as_deref().and_then(|h| h.iter().find(|h| h.id == process.id));
+                traffic_row(t, process, total, inspect, cx)
+            });
+            (v_flex().child(header).children(rows).into_any_element(), Some(note))
+        }
+    };
+    panel(cx).child(
+        v_flex()
+            .gap(px(GAP))
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .items_baseline()
+                    .child(section_title("Traffic per process", cx))
+                    .child(caption(TRAFFIC_SCOPE, cx))
+                    .children(note.map(|n| caption(format!("· {n}"), cx))),
+            )
+            .child(body),
+    )
+}
+
+fn traffic_row(traffic: &Traffic, process: &ProcessTraffic, hour: Option<&ProcessTraffic>, inspect: &Inspect, cx: &App) -> Stateful<Div> {
+    let p = palette(cx);
+    let id = process.id;
+    let inspectable = inspect.processes.as_ref().is_some_and(|t| t.get(id).is_some());
+    let cell = |text: String, muted: bool| {
+        div()
+            .w(px(NUMBER_W))
+            .flex_none()
+            .text_right()
+            .text_color(if muted { p.muted } else { p.text })
+            .child(text)
+    };
+    let per_second = |bytes: u64| format!("{}/s", format::size(bytes));
+    h_flex()
+        .id(("traffic", id.pid as usize))
+        .relative()
+        .h(px(32.))
+        .px(px(4.))
+        .items_center()
+        .text_size(px(FS_BODY))
+        .border_t_1()
+        .border_color(p.border)
+        .when(Some(id) == inspect.selected, |d| d.child(crate::selection::highlight(true, cx)))
+        .child(
+            div()
+                .w(px(TRAFFIC_PROCESS_W))
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(format!("{} · {}", process.name, id.pid)),
+        )
+        .child(cell(per_second(traffic.receive_rate(process)), process.received == 0))
+        .child(cell(per_second(traffic.send_rate(process)), process.sent == 0))
+        .child(cell(moved(hour.map(|h| h.received)), hour.is_none()))
+        .child(cell(moved(hour.map(|h| h.sent)), hour.is_none()))
+        .when(inspectable, |d| {
+            let inspect = inspect.on_inspect.clone();
+            d.cursor_pointer()
+                .hover(|s| s.bg(p.raised))
+                .on_click(move |_, _, cx| inspect(id, cx))
+        })
 }
 
 /// Widths of the connections table's fixed columns: protocol, state, process.
