@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use tasks::{Outcome, TaskKind, Tasks};
+use tasks::{Outcome, StartedBy, TaskKind, Tasks};
 use ve_core::owners::{self, LocalDisk, Platform};
 use ve_core::snapshot::{self, Snapshot};
 use ve_core::{BitSet, CategoryMap, EntryId, Filter, Index, Query, QueryContext, Remote, SyncState, Volume, VolumeId};
@@ -945,7 +945,8 @@ fn sync_volumes(
     let done = AtomicBool::new(false);
     let failed: Mutex<Vec<String>> = Mutex::new(Vec::new());
     shared.progress.cancel.store(false, Ordering::Relaxed);
-    // A quiet journal poll is not a Task: it neither shows as busy nor takes long.
+    // A quiet journal poll is not a Task: it neither shows as busy nor takes long. A Sync of a
+    // Location the user asked for runs at full speed; Catch-up and periodic Syncs in the background.
     let task = (!quiet).then(|| {
         let kind = if catching_up { TaskKind::CatchUp } else { TaskKind::Sync };
         let label = match mounts.as_slice() {
@@ -955,7 +956,12 @@ fn sync_volumes(
             }
             all => format!("{} {} Locations", kind.name(), all.len()),
         };
-        shared.tasks.begin(kind, label, true)
+        let started_by = if volumes.iter().any(|id| forced.contains(id)) {
+            StartedBy::User
+        } else {
+            StartedBy::App
+        };
+        shared.tasks.begin_as(kind, label, true, started_by)
     });
     thread::scope(|outer| {
         // The entry count moves without a notice, so clients are nudged while a sync runs; the
@@ -973,8 +979,11 @@ fn sync_volumes(
         }
         thread::scope(|scope| {
             for (id, mount) in &mounts {
-                let failed = &failed;
+                let (failed, task) = (&failed, &task);
                 scope.spawn(move || {
+                    if let Some(task) = task {
+                        task.enter_thread();
+                    }
                     let cause = format!("volume {}", mount.display());
                     let remote = shared.index.read().volume(*id).is_some_and(|v| v.is_remote());
                     // Stamped before the walk: changes made while it runs are not covered.
@@ -1167,7 +1176,7 @@ pub fn refresh_duplicates(shared: &Arc<Shared>) {
         || (state.cancelled_under.as_ref() == Some(&exclusions) && fresh);
     drop(state);
     if !current && matches!(shared.status.lock().phase, Phase::Idle) {
-        start_hashing(shared);
+        start_search(shared, StartedBy::App);
     }
 }
 
@@ -1208,16 +1217,22 @@ impl Drop for HashingDone {
     }
 }
 
+/// Starts a search for Duplicates the user asked for (Rescan), at full speed.
 pub fn start_hashing(shared: &Arc<Shared>) {
+    start_search(shared, StartedBy::User);
+}
+
+fn start_search(shared: &Arc<Shared>, started_by: StartedBy) {
     if shared.hashing.swap(true, Ordering::Relaxed) {
         return;
     }
     let generation = shared.index.read().generation();
     let shared = shared.clone();
-    let task = Arc::new(Mutex::new(Some(shared.tasks.begin(
+    let task = Arc::new(Mutex::new(Some(shared.tasks.begin_as(
         TaskKind::DuplicateSearch,
         "Duplicate search".into(),
         true,
+        started_by,
     ))));
     let cancel = task.lock().as_ref().expect("just begun").cancel_flag();
     // Redraws the progress while files are hashed, and reports it to the Task.
@@ -1238,6 +1253,9 @@ pub fn start_hashing(shared: &Arc<Shared>) {
     let spawned = thread::Builder::new().name("ve-hasher".into()).spawn({
         let shared = shared.clone();
         move || {
+            if let Some(task) = task.lock().as_ref() {
+                task.enter_thread();
+            }
             // Clears `hashing` even if the search panics, so Rescan and `dupe:` keep working.
             let done = HashingDone(shared.clone());
             let exclusions = shared.duplicate_exclusions.lock().clone();

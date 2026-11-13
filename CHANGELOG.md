@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Tasks
+- Every Task records who started it, shown on the Work page and in the Inspector. Tasks the app starts on its own (Catch-up, a periodic Sync, a Duplicate search, a Cleaner search) run at the operating system's lowest CPU and disk priority, window open or not; Sync now, Rescan, Clean and Trash run at full speed. [More](docs/guide/live-updates-and-background.md#who-started-a-task)
+
 ## v0.3.0-rc.1
 
 First release candidate of v0.3.0. Linux is the target for the new Modules (Performance, Network, Apps, Launcher, agent access); on Windows and macOS they show what they support. Self-updates skip pre-releases: install this one by hand.

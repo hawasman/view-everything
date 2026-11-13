@@ -11,6 +11,10 @@ The Index is saved between runs, so search and sizes never wait on a scan. Four 
 
 Sync now re-reads in full, even a Volume Live updates is following. Every Sync shows up as a Task and can be cancelled. A cancelled Sync leaves the Location's earlier Entries in place.
 
+## Who started a Task
+
+Each Task on the Work page says who started it. The ones the app starts on its own (Catch-up, a periodic Sync, a Duplicate search, a Cleaner search) run at the operating system's lowest CPU and disk priority, whether the window is open or not, so they give way to whatever else the machine is doing: on Linux the idle scheduling class and the idle I/O class, on Windows background processing mode, on macOS the background band. The ones you start (Sync now, Sync this folder, Rescan, Clean, Trash) run at full speed. The Inspector shows a Task's priority.
+
 ## Live updates by platform
 
 | Platform | Live updates | Catch-up at launch |

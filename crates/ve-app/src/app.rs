@@ -2866,6 +2866,8 @@ impl Shell {
             subtitle: None,
             facts: vec![
                 fact("Kind", Some(t.kind.name().to_owned())),
+                fact("Started by", Some(t.started_by.who().to_owned())),
+                fact("Priority", Some(if t.background { "Background" } else { "Normal" }.to_owned())),
                 fact("Progress", progress),
                 fact("Elapsed", Some(crate::tasks::duration_text(t.elapsed))),
                 fact("Result", result),

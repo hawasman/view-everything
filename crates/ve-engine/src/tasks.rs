@@ -1,5 +1,9 @@
 //! Task registry: background work (Sync, Duplicate search, Cleaner search, Clean, Trash,
 //! Empty Trash, Compare) that clients list. Cheap to clone; usable from any thread.
+//!
+//! Every Task records who started it. One the app started on its own (Catch-up, a periodic
+//! Sync, a Duplicate or Cleaner search) runs at the operating system's background priority;
+//! one the user started runs at full speed.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -44,6 +48,33 @@ pub enum Outcome {
 /// Re-runs a failed Task. Called by whichever client offers Retry, on its own thread.
 pub type RetryAction = Arc<dyn Fn() + Send + Sync>;
 
+/// Who started a Task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartedBy {
+    /// The app, on its own: runs at background priority.
+    App,
+    /// The user (Sync now, Clean, Trash, Rescan, ...): runs at full speed.
+    User,
+}
+
+impl StartedBy {
+    /// "The app", "You": who started it, as the Inspector names them.
+    pub fn who(self) -> &'static str {
+        match self {
+            StartedBy::App => "The app",
+            StartedBy::User => "You",
+        }
+    }
+
+    /// "Started by the app", "Started by you": the Work page's line under a Task.
+    pub fn text(self) -> &'static str {
+        match self {
+            StartedBy::App => "Started by the app",
+            StartedBy::User => "Started by you",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TaskInfo {
     pub id: u64,
@@ -56,6 +87,9 @@ pub struct TaskInfo {
     pub elapsed: Duration,
     pub outcome: Option<Outcome>,
     pub retry: Option<RetryAction>,
+    pub started_by: StartedBy,
+    /// A thread of the Task runs at background priority (see [`TaskHandle::enter_thread`]).
+    pub background: bool,
 }
 
 struct Entry {
@@ -92,7 +126,18 @@ impl Tasks {
         }
     }
 
+    /// Begins a Task the user started: it runs at full speed.
     pub fn begin(&self, kind: TaskKind, label: String, cancellable: bool) -> TaskHandle {
+        self.begin_as(kind, label, cancellable, StartedBy::User)
+    }
+
+    /// Begins a Task the app started on its own: each thread that does its work calls
+    /// [`TaskHandle::enter_thread`] to drop to background priority.
+    pub fn begin_by_app(&self, kind: TaskKind, label: String, cancellable: bool) -> TaskHandle {
+        self.begin_as(kind, label, cancellable, StartedBy::App)
+    }
+
+    pub fn begin_as(&self, kind: TaskKind, label: String, cancellable: bool, started_by: StartedBy) -> TaskHandle {
         let cancel = Arc::new(AtomicBool::new(false));
         let id = {
             let mut g = self.0.lock().unwrap();
@@ -110,6 +155,8 @@ impl Tasks {
                     elapsed: Duration::ZERO,
                     outcome: None,
                     retry: None,
+                    started_by,
+                    background: false,
                 },
                 started: Instant::now(),
                 cancel: cancel.clone(),
@@ -122,6 +169,7 @@ impl Tasks {
             id,
             cancel,
             finished: false,
+            started_by,
         }
     }
 
@@ -186,6 +234,7 @@ pub struct TaskHandle {
     id: u64,
     cancel: Arc<AtomicBool>,
     finished: bool,
+    started_by: StartedBy,
 }
 
 impl TaskHandle {
@@ -217,6 +266,29 @@ impl TaskHandle {
 
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         self.cancel.clone()
+    }
+
+    pub fn started_by(&self) -> StartedBy {
+        self.started_by
+    }
+
+    /// Called first on each thread spawned to do this Task's work: a Task the app started
+    /// drops that thread to background CPU and disk priority (see [`ve_scan::priority`]), and
+    /// the threads a walk or a hash search spawns from it follow. Only for a thread of the
+    /// Task's own: a lowered thread cannot be raised again.
+    pub fn enter_thread(&self) {
+        if self.started_by != StartedBy::App {
+            return;
+        }
+        match ve_scan::priority::lower_current_thread() {
+            Ok(()) => {
+                let mut g = self.tasks.0.lock().unwrap();
+                if let Some(e) = g.running.iter_mut().find(|e| e.info.id == self.id) {
+                    e.info.background = true;
+                }
+            }
+            Err(e) => eprintln!("Could not lower the priority of a background Task: {e}"),
+        }
     }
 
     /// Attach the action the Tasks list offers as Retry if this Task fails.

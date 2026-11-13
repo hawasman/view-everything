@@ -41,9 +41,12 @@ pub(crate) fn sync(index: &SharedIndex, volume: VolumeId, progress: &Progress) -
         device: device(&metadata),
     };
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get() * 2).min(32);
+    // The walkers run at the priority of the thread that asked for the walk.
+    let background = crate::priority::current_thread_lowered();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .thread_name(|i| format!("ve-scan-{i}"))
+        .start_handler(move |_| crate::priority::inherit(background))
         .build()
         .map_err(io::Error::other)?;
     pool.scope(|scope| walk.visit(scope, root, mount));
@@ -109,6 +112,7 @@ struct Listed {
 
 impl<'a> Walk<'a> {
     fn visit<'s>(&'s self, scope: &rayon::Scope<'s>, dir: EntryId, path: PathBuf) {
+        self.progress.wait_while_paused();
         if self.progress.cancelled() {
             return;
         }

@@ -361,41 +361,49 @@ impl CleanerPage {
         let sizing = self.sizing.clone();
         // Only a look the page waits on (the first, or after a change of rules or Volumes) is a
         // Task; looking again as the Index moves on is quiet, or every sync would fill the list.
-        let task = self
-            .seen
-            .is_none()
-            .then(|| shared.tasks.begin(TaskKind::CleanerSearch, "Look for Cleanables".into(), true));
+        let task = self.seen.is_none().then(|| {
+            shared
+                .tasks
+                .begin_by_app(TaskKind::CleanerSearch, "Look for Cleanables".into(), true)
+        });
         let cancel = task.as_ref().map_or_else(|| Arc::new(AtomicBool::new(false)), |t| t.cancel_flag());
         self.look_cancel = cancel.clone();
         cx.spawn(async move |this, cx| {
             let found = cx
                 .background_spawn(async move {
-                    let index = shared.index.read();
-                    let generation = index.generation();
-                    let progress = |phase: rules::Phase, done: u64, total: u64| {
-                        sizing.store(phase == rules::Phase::Sizing, Ordering::Relaxed);
+                    // On a thread of its own, which the app-started Task drops to background priority.
+                    let look = move || {
                         if let Some(task) = &task {
-                            task.set_progress(done, Some(total));
+                            task.enter_thread();
                         }
+                        let index = shared.index.read();
+                        let generation = index.generation();
+                        let progress = |phase: rules::Phase, done: u64, total: u64| {
+                            sizing.store(phase == rules::Phase::Sizing, Ordering::Relaxed);
+                            if let Some(task) = &task {
+                                task.set_progress(done, Some(total));
+                            }
+                        };
+                        let found = rules::find(&index, &volumes, &rules, &cancel, &progress);
+                        drop(index);
+                        // Fail closed: a Cleanable is the user's only if the whole walk says so.
+                        let (admin, own): (Vec<_>, Vec<_>) = found
+                            .into_iter()
+                            .partition(|c| !cancel.load(Ordering::Relaxed) && foreign(&c.path, !c.rule.is_command()).is_some());
+                        let cancelled = cancel.load(Ordering::Relaxed);
+                        if let Some(task) = task {
+                            task.finish(if cancelled {
+                                Outcome::Cancelled
+                            } else {
+                                Outcome::Done(format!(
+                                    "{} Cleanables found",
+                                    crate::format::count((own.len() + admin.len()) as u64)
+                                ))
+                            });
+                        }
+                        (generation, own, admin, cancelled)
                     };
-                    let found = rules::find(&index, &volumes, &rules, &cancel, &progress);
-                    drop(index);
-                    // Fail closed: a Cleanable is the user's only if the whole walk says so.
-                    let (admin, own): (Vec<_>, Vec<_>) = found
-                        .into_iter()
-                        .partition(|c| !cancel.load(Ordering::Relaxed) && foreign(&c.path, !c.rule.is_command()).is_some());
-                    let cancelled = cancel.load(Ordering::Relaxed);
-                    if let Some(task) = task {
-                        task.finish(if cancelled {
-                            Outcome::Cancelled
-                        } else {
-                            Outcome::Done(format!(
-                                "{} Cleanables found",
-                                crate::format::count((own.len() + admin.len()) as u64)
-                            ))
-                        });
-                    }
-                    (generation, own, admin, cancelled)
+                    std::thread::scope(|scope| scope.spawn(look).join()).unwrap_or_else(|e| std::panic::resume_unwind(e))
                 })
                 .await;
             this.update(cx, |this, cx| {

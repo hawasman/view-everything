@@ -69,6 +69,7 @@ pub fn list<T: 'static>(tasks: &Tasks, selected: Option<u64>, inspect: Inspect, 
                         .gap(px(8.))
                         .items_center()
                         .child(div().flex_1().min_w_0().truncate().child(t.label.clone()))
+                        .child(caption(t.started_by.text(), cx))
                         .child(caption(duration_text(t.elapsed), cx))
                         .when(t.cancellable, |d| {
                             d.child(
@@ -110,6 +111,7 @@ pub fn list<T: 'static>(tasks: &Tasks, selected: Option<u64>, inspect: Inspect, 
                                 .child(mark),
                         )
                         .child(div().flex_1().min_w_0().truncate().child(t.label.clone()))
+                        .child(caption(t.started_by.text(), cx))
                         .child(caption(duration_text(t.elapsed), cx))
                         .when_some(retry, |d, retry| {
                             d.child(

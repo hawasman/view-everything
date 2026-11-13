@@ -11,6 +11,7 @@ pub mod ftp;
 pub mod live;
 pub mod ntfs;
 mod platform;
+pub mod priority;
 mod reconcile;
 pub mod remote;
 pub mod s3;
@@ -101,6 +102,8 @@ pub struct Progress {
     pub unreadable: AtomicU64,
     /// Set to ask a running walk to stop; folders not reached keep what the Index knows.
     pub cancel: AtomicBool,
+    /// Set while the walk's Task is Paused: walkers wait before reading the next folder.
+    pub paused: AtomicBool,
 }
 
 impl Progress {
@@ -114,6 +117,18 @@ impl Progress {
 
     pub fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Waits while the walk's Task is Paused, or until it is cancelled.
+    pub fn wait_while_paused(&self) {
+        wait_while_paused(&self.paused, &self.cancel);
+    }
+}
+
+/// Sleeps while `paused` is set and `cancel` is not: a Paused Task's threads read nothing.
+pub fn wait_while_paused(paused: &AtomicBool, cancel: &AtomicBool) {
+    while paused.load(Ordering::Relaxed) && !cancel.load(Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
