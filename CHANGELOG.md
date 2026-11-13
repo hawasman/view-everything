@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Windows: the app icon is embedded in `view-everything.exe` and set on the Start menu shortcut and in Add/Remove Programs.
+
 ## v0.3.0-rc.1
 
 First release candidate of v0.3.0. Linux is the target for the new Modules (Performance, Network, Apps, Launcher, agent access); on Windows and macOS they show what they support. Self-updates skip pre-releases: install this one by hand.

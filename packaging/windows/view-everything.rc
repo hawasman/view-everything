@@ -1,0 +1,3 @@
+// The app icon: Windows uses the first icon resource for the .exe in Explorer,
+// the taskbar and the Start menu shortcut.
+1 ICON "../icons/view-everything.ico"
