@@ -13,6 +13,8 @@ const NLMSG_DONE: u16 = 3;
 const SOCK_DIAG_BY_FAMILY: u16 = 20;
 const NLM_F_REQUEST: u16 = 0x1;
 const NLM_F_DUMP: u16 = 0x300;
+/// Set on a dump's messages when the table changed while it was read: it may miss sockets.
+const NLM_F_DUMP_INTR: u16 = 0x10;
 /// `inet_diag_msg`: family, state, timer, retransmits, the socket id (48 bytes), expires,
 /// receive and send queues, user, inode; its attributes follow.
 const DIAG_MSG: usize = 72;
@@ -26,16 +28,23 @@ const BYTES_RECEIVED_AT: usize = 128;
 const NO_INFO_STATES: u32 = (1 << 6) | (1 << 3) | (1 << 12);
 
 /// The byte counts of every TCP socket (v4 and v6) of this network namespace, by inode; `None`
-/// when the kernel cannot be asked (not Linux, no `sock_diag`).
+/// when the kernel cannot be asked (not Linux, no `sock_diag`). A family the kernel refuses
+/// (IPv6 turned off) leaves the other's counts.
 pub(crate) fn tcp_bytes() -> Option<HashMap<u64, TcpBytes>> {
     #[cfg(target_os = "linux")]
     {
-        let socket = netlink::Socket::open()?;
         let mut counts = HashMap::new();
+        let mut read = false;
         for family in [libc::AF_INET, libc::AF_INET6] {
-            socket.dump(family as u8, &mut counts)?;
+            // A socket per family, so what is left of a failed dump never reads as the next;
+            // a failed dump adds nothing, since what it did read may miss sockets.
+            let mut of_family = HashMap::new();
+            if netlink::Socket::open().and_then(|s| s.dump(family as u8, &mut of_family)).is_some() {
+                counts.extend(of_family);
+                read = true;
+            }
         }
-        Some(counts)
+        read.then_some(counts)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -78,11 +87,11 @@ pub(crate) fn parse(datagram: &[u8], counts: &mut HashMap<u64, TcpBytes>) -> Par
     let u64_at = |b: &[u8], at: usize| b.get(at..at + 8).map(|s| u64::from_ne_bytes(s.try_into().unwrap()));
     let mut rest = datagram;
     while !rest.is_empty() {
-        let (Some(len), Some(kind)) = (u32_at(rest, 0), u16_at(rest, 4)) else {
+        let (Some(len), Some(kind), Some(flags)) = (u32_at(rest, 0), u16_at(rest, 4), u16_at(rest, 6)) else {
             return Part::Failed;
         };
         let len = len as usize;
-        if len < HEADER || len > rest.len() {
+        if len < HEADER || len > rest.len() || flags & NLM_F_DUMP_INTR != 0 {
             return Part::Failed;
         }
         match kind {
@@ -142,16 +151,16 @@ mod netlink {
             // A kernel that never answers must not stall the recorder.
             let timeout = libc::timeval { tv_sec: 1, tv_usec: 0 };
             // SAFETY: the pointer and length describe `timeout`, which outlives the call.
-            unsafe {
+            let set = unsafe {
                 libc::setsockopt(
                     socket.0.as_raw_fd(),
                     libc::SOL_SOCKET,
                     libc::SO_RCVTIMEO,
                     (&raw const timeout).cast(),
                     size_of::<libc::timeval>() as libc::socklen_t,
-                );
-            }
-            Some(socket)
+                )
+            };
+            (set == 0).then_some(socket)
         }
 
         /// Asks for every TCP socket of `family` and adds their byte counts to `counts`.
@@ -251,10 +260,14 @@ mod tests {
     }
 
     #[test]
-    fn an_error_or_a_cut_message_fails_the_dump() {
+    fn an_error_a_cut_message_or_an_interrupted_dump_fails_the_dump() {
         let mut counts = HashMap::new();
         assert_eq!(parse(&framed(NLMSG_ERROR, &[0xff; 20]), &mut counts), Part::Failed);
         let whole = message(1, 232, 1, 1);
         assert_eq!(parse(&whole[..whole.len() - 10], &mut counts), Part::Failed);
+        // The socket table changed while it was read: the dump may miss sockets.
+        let mut interrupted = message(1, 232, 1, 1);
+        interrupted[6..8].copy_from_slice(&(NLM_F_DUMP_INTR | 0x2).to_ne_bytes());
+        assert_eq!(parse(&interrupted, &mut counts), Part::Failed);
     }
 }

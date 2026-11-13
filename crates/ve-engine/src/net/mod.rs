@@ -535,7 +535,7 @@ pub(crate) fn traffic(
         processes[i].received += moved.received;
         processes[i].sent += moved.sent;
     }
-    processes.sort_by(|a, b| b.moved().cmp(&a.moved()).then(a.id.pid.cmp(&b.id.pid)));
+    processes.sort_by(most_first);
     let seconds = u32::try_from(now - prev.time).unwrap_or(u32::MAX);
     (Reading::Value(Traffic { seconds, processes }), Some(counters))
 }
@@ -585,8 +585,13 @@ fn totals(tables: &[Arc<Traffic>]) -> Option<Vec<ProcessTraffic>> {
         total.sent += p.sent;
     }
     let mut totals: Vec<ProcessTraffic> = by_id.into_values().collect();
-    totals.sort_by(|a, b| b.moved().cmp(&a.moved()).then(a.id.pid.cmp(&b.id.pid)));
+    totals.sort_by(most_first);
     Some(totals)
+}
+
+/// The order of traffic tables: the most bytes first, then by PID.
+fn most_first(a: &ProcessTraffic, b: &ProcessTraffic) -> std::cmp::Ordering {
+    b.moved().cmp(&a.moved()).then(a.id.pid.cmp(&b.id.pid))
 }
 
 /// Each process of `table` by PID, with its name.
